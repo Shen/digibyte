@@ -34,51 +34,6 @@ std::vector<unsigned char> SerializeExact(const T& value)
     return {bytes.begin(), bytes.end()};
 }
 
-bool ValidatePersistedProviderSignatureEnvelope(
-    const ProviderAttempt& attempt,
-    std::string& error)
-{
-    if (attempt.provider_signed_at <= 0 ||
-        attempt.provider_signed_at > attempt.retry_until ||
-        attempt.provider_signed_at > attempt.updated_at ||
-        attempt.provider_signed_result.empty() ||
-        !attempt.provider_identity_key.IsFullyValid()) {
-        error = "PAYMASTER_PROVIDER_SIGNED_RESULT_INVALID";
-        return false;
-    }
-    PaymasterResult result;
-    try {
-        SpanReader stream{::PROTOCOL_VERSION,
-                          attempt.provider_signed_result};
-        stream >> result;
-        if (!stream.empty() ||
-            SerializeExact(result) != attempt.provider_signed_result) {
-            throw std::ios_base::failure(
-                "non-canonical provider-signed result");
-        }
-    } catch (const std::ios_base::failure&) {
-        error = "PAYMASTER_PROVIDER_SIGNED_RESULT_INVALID";
-        return false;
-    }
-    if (!ValidatePaymasterResult(
-            result, result.genesis_hash, attempt.provider_id,
-            attempt.commit_key, attempt.provider_identity_key, 1, error) ||
-        result.result_sequence != 1 ||
-        result.status != PaymasterResultStatus::FINAL_COMMITTED ||
-        result.updated_at != attempt.provider_signed_at || !result.txid ||
-        *result.txid != attempt.final_txid ||
-        !result.raw_transaction_hash ||
-        *result.raw_transaction_hash != Hash(attempt.final_transaction) ||
-        !result.final_transaction ||
-        SerializeExact(*result.final_transaction) !=
-            attempt.final_transaction) {
-        if (error.empty()) {
-            error = "PAYMASTER_PROVIDER_SIGNED_RESULT_INVALID";
-        }
-        return false;
-    }
-    return true;
-}
 
 void ClearSignatures(PSBTInput& input)
 {
@@ -195,6 +150,56 @@ bool ToInputRole(ReservationRole role, InputRole& result)
 }
 
 } // namespace
+
+bool DecodeProviderSignedResultEnvelope(
+    const ProviderAttempt& attempt,
+    PaymasterResult& decoded,
+    std::string& error)
+{
+    decoded = {};
+    error.clear();
+    if (attempt.provider_signed_at <= 0 ||
+        attempt.provider_signed_at > attempt.retry_until ||
+        attempt.provider_signed_at > attempt.updated_at ||
+        attempt.provider_signed_result.empty() ||
+        !attempt.provider_identity_key.IsFullyValid()) {
+        error = "PAYMASTER_PROVIDER_SIGNED_RESULT_INVALID";
+        return false;
+    }
+    PaymasterResult result;
+    try {
+        SpanReader stream{::PROTOCOL_VERSION,
+                          attempt.provider_signed_result};
+        stream >> result;
+        if (!stream.empty() ||
+            SerializeExact(result) != attempt.provider_signed_result) {
+            throw std::ios_base::failure(
+                "non-canonical provider-signed result");
+        }
+    } catch (const std::ios_base::failure&) {
+        error = "PAYMASTER_PROVIDER_SIGNED_RESULT_INVALID";
+        return false;
+    }
+    if (!ValidatePaymasterResult(
+            result, result.genesis_hash, attempt.provider_id,
+            attempt.commit_key, attempt.provider_identity_key, 1, error) ||
+        result.result_sequence != 1 ||
+        result.status != PaymasterResultStatus::FINAL_COMMITTED ||
+        result.updated_at != attempt.provider_signed_at || !result.txid ||
+        *result.txid != attempt.final_txid ||
+        !result.raw_transaction_hash ||
+        *result.raw_transaction_hash != Hash(attempt.final_transaction) ||
+        !result.final_transaction ||
+        SerializeExact(*result.final_transaction) !=
+            attempt.final_transaction) {
+        if (error.empty()) {
+            error = "PAYMASTER_PROVIDER_SIGNED_RESULT_INVALID";
+        }
+        return false;
+    }
+    decoded = std::move(result);
+    return true;
+}
 
 bool DecodePaymasterAuthorizationArtifacts(
     const ProviderAttempt& attempt,
@@ -739,11 +744,12 @@ bool ValidateProviderCommitForExecution(
         error = "PAYMASTER_PROVIDER_AUTHORIZATION_VERSION";
         return false;
     }
+    PaymasterResult signed_result;
     const bool exact_persisted_provider_signature =
         attempt.state == AttemptState::PROVIDER_SIGNED &&
         !attempt.final_txid.IsNull() &&
         !attempt.final_transaction.empty() &&
-        ValidatePersistedProviderSignatureEnvelope(attempt, error);
+        DecodeProviderSignedResultEnvelope(attempt, signed_result, error);
     const bool exact_durable_commit_state =
         attempt.state >= AttemptState::FINAL_COMMITTED &&
         attempt.state <= AttemptState::MEMPOOL;

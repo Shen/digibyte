@@ -108,6 +108,9 @@ The persisted quote is authenticated again before acceptance or signing through
 client final validation. It checks the provider signature, canonical encoding
 and exact transaction/template bindings. Current approval and expiry checks
 remain with the caller so intact historical final evidence stays verifiable.
+Saved provider-signed result envelopes use the single domain decoder
+`DecodeProviderSignedResultEnvelope` for store and execution validation.
+
 
 Normal and alternative-recovery client results use scoped inbox leases. Local
 read, preflight or database failures retain the received artifact; acknowledgement

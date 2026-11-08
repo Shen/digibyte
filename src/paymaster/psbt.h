@@ -18,6 +18,7 @@ namespace DigiDollar::Paymaster {
 
 struct PaymentIntent;
 struct PaymasterQuote;
+struct PaymasterResult;
 struct PaymasterQuoteRequest;
 struct PaymasterQuoteResponse;
 struct ValidatedCapacitySnapshot;
@@ -41,6 +42,11 @@ struct CollaborativePSBTTemplate {
     PartiallySignedTransaction psbt;
     std::vector<InputRole> input_roles;
 };
+
+/** Decode exact durable provider-signature evidence without granting a new
+ * signature or requiring a currently unexpired quote. Output is empty on failure. */
+bool DecodeProviderSignedResultEnvelope(
+    const ProviderAttempt& attempt, PaymasterResult& result, std::string& error);
 
 /** Construct the only PSBT shape accepted for a built collaborative transfer.
  * Every input includes its fully resolved creating transaction and explicitly

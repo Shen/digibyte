@@ -139,9 +139,6 @@ std::vector<unsigned char> CanonicalBytes(const T& value)
     return {bytes.begin(), bytes.end()};
 }
 
-bool DecodeProviderSignedResultEnvelope(const ProviderAttempt& attempt,
-                                        PaymasterResult& result,
-                                        std::string& error);
 bool SameAlternativeRecoveryRecord(const AlternativeRecoveryRecord& lhs,
                                    const AlternativeRecoveryRecord& rhs);
 bool SameAlternativeRecoveryProgression(const AlternativeRecoveryRecord& current,

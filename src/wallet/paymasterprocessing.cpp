@@ -206,7 +206,7 @@ std::optional<std::string> GetPermanentProviderSubmitRejection(
         }
     } else if (attempt.state == AttemptState::PROVIDER_SIGNED) {
         PaymasterResult signed_result;
-        if (!paymaster_store::internal::DecodeProviderSignedResultEnvelope(attempt, signed_result, error) ||
+        if (!DigiDollar::Paymaster::DecodeProviderSignedResultEnvelope(attempt, signed_result, error) ||
             signed_result.genesis_hash != Params().GenesisBlock().GetHash() ||
             !ValidateFinalCollaborativeTransaction(*signed_result.final_transaction,
                 *signed_result.txid, *signed_result.raw_transaction_hash, trusted, error)) {

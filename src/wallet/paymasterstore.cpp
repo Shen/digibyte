@@ -615,52 +615,6 @@ bool SameCommit(const ProviderCommitRecord& lhs, const ProviderCommitRecord& rhs
            lhs.retry_until == rhs.retry_until;
 }
 
-bool DecodeProviderSignedResultEnvelope(const ProviderAttempt& attempt,
-                                        PaymasterResult& result,
-                                        std::string& error)
-{
-    result = {};
-    if (attempt.provider_signed_at <= 0 ||
-        attempt.provider_signed_at > attempt.retry_until ||
-        attempt.provider_signed_at > attempt.updated_at ||
-        attempt.provider_signed_result.empty() ||
-        !attempt.provider_identity_key.IsFullyValid()) {
-        error = "PAYMASTER_PROVIDER_SIGNED_RESULT_INVALID";
-        return false;
-    }
-    try {
-        SpanReader stream{::PROTOCOL_VERSION,
-                          attempt.provider_signed_result};
-        stream >> result;
-        if (!stream.empty() ||
-            CanonicalBytes(result) != attempt.provider_signed_result) {
-            throw std::ios_base::failure(
-                "non-canonical provider-signed result");
-        }
-    } catch (const std::ios_base::failure&) {
-        error = "PAYMASTER_PROVIDER_SIGNED_RESULT_INVALID";
-        return false;
-    }
-    if (!ValidatePaymasterResult(
-            result, result.genesis_hash, attempt.provider_id,
-            attempt.commit_key, attempt.provider_identity_key, 1, error) ||
-        result.result_sequence != 1 ||
-        result.status != PaymasterResultStatus::FINAL_COMMITTED ||
-        result.updated_at != attempt.provider_signed_at || !result.txid ||
-        *result.txid != attempt.final_txid ||
-        !result.raw_transaction_hash ||
-        *result.raw_transaction_hash != Hash(attempt.final_transaction) ||
-        !result.final_transaction ||
-        CanonicalBytes(*result.final_transaction) !=
-            attempt.final_transaction) {
-        if (error.empty()) {
-            error = "PAYMASTER_PROVIDER_SIGNED_RESULT_INVALID";
-        }
-        return false;
-    }
-    error.clear();
-    return true;
-}
 
 bool SameAlternativeRecoveryRecord(const AlternativeRecoveryRecord& lhs,
                                    const AlternativeRecoveryRecord& rhs)

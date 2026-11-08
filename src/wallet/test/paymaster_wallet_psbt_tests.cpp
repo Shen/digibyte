@@ -1005,6 +1005,41 @@ void CheckProviderExecutionFirewall(WalletTestingSetup& fixture, uint16_t versio
     BOOST_CHECK(CTransaction{validated_final}.GetWitnessHash() ==
                 final.GetWitnessHash());
 
+    ProviderAttempt saved_signature{attempt};
+    saved_signature.state = AttemptState::PROVIDER_SIGNED;
+    saved_signature.provider_signed_at = now + 1;
+    saved_signature.updated_at = now + 2;
+    PaymasterResult envelope;
+    envelope.genesis_hash = quote_request.intent.genesis_hash;
+    envelope.provider_id = attempt.provider_id;
+    envelope.commit_key = attempt.commit_key;
+    envelope.result_sequence = 1;
+    envelope.status = PaymasterResultStatus::FINAL_COMMITTED;
+    envelope.txid = final.GetHash();
+    envelope.raw_transaction_hash = Hash(final_bytes);
+    envelope.final_transaction = final_transaction;
+    envelope.updated_at = saved_signature.provider_signed_at;
+    envelope.identity_signature.resize(64);
+    BOOST_REQUIRE(key.SignSchnorr(GetPaymasterResultSignatureHash(envelope),
+        envelope.identity_signature, nullptr, uint256{}));
+    saved_signature.provider_signed_result = SerializePaymasterTestArtifact(envelope);
+    PaymasterResult decoded;
+    error = "stale error";
+    BOOST_REQUIRE_MESSAGE(DecodeProviderSignedResultEnvelope(saved_signature, decoded, error), error);
+    BOOST_CHECK(error.empty());
+    BOOST_CHECK(SerializePaymasterTestArtifact(decoded) == SerializePaymasterTestArtifact(envelope));
+    for (int mutation = 0; mutation < 4; ++mutation) {
+        auto changed = saved_signature;
+        if (mutation == 0) changed.provider_signed_result.push_back(0);
+        if (mutation == 1) changed.provider_signed_result.back() ^= 1;
+        if (mutation == 2) ++changed.provider_signed_at;
+        if (mutation == 3) changed.final_transaction.back() ^= 1;
+        decoded = envelope;
+        BOOST_CHECK(!DecodeProviderSignedResultEnvelope(changed, decoded, error));
+        BOOST_CHECK(!error.empty());
+        BOOST_CHECK(SerializePaymasterTestArtifact(decoded) == SerializePaymasterTestArtifact(PaymasterResult{}));
+    }
+
     ProviderAttempt trailing_request{attempt};
     trailing_request.quote_request.push_back(0);
     BOOST_CHECK(!ValidateProviderCommitForExecution(

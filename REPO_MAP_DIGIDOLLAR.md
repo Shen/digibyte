@@ -616,7 +616,7 @@ API: [RPC groups](doc/digidollar-paymaster.md) and [client contract](doc/digidol
 | Source | Responsibility |
 |---|---|
 | `src/paymaster/types.*`, `protocol.*`, `wire.*` | Records, commitments and bounded serialization. |
-| `src/paymaster/txbuilder.*`, `psbt.*` | Collaborative transfer and exact manifest checks. `BuildQuoteTransferParameters` in `protocol.*` shares input/output arrangement between provider and trusted client-template construction. |
+| `src/paymaster/txbuilder.*`, `psbt.*` | Collaborative transfer, exact manifest checks and the shared persisted provider-signature envelope decoder. `BuildQuoteTransferParameters` in `protocol.*` shares input/output arrangement between provider and trusted client-template construction. |
 | `src/paymaster/provider.*`, `provider_policy.*`, `reservation.*`, `sponsorship.*` | Admission, policies, slots and budgets. |
 | `src/paymaster/directory.*`, `validation.*`, `client.*`, `reputation.*`, `recovery.*` | Verified discovery, selection, retries and recovery. |
 | `src/paymaster/manager.*`, `transport.h` | Dedicated Direct channels, authenticated admission, shared connection quotas. |
