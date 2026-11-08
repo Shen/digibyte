@@ -1663,6 +1663,34 @@ bool SetPaymasterClientSafetyPolicy(CWallet& wallet,
     return true;
 }
 
+bool CaptureClientFeeBudget(const CWallet& wallet, int64_t now,
+                            ClientFeeBudgetSnapshot& snapshot, std::string& error)
+{
+    LOCK(wallet.cs_wallet);
+    snapshot = {};
+    error.clear();
+    WalletBatch batch{wallet.GetDatabase()};
+    ClientFeeBudgetSnapshot result;
+    ClientFeeLedger ledger;
+    const auto policy_status = batch.ReadPaymasterClientSafetyPolicyWithStatus(result.policy);
+    const auto ledger_status = batch.ReadPaymasterClientFeeLedgerWithStatus(ledger);
+    const auto readable = [](DatabaseReadStatus status) {
+        return status == DatabaseReadStatus::FOUND || status == DatabaseReadStatus::NOT_FOUND;
+    };
+    if (!readable(policy_status) || !readable(ledger_status)) {
+        error = policy_status == DatabaseReadStatus::UNSUPPORTED_VERSION || ledger_status == DatabaseReadStatus::UNSUPPORTED_VERSION
+            ? "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION" : "PAYMASTER_INVALID_CLIENT_SAFETY_STATE";
+        return false;
+    }
+    result.have_policy = policy_status == DatabaseReadStatus::FOUND;
+    result.have_ledger = ledger_status == DatabaseReadStatus::FOUND;
+    if (result.have_ledger) result.accounting_time_high_water = ledger.accounting_time_high_water;
+    if (result.have_policy && result.have_ledger &&
+        !ObserveClientFeeBudget(ledger, result.policy, now, result.budget, error)) return false;
+    snapshot = std::move(result);
+    return true;
+}
+
 bool GetPaymasterClientSafetyPolicy(const CWallet& wallet,
                                     ClientSafetyPolicy& policy)
 {

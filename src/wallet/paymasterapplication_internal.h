@@ -75,8 +75,6 @@ using DigiDollar::Paymaster::CanonicalClientRequestHash;
 uint256 CanonicalClientRequestHash(
     const ClientPaymentOptions& input, DigiDollar::Paymaster::DDCents order_amount,
     const std::vector<COutPoint>& inputs);
-DigiDollar::Paymaster::DDCents PreviewMaximumServiceFee(CWallet& wallet, DigiDollar::Paymaster::DDCents requested_limit,
-                                                      int64_t now, std::string& error);
 void RecordUnavailableClientProvider(PaymasterStore& store, const DigiDollar::Paymaster::PaymentSession& session,
                                      const DigiDollar::Paymaster::ProviderAttempt& attempt, int64_t now);
 using FinalTransactionPresence = ExactFinalTransactionPresence;

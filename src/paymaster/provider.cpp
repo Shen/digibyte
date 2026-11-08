@@ -44,6 +44,15 @@ bool AddAmount(int64_t& total, int64_t value)
     return true;
 }
 
+bool CheckClientFeeAmount(DDCents fee, DDCents maximum, std::string& error)
+{
+    if (fee.value < 0 || fee.value > maximum.value) {
+        error = "PAYMASTER_CLIENT_FEE_LIMIT_EXCEEDED";
+        return false;
+    }
+    return true;
+}
+
 template <typename T>
 uint256 CanonicalObjectHash(const T& object)
 {
@@ -153,11 +162,11 @@ bool CheckClientServiceFee(const ClientSafetyPolicy& policy, DDCents recipient_a
                            DDCents service_fee, std::string& error)
 {
     if (!ValidateClientSafetyPolicy(policy, error)) return false;
-    if (recipient_amount.value <= 0 || recipient_amount.value > std::numeric_limits<int64_t>::max() / 10000 ||
-        service_fee.value < 0 || service_fee.value > policy.maximum_service_fee_per_transaction.value) {
+    if (recipient_amount.value <= 0 || recipient_amount.value > std::numeric_limits<int64_t>::max() / 10000) {
         error = "PAYMASTER_CLIENT_FEE_LIMIT_EXCEEDED";
         return false;
     }
+    if (!CheckClientFeeAmount(service_fee, policy.maximum_service_fee_per_transaction, error)) return false;
     // Bounds above keep both products within int64_t. Do not round the allowance
     // up: a one-cent fee on one DD is 1%, even if advertised as a lower rate.
     if (policy.maximum_service_fee_bps >= 0 &&
@@ -1076,6 +1085,61 @@ bool ValidateProviderBudgetReservationBinding(
     return true;
 }
 
+bool ObserveClientFeeBudget(const ClientFeeLedger& ledger, const ClientSafetyPolicy& policy,
+                            int64_t now, ClientFeeBudget& budget, std::string& error)
+{
+    budget = {};
+    if (!ValidateClientFeeLedger(ledger, error) || !ValidateClientSafetyPolicy(policy, error)) return false;
+    if (now <= 0) { error = "PAYMASTER_INVALID_TIME"; return false; }
+    ClientFeeBudget result;
+    result.effective_now = EffectiveAccountingTime(now, ledger.accounting_time_high_water);
+    result.maximum_per_transaction = policy.maximum_service_fee_per_transaction;
+    for (const auto& reservation : ledger.reservations) {
+        const bool recent = !TimeDeltaExceeds(result.effective_now, reservation.updated_at, SAFETY_DAY_SECONDS);
+        if (reservation.state == BudgetReservationState::RESERVED) {
+            ++result.active_reservations;
+            if (!AddAmount(result.reserved.value, reservation.service_fee.value)) {
+                error = "PAYMASTER_CLIENT_FEE_LIMIT_EXCEEDED";
+                return false;
+            }
+        } else if (reservation.state == BudgetReservationState::SPENT && recent) {
+            if (!AddAmount(result.spent_last_day.value, reservation.service_fee.value)) {
+                error = "PAYMASTER_CLIENT_FEE_LIMIT_EXCEEDED";
+                return false;
+            }
+        }
+        if (reservation.state == BudgetReservationState::RESERVED || recent) ++result.retained_reservations;
+    }
+    int64_t exposure{result.reserved.value};
+    if (!AddAmount(exposure, result.spent_last_day.value)) {
+        error = "PAYMASTER_CLIENT_FEE_LIMIT_EXCEEDED";
+        return false;
+    }
+    result.over_daily_limit = exposure > policy.maximum_service_fee_per_day.value;
+    result.available_today = DDCents{result.over_daily_limit ? 0 : policy.maximum_service_fee_per_day.value - exposure};
+    result.maximum_new_fee = DDCents{std::min(result.maximum_per_transaction.value, result.available_today.value)};
+    result.ledger_full = result.retained_reservations >= MAX_BUDGET_LEDGER_ENTRIES;
+    budget = result;
+    error.clear();
+    return true;
+}
+
+bool CheckNewClientFeeBudget(const ClientFeeBudget& budget, DDCents service_fee, std::string& error)
+{
+    error.clear();
+    if (budget.effective_now <= 0) {
+        error = "PAYMASTER_CLIENT_FEE_LIMIT_EXCEEDED";
+        return false;
+    }
+    if (!CheckClientFeeAmount(service_fee, budget.maximum_per_transaction, error)) return false;
+    if (budget.over_daily_limit || service_fee.value > budget.available_today.value) {
+        error = "PAYMASTER_CLIENT_DAILY_FEE_LIMIT_EXCEEDED";
+        return false;
+    }
+    if (budget.ledger_full) { error = "PAYMASTER_CLIENT_FEE_LEDGER_FULL"; return false; }
+    return true;
+}
+
 bool ReserveClientFee(ClientFeeLedger& ledger,
                       const ClientSafetyPolicy& policy,
                       const uint256& commit_key,
@@ -1090,11 +1154,11 @@ bool ReserveClientFee(ClientFeeLedger& ledger,
         error = validation_error;
         return false;
     }
-    if (commit_key.IsNull() || now <= 0 || service_fee.value < 0 ||
-        service_fee.value > policy.maximum_service_fee_per_transaction.value) {
+    if (commit_key.IsNull() || now <= 0) {
         error = "PAYMASTER_CLIENT_FEE_LIMIT_EXCEEDED";
         return false;
     }
+    if (!CheckClientFeeAmount(service_fee, policy.maximum_service_fee_per_transaction, error)) return false;
     for (const ClientFeeReservation& reservation : ledger.reservations) {
         if (reservation.commit_key != commit_key) continue;
         if (reservation.service_fee == service_fee &&
@@ -1102,36 +1166,10 @@ bool ReserveClientFee(ClientFeeLedger& ledger,
         error = "PAYMASTER_CLIENT_FEE_RESERVATION_CONFLICT";
         return false;
     }
-    const int64_t effective_now = EffectiveAccountingTime(now, ledger.accounting_time_high_water);
-    int64_t projected{service_fee.value};
-    for (const ClientFeeReservation& reservation : ledger.reservations) {
-        // Open authorizations remain liabilities regardless of age. Only a
-        // completed charge can age out of the rolling daily window.
-        if (reservation.state == BudgetReservationState::RELEASED ||
-            (reservation.state == BudgetReservationState::SPENT &&
-             TimeDeltaExceeds(effective_now, reservation.updated_at, SAFETY_DAY_SECONDS))) {
-            continue;
-        }
-        if (!AddAmount(projected, reservation.service_fee.value)) {
-            error = "PAYMASTER_CLIENT_FEE_LIMIT_EXCEEDED";
-            return false;
-        }
-    }
-    if (projected > policy.maximum_service_fee_per_day.value) {
-        error = "PAYMASTER_CLIENT_DAILY_FEE_LIMIT_EXCEEDED";
-        return false;
-    }
-    const size_t retained_reservations = std::count_if(
-        ledger.reservations.begin(), ledger.reservations.end(),
-        [effective_now](const ClientFeeReservation& reservation) {
-            return reservation.state == BudgetReservationState::RESERVED ||
-                   !TimeDeltaExceeds(effective_now, reservation.updated_at,
-                                     SAFETY_DAY_SECONDS);
-        });
-    if (retained_reservations >= MAX_BUDGET_LEDGER_ENTRIES) {
-        error = "PAYMASTER_CLIENT_FEE_LEDGER_FULL";
-        return false;
-    }
+    ClientFeeBudget budget;
+    if (!ObserveClientFeeBudget(ledger, policy, now, budget, error) ||
+        !CheckNewClientFeeBudget(budget, service_fee, error)) return false;
+    const int64_t effective_now = budget.effective_now;
     ledger.accounting_time_high_water = effective_now;
     PruneClientLedger(ledger, effective_now);
     ledger.reservations.push_back({ClientFeeReservation::CURRENT_VERSION, commit_key,

@@ -248,6 +248,12 @@ fee-rejected entries with `eligible=false`, `fee_limit_reason` (`percentage`
 or `absolute_or_daily`), `maximum_service_fee_bps` and
 `available_service_fee_cents`. An unconfigured legacy percentage limit is -1.
 This diagnostic does not bypass amount, privacy or announcement-validity checks.
+Offer listing, automatic selection, safety status and new fee reservations share
+one wallet-locked budget observation. Open reservations remain liabilities beyond
+one day; spent fees use the ledger's monotonic accounting clock. If a lowered
+daily limit is below existing exposure, even a new zero-fee offer is ineligible.
+Exactly at the limit, zero-fee admission remains possible. Exact historical
+reservation replay has its own idempotency checks and creates no new allowance.
 
 `preferred_provider_id` and `preferred_offer_id` bind a public offer as a pair.
 An unavailable selection fails with `PAYMASTER_SELECTED_OFFER_UNAVAILABLE`;

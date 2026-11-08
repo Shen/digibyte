@@ -1684,6 +1684,63 @@ BOOST_AUTO_TEST_CASE(client_fee_budget_enforces_limits_and_idempotent_transition
     BOOST_CHECK_EQUAL(ledger.accounting_time_high_water, high_water_before_failed_spend);
 }
 
+BOOST_AUTO_TEST_CASE(client_fee_budget_observation_matches_new_reservation)
+{
+    ClientSafetyPolicy policy;
+    policy.maximum_service_fee_per_transaction = DDCents{50};
+    policy.maximum_service_fee_per_day = DDCents{100};
+    policy.updated_at = 1000;
+    ClientFeeLedger ledger = ClientLedger();
+    std::string error;
+    BOOST_REQUIRE(ReserveClientFee(ledger, policy, uint256S("01"), DDCents{50}, 1000, error));
+    BOOST_REQUIRE(SpendClientFee(ledger, uint256S("01"), 1001, error));
+    BOOST_REQUIRE(ReserveClientFee(ledger, policy, uint256S("02"), DDCents{50}, 1002, error));
+    // Lowering a policy never erases old liability, even for a free offer.
+    for (const int64_t daily : {49, 99, 100, 101, 150}) {
+        policy.maximum_service_fee_per_day = DDCents{daily};
+        policy.maximum_service_fee_per_transaction = DDCents{std::min<int64_t>(50, daily)};
+        for (const int64_t now : {1000, 1003, 100000}) {
+            ClientFeeBudget budget;
+            BOOST_REQUIRE_MESSAGE(ObserveClientFeeBudget(ledger, policy, now, budget, error), error);
+            BOOST_CHECK_EQUAL(budget.effective_now, std::max<int64_t>(1002, now));
+            BOOST_CHECK_EQUAL(budget.reserved.value, 50);
+            for (const int64_t fee : {0, 1, 49, 50, 51}) {
+                std::string observed_error, admitted_error;
+                const bool observed = CheckNewClientFeeBudget(budget, DDCents{fee}, observed_error);
+                auto candidate = ledger;
+                const bool admitted = ReserveClientFee(candidate, policy, uint256S("03"), DDCents{fee}, now, admitted_error);
+                BOOST_CHECK_EQUAL(observed, admitted);
+                BOOST_CHECK_EQUAL(observed_error, admitted_error);
+            }
+        }
+    }
+    policy.maximum_service_fee_per_transaction = DDCents{50};
+    policy.maximum_service_fee_per_day = DDCents{50};
+    // Historical exact replay is separate from new admission.
+    BOOST_CHECK(ReserveClientFee(ledger, policy, uint256S("02"), DDCents{50}, 1003, error));
+    ClientFeeBudget budget;
+    BOOST_REQUIRE(ObserveClientFeeBudget(ledger, policy, 1003, budget, error));
+    BOOST_CHECK(budget.over_daily_limit);
+    BOOST_CHECK(!CheckNewClientFeeBudget(budget, DDCents{0}, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_CLIENT_DAILY_FEE_LIMIT_EXCEEDED");
+    // Recent released records still occupy bounded journal space. Aging them
+    // out restores new admission; observation itself never prunes the ledger.
+    ledger.reservations.clear();
+    for (size_t i{0}; i < 8192; ++i) {
+        ledger.reservations.push_back({ClientFeeReservation::CURRENT_VERSION,
+            uint256S("10" + std::to_string(i)), DDCents{0}, BudgetReservationState::RELEASED, 1000, 1002});
+    }
+    BOOST_REQUIRE(ObserveClientFeeBudget(ledger, policy, 1003, budget, error));
+    BOOST_CHECK(budget.ledger_full);
+    BOOST_CHECK(!CheckNewClientFeeBudget(budget, DDCents{0}, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_CLIENT_FEE_LEDGER_FULL");
+    BOOST_REQUIRE(ObserveClientFeeBudget(ledger, policy, 100000, budget, error));
+    BOOST_CHECK(!budget.ledger_full);
+    BOOST_CHECK(CheckNewClientFeeBudget(budget, DDCents{0}, error));
+    BOOST_CHECK_EQUAL(ledger.reservations.size(), 8192U);
+    BOOST_CHECK(!ObserveClientFeeBudget(ledger, policy, 0, budget, error));
+}
+
 BOOST_AUTO_TEST_CASE(client_percentage_fee_limits_use_actual_amounts_and_preserve_legacy_encoding)
 {
     ClientSafetyPolicy policy;

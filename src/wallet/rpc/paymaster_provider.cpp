@@ -298,37 +298,19 @@ RPCHelpMan getpaymasterclientsafetystatus()
             using namespace DigiDollar::Paymaster;
             std::shared_ptr<CWallet> wallet = GetWalletForJSONRPCRequest(request);
             if (!wallet) return UniValue::VNULL;
-            ClientSafetyPolicy policy;
-            ClientFeeLedger ledger;
-            const bool have_policy = GetPaymasterClientSafetyPolicy(*wallet, policy);
-            const bool have_ledger = GetPaymasterClientFeeLedger(*wallet, ledger);
+            ClientFeeBudgetSnapshot safety;
+            std::string error;
+            if (!CaptureClientFeeBudget(*wallet, GetTime(), safety, error)) throw JSONRPCError(RPC_WALLET_ERROR, error);
             UniValue result{UniValue::VOBJ};
-            result.pushKV("configured", have_policy && have_ledger);
-            result.pushKV("ledger_present", have_ledger);
-            if (have_policy) result.pushKV("policy", ClientSafetyPolicyToJSON(policy));
-            if (have_ledger) {
-                const int64_t effective_now = std::max(GetTime(), ledger.accounting_time_high_water);
-                int64_t reserved{0};
-                int64_t spent_day{0};
-                uint64_t active{0};
-                for (const ClientFeeReservation& reservation : ledger.reservations) {
-                    if (reservation.state == BudgetReservationState::RESERVED) {
-                        ++active;
-                        reserved += reservation.service_fee.value;
-                    } else if (reservation.state == BudgetReservationState::SPENT &&
-                               !TimeDeltaExceeds(effective_now, reservation.updated_at, 24 * 60 * 60)) {
-                        spent_day += reservation.service_fee.value;
-                    }
-                }
-                result.pushKV("accounting_time_high_water", ledger.accounting_time_high_water);
-                result.pushKV("active_reservations", active);
-                result.pushKV("reserved_service_fee_cents", reserved);
-                result.pushKV("spent_service_fee_last_day_cents", spent_day);
-                if (have_policy) {
-                    result.pushKV("available_service_fee_today_cents",
-                                  std::max<int64_t>(0, policy.maximum_service_fee_per_day.value -
-                                                           reserved - spent_day));
-                }
+            result.pushKV("configured", safety.have_policy && safety.have_ledger);
+            result.pushKV("ledger_present", safety.have_ledger);
+            if (safety.have_policy) result.pushKV("policy", ClientSafetyPolicyToJSON(safety.policy));
+            if (safety.have_policy && safety.have_ledger) {
+                result.pushKV("accounting_time_high_water", safety.accounting_time_high_water);
+                result.pushKV("active_reservations", uint64_t(safety.budget.active_reservations));
+                result.pushKV("reserved_service_fee_cents", safety.budget.reserved.value);
+                result.pushKV("spent_service_fee_last_day_cents", safety.budget.spent_last_day.value);
+                result.pushKV("available_service_fee_today_cents", safety.budget.available_today.value);
             }
             return result;
         }),

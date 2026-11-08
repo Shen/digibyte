@@ -8,12 +8,14 @@
 #include <wallet/context.h>
 #include <wallet/digidollarwallet.h>
 #include <wallet/rpc/paymaster_internal.h>
+#include <wallet/rpc/paymaster.h>
 #include <base58.h>
 #include <chainparams.h>
 #include <consensus/validation.h>
 #include <hash.h>
 #include <index/txindex.h>
 #include <key.h>
+#include <netbase.h>
 #include <paymaster/directory.h>
 #include <script/standard.h>
 #include <streams.h>
@@ -42,6 +44,87 @@ using namespace paymaster_app;
 using namespace paymaster_rpc::internal;
 
 BOOST_FIXTURE_TEST_SUITE(paymaster_application_tests, BasicTestingSetup)
+
+BOOST_FIXTURE_TEST_CASE(client_fee_observation_and_rpc_reject_free_offer_above_daily_limit, WalletTestingSetup)
+{
+    const int64_t now = GetTime();
+    ClientSafetyPolicy policy;
+    policy.maximum_service_fee_per_transaction = DDCents{100};
+    policy.maximum_service_fee_per_day = DDCents{100};
+    policy.updated_at = now;
+    std::string error;
+    ClientFeeBudgetSnapshot absent;
+    BOOST_REQUIRE(CaptureClientFeeBudget(m_wallet, now, absent, error));
+    BOOST_CHECK(!absent.have_policy && !absent.have_ledger);
+    BOOST_REQUIRE(SetPaymasterClientSafetyPolicy(m_wallet, policy, now, error));
+    WalletBatch batch{m_wallet.GetDatabase()};
+    ClientFeeLedger ledger;
+    BOOST_REQUIRE(batch.ReadPaymasterClientFeeLedger(ledger));
+    BOOST_REQUIRE(ReserveClientFee(ledger, policy, uint256S("ab01"), DDCents{60}, now, error));
+    BOOST_REQUIRE(batch.WritePaymasterClientFeeLedger(ledger));
+    Manager manager{true};
+    CKey key;
+    key.MakeNewKey(true);
+    Announcement announcement;
+    announcement.genesis_hash = Params().GenesisBlock().GetHash();
+    announcement.identity_key = XOnlyPubKey{key.GetPubKey()};
+    announcement.display_name = "Free offer budget test";
+    announcement.sequence = 1;
+    announcement.created_at = now;
+    announcement.expires_at = now + ANNOUNCEMENT_TTL_SECONDS;
+    announcement.endpoint = LookupNumeric("8.8.8.8", 12024);
+    announcement.offers = {{uint256S("ab02"), uint256S("ab03"), FundingModel::SPONSORED,
+        SponsorshipScope::PUBLIC, 0, DDCents{100}, DDCents{100000}}};
+    for (uint32_t i{0}; i < REQUIRED_ADMISSION_SLOTS; ++i) {
+        AdmissionSlotProof slot;
+        slot.dgb_outpoint = COutPoint{uint256S("ab04"), i};
+        slot.dgb_value = DGBSatoshis{MIN_ADMISSION_DGB_SATOSHIS};
+        slot.reference_block = uint256::ONE;
+        slot.expires_at = announcement.expires_at;
+        slot.dgb_control_signature.resize(64);
+        announcement.admission_slots.push_back(slot);
+    }
+    announcement.identity_signature.resize(64);
+    BOOST_REQUIRE(key.SignSchnorr(GetAnnouncementSignatureHash(announcement), announcement.identity_signature, nullptr, uint256{}));
+    BOOST_REQUIRE_MESSAGE(ValidateAnnouncementEnvelope(announcement, announcement.genesis_hash, now, error), error);
+    BOOST_REQUIRE(manager.GetDirectory().AddValidated(announcement, now));
+    WalletContext context;
+    context.chain = m_node.chain.get();
+    context.args = m_node.args;
+    context.paymaster = &manager;
+    context.wallets.emplace_back(&m_wallet, [](CWallet*) {});
+    JSONRPCRequest request;
+    request.context = &context;
+    policy.maximum_service_fee_per_transaction = DDCents{50};
+    for (const int64_t daily : {50, 60}) {
+        policy.maximum_service_fee_per_day = DDCents{daily};
+        BOOST_REQUIRE(SetPaymasterClientSafetyPolicy(m_wallet, policy, now, error));
+        ClientFeeBudgetSnapshot snapshot;
+        BOOST_REQUIRE(CaptureClientFeeBudget(m_wallet, now, snapshot, error));
+        BOOST_CHECK_EQUAL(snapshot.budget.reserved.value, 60);
+        BOOST_CHECK_EQUAL(snapshot.budget.over_daily_limit, daily == 50);
+        request.params = UniValue{UniValue::VARR};
+        request.params.push_back(1000);
+        UniValue options{UniValue::VOBJ};
+        options.pushKV("include_fee_rejected", true);
+        request.params.push_back(options);
+        const auto offers = getpaymasteroffers().HandleRequest(request);
+        BOOST_REQUIRE_EQUAL(offers.size(), 1U);
+        BOOST_CHECK_EQUAL(offers[0].find_value("eligible").get_bool(), daily == 60);
+        request.params = UniValue{UniValue::VARR};
+        const auto status = getpaymasterclientsafetystatus().HandleRequest(request);
+        BOOST_CHECK_EQUAL(status.find_value("reserved_service_fee_cents").getInt<int>(), 60);
+        BOOST_CHECK_EQUAL(status.find_value("available_service_fee_today_cents").getInt<int>(), 0);
+    }
+    BOOST_REQUIRE(m_wallet.GetDatabase().MakeBatch()->Write(DBKeys::PAYMASTER_CLIENT_FEES, uint16_t{65535}));
+    const auto corrupt_records = GetMockableDatabase(m_wallet).m_records;
+    ClientFeeBudgetSnapshot unavailable;
+    BOOST_CHECK(!CaptureClientFeeBudget(m_wallet, now, unavailable, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION");
+    BOOST_CHECK(!unavailable.have_policy && !unavailable.have_ledger);
+    BOOST_CHECK_THROW(getpaymasterclientsafetystatus().HandleRequest(request), UniValue);
+    BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == corrupt_records);
+}
 
 BOOST_AUTO_TEST_CASE(provider_pending_setup_continues_admitted_work_only)
 {

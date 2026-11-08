@@ -917,6 +917,23 @@ ProviderSafetyStatus EvaluateProviderCapacityContinuationPreflight(
     DGBSatoshis proposed_network_fee,
     int64_t now,
     const uint256& netgroup_bucket);
+/** Transient observation; never persisted and never sufficient signing authority. */
+struct ClientFeeBudget {
+    int64_t effective_now{0};
+    DDCents reserved;
+    DDCents spent_last_day;
+    DDCents available_today;
+    DDCents maximum_per_transaction;
+    DDCents maximum_new_fee;
+    size_t active_reservations{0};
+    size_t retained_reservations{0};
+    bool over_daily_limit{false};
+    bool ledger_full{false};
+};
+bool ObserveClientFeeBudget(const ClientFeeLedger& ledger, const ClientSafetyPolicy& policy,
+                            int64_t now, ClientFeeBudget& budget, std::string& error);
+/** New reservations only. Exact existing commit-key replay is handled separately. */
+bool CheckNewClientFeeBudget(const ClientFeeBudget& budget, DDCents service_fee, std::string& error);
 bool ReserveClientFee(ClientFeeLedger& ledger,
                       const ClientSafetyPolicy& policy,
                       const uint256& commit_key,

@@ -206,45 +206,6 @@ bool SelectCreatedClientPaymentInputs(
     return true;
 }
 
-DDCents PreviewMaximumServiceFee(CWallet& wallet, DDCents requested_limit,
-                                int64_t now, std::string& error)
-{
-    ClientSafetyPolicy policy;
-    if (!GetPaymasterClientSafetyPolicy(wallet, policy)) {
-        error = "PAYMASTER_CLIENT_SAFETY_POLICY_REQUIRED";
-        return DDCents{-1};
-    }
-    if (!ValidateClientSafetyPolicy(policy, error)) return DDCents{-1};
-    if (requested_limit.value < 0 || requested_limit.value > MAX_DD_OUTPUT_CENTS) {
-        error = "PAYMASTER_CLIENT_FEE_LIMIT_INVALID";
-        return DDCents{-1};
-    }
-
-    ClientFeeLedger ledger;
-    if (!GetPaymasterClientFeeLedger(wallet, ledger)) {
-        error = "PAYMASTER_CLIENT_FEE_LEDGER_REQUIRED";
-        return DDCents{-1};
-    }
-
-    int64_t available_today = policy.maximum_service_fee_per_day.value;
-    const int64_t effective_now = std::max(now, ledger.accounting_time_high_water);
-    for (const ClientFeeReservation& reservation : ledger.reservations) {
-        const bool counts_against_budget =
-            reservation.state == BudgetReservationState::RESERVED ||
-            (reservation.state == BudgetReservationState::SPENT &&
-             !TimeDeltaExceeds(effective_now, reservation.updated_at, 24 * 60 * 60));
-        if (!counts_against_budget || reservation.service_fee.value <= 0) continue;
-        available_today = reservation.service_fee.value >= available_today
-                              ? 0
-                              : available_today - reservation.service_fee.value;
-    }
-
-    error.clear();
-    return DDCents{std::min({requested_limit.value,
-                             policy.maximum_service_fee_per_transaction.value,
-                             available_today})};
-}
-
 // Only a failed provider contact, before transaction authorization, reaches
 // this helper. User cancellation, locked wallets and local connection limits
 // must not produce negative provider history.
@@ -1913,15 +1874,17 @@ void SelectAutomaticPaymentOffer(AutomaticPaymentOperation& operation)
                   reputation, now, error, Params().GetChainType() == ChainType::REGTEST);
         if (!error.empty()) throw ApplicationError(ErrorKind::INVALID_INPUT, error);
     }
-    ClientSafetyPolicy selection_policy;
-    if (!GetPaymasterClientSafetyPolicy(*wallet, selection_policy)) {
+    ClientFeeBudgetSnapshot safety;
+    if (!CaptureClientFeeBudget(*wallet, now, safety, error)) throw ApplicationError(ErrorKind::WALLET, error);
+    if (!safety.have_policy || !safety.have_ledger) {
         throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_CLIENT_SAFETY_POLICY_REQUIRED");
     }
     std::string fee_error;
     candidates.erase(std::remove_if(candidates.begin(), candidates.end(),
         [&](const OfferCandidate& candidate) {
             std::string candidate_error;
-            if (CheckClientServiceFee(selection_policy, candidate.payment, candidate.service_fee, candidate_error)) return false;
+            if (CheckClientServiceFee(safety.policy, candidate.payment, candidate.service_fee, candidate_error) &&
+                CheckNewClientFeeBudget(safety.budget, candidate.service_fee, candidate_error)) return false;
             fee_error = candidate_error;
             return true;
         }), candidates.end());

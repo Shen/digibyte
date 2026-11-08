@@ -196,6 +196,16 @@ bool SetPaymasterClientSafetyPolicy(
     int64_t now,
     std::string& error);
 
+struct ClientFeeBudgetSnapshot {
+    bool have_policy{false};
+    bool have_ledger{false};
+    int64_t accounting_time_high_water{0};
+    DigiDollar::Paymaster::ClientSafetyPolicy policy;
+    DigiDollar::Paymaster::ClientFeeBudget budget;
+};
+/** One wallet-locked policy/ledger observation. Absence is distinct from a read error. */
+bool CaptureClientFeeBudget(const CWallet& wallet, int64_t now,
+                            ClientFeeBudgetSnapshot& snapshot, std::string& error);
 bool GetPaymasterClientSafetyPolicy(
     const CWallet& wallet,
     DigiDollar::Paymaster::ClientSafetyPolicy& policy);

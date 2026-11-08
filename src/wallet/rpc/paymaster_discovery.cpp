@@ -188,11 +188,13 @@ RPCHelpMan getpaymasteroffers()
                     }
                 }
             }
-            const DDCents maximum_service_fee = PreviewMaximumServiceFee(
-                *wallet, DDCents{requested_fee_limit}, now, error);
-            if (maximum_service_fee.value < 0) {
-                throw JSONRPCError(RPC_WALLET_ERROR, error);
-            }
+            ClientFeeBudgetSnapshot safety;
+            if (!CaptureClientFeeBudget(*wallet, now, safety, error)) throw JSONRPCError(RPC_WALLET_ERROR, error);
+            if (!safety.have_policy || !safety.have_ledger)
+                throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_CLIENT_SAFETY_POLICY_REQUIRED");
+            if (requested_fee_limit < 0 || requested_fee_limit > MAX_DD_OUTPUT_CENTS)
+                throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_CLIENT_FEE_LIMIT_INVALID");
+            const DDCents maximum_service_fee{std::min(requested_fee_limit, safety.budget.maximum_new_fee.value)};
             const DigiDollar::Paymaster::DDCents requested_amount{
                 request.params[0].getInt<int64_t>()};
             const DDCents candidate_fee_limit = include_fee_rejected
@@ -212,15 +214,13 @@ RPCHelpMan getpaymasteroffers()
                       reputation, now, error, Params().GetChainType() == ChainType::REGTEST);
             if (!error.empty()) throw JSONRPCError(RPC_INVALID_PARAMETER, error);
             UniValue result{UniValue::VARR};
-            ClientSafetyPolicy client_policy;
-            if (!GetPaymasterClientSafetyPolicy(*wallet, client_policy)) {
-                throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_CLIENT_SAFETY_POLICY_REQUIRED");
-            }
+            const auto& client_policy = safety.policy;
             for (const auto& candidate : candidates) {
                 if (!IsEndpointAllowedForPrivacyProfile(candidate.endpoint, privacy,
                                                        Params().GetChainType() == ChainType::REGTEST)) continue;
                 const bool within_policy = CheckClientServiceFee(
-                    client_policy, candidate.payment, candidate.service_fee, error);
+                    client_policy, candidate.payment, candidate.service_fee, error) &&
+                    CheckNewClientFeeBudget(safety.budget, candidate.service_fee, error);
                 const bool eligible = within_policy && candidate.service_fee.value <= maximum_service_fee.value;
                 if (!eligible && !include_fee_rejected) continue;
                 UniValue offer{UniValue::VOBJ};
