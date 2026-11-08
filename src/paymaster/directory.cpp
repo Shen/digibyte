@@ -93,9 +93,7 @@ bool ValidateAnnouncementEnvelope(const Announcement& announcement,
         error = "PAYMASTER_INVALID_ANNOUNCEMENT_TIME";
         return false;
     }
-    if (!announcement.endpoint.IsValid() ||
-        (!announcement.endpoint.IsRoutable() &&
-         !(allow_local_endpoint && announcement.endpoint.IsLocal()))) {
+    if (!IsSupportedPaymasterEndpoint(announcement.endpoint, allow_local_endpoint)) {
         error = "PAYMASTER_UNROUTABLE_ENDPOINT";
         return false;
     }

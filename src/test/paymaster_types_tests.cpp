@@ -6,13 +6,47 @@
 
 #include <boost/test/unit_test.hpp>
 
+#include <netbase.h>
 #include <paymaster/types.h>
+#include <streams.h>
+#include <util/strencodings.h>
 
 #include <limits>
 
 using namespace DigiDollar::Paymaster;
 
 BOOST_AUTO_TEST_SUITE(paymaster_types_tests)
+
+BOOST_AUTO_TEST_CASE(direct_endpoints_require_supported_network_and_explicit_port)
+{
+    BOOST_CHECK(IsSupportedPaymasterEndpoint(LookupNumeric("8.8.8.8", 12025)));
+    BOOST_CHECK(IsSupportedPaymasterEndpoint(LookupNumeric("2001:4860:4860::8888", 12025)));
+    CNetAddr onion;
+    BOOST_REQUIRE(onion.SetSpecial("pg6mmjiyjmcrsslvykfwnntlaru7p5svn6y2ymmju6nubxndf4pscryd.onion"));
+    BOOST_CHECK(IsSupportedPaymasterEndpoint(CService{onion, 12025}));
+    CNetAddr i2p;
+    BOOST_REQUIRE(i2p.SetSpecial("udhDrtrcetjm5sxzskjyr5ztpeszydbh4dpl3pl4utgqqw2v4jna.b32.i2p"));
+    BOOST_REQUIRE(i2p.IsValid());
+    BOOST_REQUIRE(i2p.IsRoutable());
+    BOOST_CHECK(!IsSupportedPaymasterEndpoint(CService{i2p, 12025}));
+    BOOST_CHECK(!IsSupportedPaymasterEndpoint(CService{i2p, 12025}, true));
+    DataStream encoded;
+    encoded << Span{ParseHex("0610fc000001000200030004000500060007")};
+    CNetAddr cjdns;
+    encoded >> WithParams(CNetAddr::V2, cjdns);
+    BOOST_REQUIRE(cjdns.IsCJDNS());
+    BOOST_REQUIRE(cjdns.IsValid());
+    BOOST_CHECK(!IsSupportedPaymasterEndpoint(CService{cjdns, 12025}, true));
+    for (const auto& endpoint : {CService{}, LookupNumeric("8.8.8.8", 0), CService{onion, 0},
+                                LookupNumeric("192.168.1.1", 12025)}) {
+        BOOST_CHECK(!IsSupportedPaymasterEndpoint(endpoint));
+        BOOST_CHECK(!IsSupportedPaymasterEndpoint(endpoint, true));
+    }
+    for (const auto& local : {LookupNumeric("127.0.0.1", 12025), LookupNumeric("::1", 12025)}) {
+        BOOST_CHECK(!IsSupportedPaymasterEndpoint(local));
+        BOOST_CHECK(IsSupportedPaymasterEndpoint(local, true));
+    }
+}
 
 BOOST_AUTO_TEST_CASE(recovery_fee_is_deducted_from_aggregate_inputs)
 {

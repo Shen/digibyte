@@ -93,6 +93,26 @@ BOOST_AUTO_TEST_CASE(descriptor_binds_provider_endpoint_policy_and_sponsor_key)
     BOOST_CHECK_EQUAL(error, "PAYMASTER_INVALID_DESCRIPTOR_SIGNATURE");
 }
 
+BOOST_AUTO_TEST_CASE(restricted_descriptor_cannot_restore_an_unsupported_route)
+{
+    CKey provider_key, sponsor_key;
+    provider_key.MakeNewKey(true);
+    sponsor_key.MakeNewKey(true);
+    constexpr int64_t now{100000};
+    auto descriptor = SignedDescriptor(provider_key, sponsor_key, uint256::ONE, now);
+    CNetAddr i2p;
+    BOOST_REQUIRE(i2p.SetSpecial("udhDrtrcetjm5sxzskjyr5ztpeszydbh4dpl3pl4utgqqw2v4jna.b32.i2p"));
+    for (const auto& endpoint : {CService{i2p, 12025}, LookupNumeric("8.8.8.8", 0)}) {
+        descriptor.p2p_endpoint = endpoint;
+        BOOST_REQUIRE(provider_key.SignSchnorr(GetRestrictedDescriptorSignatureHash(descriptor),
+                                               descriptor.provider_identity_signature, nullptr, uint256{}));
+        std::string error;
+        BOOST_CHECK(!ValidateRestrictedServiceDescriptor(descriptor, XOnlyPubKey{provider_key.GetPubKey()},
+                                                         uint256::ONE, now, error, true));
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_UNROUTABLE_ENDPOINT");
+    }
+}
+
 BOOST_AUTO_TEST_CASE(capability_is_bound_to_one_payment_and_descriptor)
 {
     CKey provider_key;

@@ -10,6 +10,8 @@
 
 #include <paymaster/types.h>
 
+#include <netaddress.h>
+
 #include <algorithm>
 #include <limits>
 
@@ -34,6 +36,13 @@ std::optional<DDCents> ComputeRoundedServiceFee(
 }
 
 } // namespace
+
+bool IsSupportedPaymasterEndpoint(const CService& endpoint, bool allow_local_endpoint)
+{
+    return endpoint.IsValid() && endpoint.GetPort() != 0 &&
+           (endpoint.IsIPv4() || endpoint.IsIPv6() || endpoint.IsTor()) &&
+           (endpoint.IsRoutable() || (allow_local_endpoint && endpoint.IsLocal()));
+}
 
 std::optional<DDCents> ComputeCarrierSuccessor(
     DDCents carrier, DDCents service_fee, std::string& error)

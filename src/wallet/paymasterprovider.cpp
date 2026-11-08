@@ -2596,7 +2596,7 @@ bool BuildPaymasterAnnouncement(CWallet& wallet,
     announcement = {};
     if (!ValidateProviderIdentityRecord(identity) || !ValidateProviderPolicy(policy, error) ||
         (permitted_funding_models & ~FUNDING_MODEL_ALL) != 0 ||
-        !endpoint.IsValid() || genesis_hash.IsNull() || reference_block.IsNull() || now <= 0) {
+        !IsSupportedPaymasterEndpoint(endpoint, Params().GetChainType() == ChainType::REGTEST) || genesis_hash.IsNull() || reference_block.IsNull() || now <= 0) {
         if (error.empty()) error = "PAYMASTER_INVALID_ANNOUNCEMENT_PARAMETERS";
         return false;
     }

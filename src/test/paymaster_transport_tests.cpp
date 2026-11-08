@@ -11,6 +11,7 @@
 #include <key.h>
 #include <net.h>
 #include <net_processing.h>
+#include <netbase.h>
 #include <netmessagemaker.h>
 #include <random.h>
 #include <streams.h>
@@ -20,6 +21,8 @@
 #include <boost/test/unit_test.hpp>
 
 #include <atomic>
+#include <functional>
+#include <memory>
 #include <thread>
 #include <type_traits>
 #include <vector>
@@ -178,6 +181,58 @@ struct PaymasterChannelSetup : TestingSetup {
 } // namespace
 
 BOOST_AUTO_TEST_SUITE(paymaster_transport_tests)
+
+BOOST_FIXTURE_TEST_CASE(unsupported_endpoints_never_enter_connection_queue, RegTestingSetup)
+{
+    using namespace DigiDollar::Paymaster;
+    ConnmanTestMsg& connman = static_cast<ConnmanTestMsg&>(*m_node.connman);
+    CConnman::Options options;
+    options.m_msgproc = m_node.peerman.get();
+    options.nLocalServices = ServiceFlags{NODE_NETWORK | NODE_P2P_V2};
+    options.nMaxConnections = 3;
+    options.m_max_outbound_full_relay = 1;
+    options.paymaster_outbound = 1;
+    connman.Init(options);
+    const int ordinary_target = connman.GetOrdinaryOutboundTarget();
+    const DirectKey key{"endpoint-policy", "payment", false, uint256::ONE};
+    CNetAddr i2p;
+    BOOST_REQUIRE(i2p.SetSpecial("udhDrtrcetjm5sxzskjyr5ztpeszydbh4dpl3pl4utgqqw2v4jna.b32.i2p"));
+    for (const auto& endpoint : {CService{i2p, 12025}, LookupNumeric("8.8.8.8", 0), CService{}}) {
+        for (const bool high_privacy : {false, true}) {
+            const auto result = connman.RequestPaymasterConnection(key, endpoint, high_privacy);
+            BOOST_CHECK(result.state == DirectState::CONNECT_FAILED);
+            BOOST_CHECK(!result.lease);
+            BOOST_CHECK_EQUAL(connman.GetPaymasterQueueSize(), 0U);
+            BOOST_CHECK_EQUAL(connman.GetPaymasterUsage().outgoing, 0);
+        }
+    }
+    // Failed unsupported attempts cannot poison the owner's request identity
+    // or consume the independent ordinary-P2P connection allowance.
+    BOOST_CHECK_EQUAL(connman.GetOrdinaryOutboundTarget(), ordinary_target);
+    BOOST_CHECK(connman.RequestPaymasterConnection(key, LookupNumeric("8.8.8.8", 12025), false).state == DirectState::QUEUED);
+    BOOST_CHECK_EQUAL(connman.GetPaymasterQueueSize(), 1U);
+
+    // Exercise the last connection boundary as well: even an internal caller
+    // bypassing RequestPaymasterConnection must not start unsupported I/O.
+    struct RestoreSocketFactory {
+        std::function<std::unique_ptr<Sock>(const CService&)> previous{CreateSock};
+        ~RestoreSocketFactory() { CreateSock = std::move(previous); }
+    } restore_socket_factory;
+    size_t socket_attempts{0};
+    CreateSock = [&](const CService&) -> std::unique_ptr<Sock> {
+        ++socket_attempts;
+        return {};
+    };
+    const CAddress destination{CService{i2p, 12025}, NODE_NONE};
+    connman.OpenNetworkConnection(destination, false, {}, nullptr, ConnectionType::PAYMASTER,
+                                  true, ProxyLogPolicy::REDACT_DESTINATION);
+    BOOST_CHECK_EQUAL(socket_attempts, 0U);
+    // Ordinary I2P/P2P still reaches its existing socket/SAM path. The mock
+    // fails immediately without creating a socket or making a connection.
+    connman.OpenNetworkConnection(destination, false, {}, nullptr, ConnectionType::OUTBOUND_FULL_RELAY,
+                                  false, ProxyLogPolicy::NORMAL);
+    BOOST_CHECK_GT(socket_attempts, 0U);
+}
 
 BOOST_AUTO_TEST_CASE(effective_budgets_preserve_relay_and_disable_impossible_roles)
 {

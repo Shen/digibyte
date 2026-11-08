@@ -203,13 +203,13 @@ RPCHelpMan getpaymasteroffers()
                       requested_amount,
                       DigiDollar::Paymaster::FUNDING_MODEL_ALL,
                       candidate_fee_limit,
-                      reputation, now, error)
+                      reputation, now, error, Params().GetChainType() == ChainType::REGTEST)
                 : DigiDollar::Paymaster::BuildOfferCandidates(
                       context.paymaster->GetDirectory().List(now),
                       requested_amount,
                       DigiDollar::Paymaster::FUNDING_MODEL_ALL,
                       candidate_fee_limit,
-                      reputation, now, error);
+                      reputation, now, error, Params().GetChainType() == ChainType::REGTEST);
             if (!error.empty()) throw JSONRPCError(RPC_INVALID_PARAMETER, error);
             UniValue result{UniValue::VARR};
             ClientSafetyPolicy client_policy;
@@ -217,8 +217,8 @@ RPCHelpMan getpaymasteroffers()
                 throw JSONRPCError(RPC_WALLET_ERROR, "PAYMASTER_CLIENT_SAFETY_POLICY_REQUIRED");
             }
             for (const auto& candidate : candidates) {
-                if (privacy == PrivacyProfile::HIGH &&
-                    !candidate.endpoint.IsTor()) continue;
+                if (!IsEndpointAllowedForPrivacyProfile(candidate.endpoint, privacy,
+                                                       Params().GetChainType() == ChainType::REGTEST)) continue;
                 const bool within_policy = CheckClientServiceFee(
                     client_policy, candidate.payment, candidate.service_fee, error);
                 const bool eligible = within_policy && candidate.service_fee.value <= maximum_service_fee.value;

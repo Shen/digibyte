@@ -24,6 +24,7 @@
 #include <netbase.h>
 #include <node/eviction.h>
 #include <node/interface_ui.h>
+#include <paymaster/types.h>
 #include <protocol.h>
 #include <random.h>
 #include <scheduler.h>
@@ -444,6 +445,13 @@ CNode* CConnman::ConnectNode(CAddress addrConnect, const char* pszDest, bool fCo
                 return nullptr;
             }
         }
+    }
+
+    // Reject unsupported Direct networks before any socket/proxy/SAM work.
+    // Ordinary P2P retains its own address and transport selection below.
+    if (conn_type == ConnectionType::PAYMASTER &&
+        !DigiDollar::Paymaster::IsSupportedPaymasterEndpoint(addrConnect, m_params.GetChainType() == ChainType::REGTEST)) {
+        return nullptr;
     }
 
     // Direct endpoints are already parsed numeric/onion services. A shared
@@ -1957,7 +1965,7 @@ DigiDollar::Paymaster::DirectResult CConnman::RequestPaymasterConnection(
     using namespace DigiDollar::Paymaster;
     if (!m_direct_budget.outbound) return {DirectState::DISABLED, {}};
     if (!fNetworkActive) return {DirectState::NETWORK_INACTIVE, {}};
-    if (!endpoint.IsValid()) return {DirectState::CONNECT_FAILED, {}};
+    if (!IsSupportedPaymasterEndpoint(endpoint, m_params.GetChainType() == ChainType::REGTEST)) return {DirectState::CONNECT_FAILED, {}};
     if (!(GetLocalServices() & NODE_P2P_V2) ||
         (m_params.GetChainType() == ChainType::MAIN && gArgs.GetBoolArg("-capturemessages", false))) {
         return {DirectState::PRIVACY_REJECTED, {}};

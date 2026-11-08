@@ -135,9 +135,7 @@ bool IsEndpointAllowedForPrivacyProfile(
     PrivacyProfile privacy_profile,
     bool allow_local_endpoint)
 {
-    if (!endpoint.IsValid() ||
-        (!endpoint.IsRoutable() &&
-         !(allow_local_endpoint && endpoint.IsLocal()))) {
+    if (!IsSupportedPaymasterEndpoint(endpoint, allow_local_endpoint)) {
         return false;
     }
     switch (privacy_profile) {
@@ -280,7 +278,8 @@ std::vector<OfferCandidate> BuildCandidates(
     const std::map<PaymasterId, PaymasterReliabilityRecord>& reliability,
     int64_t now,
     std::string& error,
-    bool recovery)
+    bool recovery,
+    bool allow_local_endpoint)
 {
     std::vector<OfferCandidate> result;
     const int64_t maximum_basis = recovery ? MAX_DD_OUTPUT_CENTS * MAX_PAYMENT_INTENT_INPUTS : MAX_DD_OUTPUT_CENTS;
@@ -290,7 +289,8 @@ std::vector<OfferCandidate> BuildCandidates(
         return result;
     }
     for (const Announcement& announcement : announcements) {
-        if (announcement.expires_at <= now || !announcement.identity_key.IsFullyValid()) continue;
+        if (announcement.expires_at <= now || !announcement.identity_key.IsFullyValid() ||
+            !IsSupportedPaymasterEndpoint(announcement.endpoint, allow_local_endpoint)) continue;
         const PaymasterId provider_id = GetPaymasterId(announcement.identity_key);
         ReliabilitySummary summary;
         int64_t latency_ewma_ms{0};
@@ -330,20 +330,20 @@ std::vector<OfferCandidate> BuildOfferCandidates(
     const std::vector<Announcement>& announcements, DDCents payment,
     uint8_t allowed_funding_models, DDCents maximum_service_fee,
     const std::map<PaymasterId, PaymasterReliabilityRecord>& reliability,
-    int64_t now, std::string& error)
+    int64_t now, std::string& error, bool allow_local_endpoint)
 {
     return BuildCandidates(announcements, payment, allowed_funding_models,
-                           maximum_service_fee, reliability, now, error, /*recovery=*/false);
+                           maximum_service_fee, reliability, now, error, /*recovery=*/false, allow_local_endpoint);
 }
 
 std::vector<OfferCandidate> BuildRecoveryOfferCandidates(
     const std::vector<Announcement>& announcements, DDCents input_total,
     DDCents maximum_service_fee,
     const std::map<PaymasterId, PaymasterReliabilityRecord>& reliability,
-    int64_t now, std::string& error)
+    int64_t now, std::string& error, bool allow_local_endpoint)
 {
     return BuildCandidates(announcements, input_total, FUNDING_MODEL_USER_PAID,
-                           maximum_service_fee, reliability, now, error, /*recovery=*/true);
+                           maximum_service_fee, reliability, now, error, /*recovery=*/true, allow_local_endpoint);
 }
 
 std::vector<OfferCandidate> BuildGrossOfferCandidates(
@@ -353,7 +353,8 @@ std::vector<OfferCandidate> BuildGrossOfferCandidates(
     DDCents maximum_service_fee,
     const std::map<PaymasterId, PaymasterReliabilityRecord>& reliability,
     int64_t now,
-    std::string& error)
+    std::string& error,
+    bool allow_local_endpoint)
 {
     std::vector<OfferCandidate> result;
     if (gross_amount.value < 100 || gross_amount.value > MAX_DD_OUTPUT_CENTS ||
@@ -362,7 +363,8 @@ std::vector<OfferCandidate> BuildGrossOfferCandidates(
         return result;
     }
     for (const Announcement& announcement : announcements) {
-        if (announcement.expires_at <= now || !announcement.identity_key.IsFullyValid()) continue;
+        if (announcement.expires_at <= now || !announcement.identity_key.IsFullyValid() ||
+            !IsSupportedPaymasterEndpoint(announcement.endpoint, allow_local_endpoint)) continue;
         const PaymasterId provider_id = GetPaymasterId(announcement.identity_key);
         ReliabilitySummary summary;
         int64_t latency_ewma_ms{0};

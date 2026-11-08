@@ -681,11 +681,8 @@ ProviderReadiness GetProviderReadiness(CWallet& wallet, WalletContext& context,
     if (!context.args || !context.args->IsArgSet("-paymasterendpoint")) {
         result.errors.push_back("PAYMASTER_PROVIDER_ENDPOINT_NOT_CONFIGURED");
     } else {
-        result.endpoint = LookupNumeric(context.args->GetArg("-paymasterendpoint", ""));
-        const bool local_regtest = Params().GetChainType() == ChainType::REGTEST &&
-                                   result.endpoint.IsLocal();
-        if (!result.endpoint.IsValid() ||
-            (!result.endpoint.IsRoutable() && !local_regtest)) {
+        result.endpoint = LookupNumeric(context.args->GetArg("-paymasterendpoint", ""), 0);
+        if (!DigiDollar::Paymaster::IsSupportedPaymasterEndpoint(result.endpoint, Params().GetChainType() == ChainType::REGTEST)) {
             result.errors.push_back("PAYMASTER_PROVIDER_ENDPOINT_UNROUTABLE");
         }
     }

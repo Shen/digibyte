@@ -128,6 +128,24 @@ BOOST_AUTO_TEST_CASE(local_endpoint_is_allowed_only_when_explicitly_requested)
                                              /*allow_local_endpoint=*/true));
 }
 
+BOOST_AUTO_TEST_CASE(rejects_unsupported_and_portless_advertised_endpoints)
+{
+    CKey key;
+    key.MakeNewKey(true);
+    constexpr int64_t now{100000};
+    auto announcement = SignedAnnouncement(key, uint256::ONE, 1, now);
+    CNetAddr i2p;
+    BOOST_REQUIRE(i2p.SetSpecial("udhDrtrcetjm5sxzskjyr5ztpeszydbh4dpl3pl4utgqqw2v4jna.b32.i2p"));
+    for (const auto& endpoint : {CService{i2p, 12025}, LookupNumeric("8.8.8.8", 0)}) {
+        announcement.endpoint = endpoint;
+        BOOST_REQUIRE(key.SignSchnorr(GetAnnouncementSignatureHash(announcement),
+                                      announcement.identity_signature, nullptr, uint256{}));
+        std::string error;
+        BOOST_CHECK(!ValidateAnnouncementEnvelope(announcement, uint256::ONE, now, error, true));
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_UNROUTABLE_ENDPOINT");
+    }
+}
+
 BOOST_AUTO_TEST_CASE(expired_entries_are_not_listed)
 {
     CKey key;

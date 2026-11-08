@@ -135,7 +135,8 @@ std::vector<OfferCandidate> BuildOfferCandidates(
     DDCents maximum_service_fee,
     const std::map<PaymasterId, PaymasterReliabilityRecord>& reliability,
     int64_t now,
-    std::string& error);
+    std::string& error,
+    bool allow_local_endpoint = false);
 
 /** Rank public user-paid recovery tariffs against aggregate reserved inputs.
  * The fee is deducted; payment is the total wallet return across one or more
@@ -147,7 +148,8 @@ std::vector<OfferCandidate> BuildRecoveryOfferCandidates(
     DDCents maximum_service_fee,
     const std::map<PaymasterId, PaymasterReliabilityRecord>& reliability,
     int64_t now,
-    std::string& error);
+    std::string& error,
+    bool allow_local_endpoint = false);
 
 /** Build candidates when amount is the maximum total DD wallet outflow.
  * Only offers with an exact cent-granular payment + rounded-fee solution are
@@ -159,7 +161,8 @@ std::vector<OfferCandidate> BuildGrossOfferCandidates(
     DDCents maximum_service_fee,
     const std::map<PaymasterId, PaymasterReliabilityRecord>& reliability,
     int64_t now,
-    std::string& error);
+    std::string& error,
+    bool allow_local_endpoint = false);
 
 std::optional<OfferCandidate> SelectOfferCandidate(
     const std::vector<OfferCandidate>& sorted_candidates,

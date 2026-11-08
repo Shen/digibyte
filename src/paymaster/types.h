@@ -19,6 +19,8 @@
 #include <string_view>
 #include <type_traits>
 
+class CService;
+
 namespace DigiDollar::Paymaster {
 
 // Version 2 makes the provider-authenticated capacity handshake mandatory
@@ -162,6 +164,11 @@ std::optional<DDCents> ComputePaymasterPaymentFromGross(
 /** V1 request IDs are lowercase RFC 4122 textual UUIDs (8-4-4-4-12). */
 bool IsCanonicalRequestId(std::string_view request_id);
 bool IsValidPaymasterDisplayName(std::string_view display_name);
+
+/** Direct transport supports numeric IPv4/IPv6 and Tor endpoints with an
+ * explicit nonzero port. Local addresses require the caller's regtest opt-in;
+ * other address networks cannot enter a payment connection or disclosure. */
+bool IsSupportedPaymasterEndpoint(const CService& endpoint, bool allow_local_endpoint = false);
 
 } // namespace DigiDollar::Paymaster
 

@@ -14,6 +14,7 @@
 #include <net.h>
 #include <netbase.h>
 #include <node/context.h>
+#include <paymaster/types.h>
 #include <random.h>
 #include <rpc/register.h>
 #include <rpc/server.h>
@@ -86,11 +87,6 @@ std::vector<ConfigEntry> ParseConfig(const std::string& data)
     }
     return entries;
 }
-bool ProbeAddress(const CService& endpoint)
-{
-    return endpoint.IsValid() && endpoint.GetPort() && (endpoint.IsIPv4() || endpoint.IsIPv6() || endpoint.IsTor()) &&
-           (endpoint.IsRoutable() || (Params().GetChainType() == ChainType::REGTEST && endpoint.IsLocal()));
-}
 ConfigPlan PrepareConfig(ArgsManager& args, const UniValue& requested)
 {
     if (!requested.isObject() || requested.empty() || requested.size() > CONFIG_KEYS.size()) throw JSONRPCError(RPC_INVALID_PARAMETER, "Supply a non-empty settings object containing only Paymaster node options");
@@ -127,7 +123,7 @@ ConfigPlan PrepareConfig(ArgsManager& args, const UniValue& requested)
             }
         } else if (key == "paymasterendpoint") {
             const auto endpoint = LookupNumeric(value.get_str(), 0);
-            if (!ProbeAddress(endpoint)) throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_CONFIG_INVALID_ENDPOINT");
+            if (!DigiDollar::Paymaster::IsSupportedPaymasterEndpoint(endpoint, Params().GetChainType() == ChainType::REGTEST)) throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_CONFIG_INVALID_ENDPOINT");
             desired[key] = {endpoint.ToStringAddrPort()};
         } else {
             if (!value.isNum() && !value.isBool()) throw JSONRPCError(RPC_INVALID_PARAMETER, "Numeric or boolean setting required: " + key);
@@ -525,7 +521,7 @@ RPCHelpMan checkpaymasterendpoint()
             auto& node = EnsureAnyNodeContext(request.context);
             if (!node.connman) throw JSONRPCError(RPC_CLIENT_P2P_DISABLED, "P2P unavailable");
             const auto endpoint = LookupNumeric(request.params[0].get_str(), 0);
-            if (!ProbeAddress(endpoint)) throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_DIAGNOSTIC_ENDPOINT_INVALID");
+            if (!DigiDollar::Paymaster::IsSupportedPaymasterEndpoint(endpoint, Params().GetChainType() == ChainType::REGTEST)) throw JSONRPCError(RPC_INVALID_PARAMETER, "PAYMASTER_DIAGNOSTIC_ENDPOINT_INVALID");
             std::unique_lock<std::mutex> lock(g_probe_mutex, std::try_to_lock);
             if (!lock.owns_lock()) throw JSONRPCError(RPC_MISC_ERROR, "PAYMASTER_DIAGNOSTIC_BUSY");
             const auto start = DirectNow();

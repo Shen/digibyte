@@ -29,6 +29,7 @@ Announcement MakeAnnouncement(CKey& key, uint256 offer_id, FundingModel model,
     announcement.sequence = 1;
     announcement.created_at = now;
     announcement.expires_at = now + 60;
+    announcement.endpoint = LookupNumeric("8.8.8.8", 12025);
     announcement.offers.push_back(OfferTerms{offer_id, uint256::ONE, model,
                                               SponsorshipScope::PUBLIC, rate,
                                               DDCents{100}, DDCents{100000}});
@@ -142,6 +143,9 @@ BOOST_AUTO_TEST_CASE(privacy_profile_routes_fail_closed)
     const CService invalid;
     const CService local{LookupNumeric("127.0.0.1", 12024)};
     const CService private_network{LookupNumeric("192.168.1.1", 12024)};
+    CNetAddr i2p_address;
+    BOOST_REQUIRE(i2p_address.SetSpecial("udhDrtrcetjm5sxzskjyr5ztpeszydbh4dpl3pl4utgqqw2v4jna.b32.i2p"));
+    const CService i2p{i2p_address, 12024};
 
     BOOST_CHECK(IsEndpointAllowedForPrivacyProfile(
         clearnet, PrivacyProfile::STANDARD));
@@ -166,6 +170,44 @@ BOOST_AUTO_TEST_CASE(privacy_profile_routes_fail_closed)
     BOOST_CHECK(!IsEndpointAllowedForPrivacyProfile(
         private_network, PrivacyProfile::STANDARD,
         /*allow_local_endpoint=*/true));
+    for (const auto& endpoint : {i2p, CService{onion_address, 0}, LookupNumeric("8.8.8.8", 0)}) {
+        for (const auto privacy : {PrivacyProfile::STANDARD, PrivacyProfile::HIGH}) {
+            BOOST_CHECK(!IsEndpointAllowedForPrivacyProfile(endpoint, privacy));
+            BOOST_CHECK(!IsEndpointAllowedForPrivacyProfile(endpoint, privacy, true));
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(candidate_builders_exclude_unsupported_endpoints)
+{
+    constexpr int64_t now{200000};
+    CKey key;
+    auto announcement = MakeAnnouncement(key, uint256::ONE, FundingModel::USER_PAID, 10, now);
+    CNetAddr i2p;
+    BOOST_REQUIRE(i2p.SetSpecial("udhDrtrcetjm5sxzskjyr5ztpeszydbh4dpl3pl4utgqqw2v4jna.b32.i2p"));
+    const auto candidates = [&](const Announcement& advertised, bool allow_local) {
+        std::string error;
+        const auto ordinary = BuildOfferCandidates({advertised}, DDCents{1000}, FUNDING_MODEL_USER_PAID,
+            DDCents{10}, {}, now, error, allow_local);
+        BOOST_CHECK_MESSAGE(error.empty(), error);
+        const auto gross = BuildGrossOfferCandidates({advertised}, DDCents{1001}, FUNDING_MODEL_USER_PAID,
+            DDCents{10}, {}, now, error, allow_local);
+        BOOST_CHECK_MESSAGE(error.empty(), error);
+        const auto recovery = BuildRecoveryOfferCandidates({advertised}, DDCents{1000}, DDCents{10}, {}, now, error, allow_local);
+        BOOST_CHECK_MESSAGE(error.empty(), error);
+        BOOST_CHECK_EQUAL(ordinary.size(), gross.size());
+        BOOST_CHECK_EQUAL(ordinary.size(), recovery.size());
+        return ordinary.size();
+    };
+    BOOST_CHECK_EQUAL(candidates(announcement, false), 1U);
+    for (const auto& endpoint : {CService{i2p, 12025}, LookupNumeric("8.8.8.8", 0), CService{}}) {
+        announcement.endpoint = endpoint;
+        BOOST_CHECK_EQUAL(candidates(announcement, false), 0U);
+        BOOST_CHECK_EQUAL(candidates(announcement, true), 0U);
+    }
+    announcement.endpoint = LookupNumeric("127.0.0.1", 12025);
+    BOOST_CHECK_EQUAL(candidates(announcement, false), 0U);
+    BOOST_CHECK_EQUAL(candidates(announcement, true), 1U);
 }
 
 BOOST_AUTO_TEST_CASE(offers_are_sorted_by_exact_rounded_total_cost)

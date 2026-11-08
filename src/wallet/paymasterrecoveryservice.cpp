@@ -140,7 +140,7 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
         const auto candidates = BuildRecoveryOfferCandidates(
             context.paymaster->GetDirectory().List(now), DDCents{total_dd},
             effective_maximum, reliability, now,
-            error);
+            error, Params().GetChainType() == ChainType::REGTEST);
         if (!error.empty()) {
             throw ApplicationError(ErrorKind::INVALID_INPUT, error);
         }
@@ -155,9 +155,9 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
                         candidate.provider_id == *requested_provider) &&
                        (!requested_offer ||
                         candidate.terms.offer_id == *requested_offer) &&
-                       (original_attempt.privacy_profile !=
-                            PrivacyProfile::HIGH ||
-                        candidate.endpoint.IsTor()) &&
+                       IsEndpointAllowedForPrivacyProfile(
+                           candidate.endpoint, original_attempt.privacy_profile,
+                           Params().GetChainType() == ChainType::REGTEST) &&
                        total_dd - candidate.service_fee.value >= 100;
             });
         if (selected == candidates.end()) {

@@ -790,9 +790,11 @@ void PrepareClientQuoteSponsorship(ClientQuoteOperation& operation)
             throw ApplicationError(ErrorKind::INVALID_INPUT,
                                error.empty() ? "PAYMASTER_RESTRICTED_ADMISSION_UNAVAILABLE" : error);
         }
-        if (privacy == PrivacyProfile::HIGH && !descriptor.p2p_endpoint.IsTor()) {
+        if (!IsEndpointAllowedForPrivacyProfile(descriptor.p2p_endpoint, privacy,
+                                               Params().GetChainType() == ChainType::REGTEST)) {
             throw ApplicationError(ErrorKind::INVALID_INPUT,
-                               "High privacy requires an onion restricted provider");
+                               privacy == PrivacyProfile::HIGH ? "High privacy requires an onion restricted provider" :
+                                                                 "PAYMASTER_ENDPOINT_INVALID");
         }
         restricted_descriptor = std::move(descriptor);
         restricted_capability = std::move(capability);
@@ -885,12 +887,12 @@ std::optional<PaymentResult> SelectClientQuoteOffer(ClientQuoteOperation& operat
     } else {
         const auto candidates = BuildOfferCandidates(
             context.paymaster->GetDirectory().List(now), DDCents{payment}, FUNDING_MODEL_ALL,
-            effective_fee_cap, reputation, now, error);
+            effective_fee_cap, reputation, now, error, Params().GetChainType() == ChainType::REGTEST);
         if (!error.empty()) throw ApplicationError(ErrorKind::INVALID_INPUT, error);
         const auto candidate_it = std::find_if(candidates.begin(), candidates.end(),
                                                [&](const OfferCandidate& entry) {
                                                    return entry.provider_id == provider_id &&
-                                                          (privacy != PrivacyProfile::HIGH || entry.endpoint.IsTor()) &&
+                                                          IsEndpointAllowedForPrivacyProfile(entry.endpoint, privacy, Params().GetChainType() == ChainType::REGTEST) &&
                                                           (!requested_offer || entry.terms.offer_id == *requested_offer);
                                                });
         if (candidate_it == candidates.end()) {
@@ -1734,9 +1736,11 @@ void PrepareAutomaticPaymentSponsorship(AutomaticPaymentOperation& operation)
             throw ApplicationError(ErrorKind::INVALID_INPUT,
                                error.empty() ? "PAYMASTER_RESTRICTED_ADMISSION_UNAVAILABLE" : error);
         }
-        if (privacy == PrivacyProfile::HIGH && !descriptor.p2p_endpoint.IsTor()) {
+        if (!IsEndpointAllowedForPrivacyProfile(descriptor.p2p_endpoint, privacy,
+                                               Params().GetChainType() == ChainType::REGTEST)) {
             throw ApplicationError(ErrorKind::INVALID_INPUT,
-                               "High privacy requires an onion restricted provider");
+                               privacy == PrivacyProfile::HIGH ? "High privacy requires an onion restricted provider" :
+                                                                 "PAYMASTER_ENDPOINT_INVALID");
         }
         restricted_candidate.provider_id = descriptor.provider_id;
         restricted_candidate.identity_key = *restricted_identity_key;
@@ -1879,11 +1883,11 @@ void SelectAutomaticPaymentOffer(AutomaticPaymentOperation& operation)
             ? BuildGrossOfferCandidates(
                   context.paymaster->GetDirectory().List(now),
                   DDCents{amount}, FUNDING_MODEL_ALL, effective_fee_cap,
-                  reputation, now, error)
+                  reputation, now, error, Params().GetChainType() == ChainType::REGTEST)
             : BuildOfferCandidates(
                   context.paymaster->GetDirectory().List(now),
                   DDCents{amount}, FUNDING_MODEL_ALL, effective_fee_cap,
-                  reputation, now, error);
+                  reputation, now, error, Params().GetChainType() == ChainType::REGTEST);
         if (!error.empty()) throw ApplicationError(ErrorKind::INVALID_INPUT, error);
     }
     ClientSafetyPolicy selection_policy;
@@ -1899,11 +1903,12 @@ void SelectAutomaticPaymentOffer(AutomaticPaymentOperation& operation)
             return true;
         }), candidates.end());
     if (candidates.empty() && !fee_error.empty()) throw ApplicationError(ErrorKind::WALLET, fee_error);
-    if (privacy == PrivacyProfile::HIGH) {
-        candidates.erase(std::remove_if(candidates.begin(), candidates.end(),
-                                        [](const OfferCandidate& candidate) { return !candidate.endpoint.IsTor(); }),
-                         candidates.end());
-    }
+    candidates.erase(std::remove_if(candidates.begin(), candidates.end(),
+                                    [&](const OfferCandidate& candidate) {
+                                        return !IsEndpointAllowedForPrivacyProfile(candidate.endpoint, privacy,
+                                            Params().GetChainType() == ChainType::REGTEST);
+                                    }),
+                     candidates.end());
     if (preferred_provider && persisted_session.attempt_ids.empty()) {
         candidates.erase(std::remove_if(candidates.begin(), candidates.end(),
             [&](const OfferCandidate& candidate) {

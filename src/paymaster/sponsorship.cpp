@@ -76,9 +76,7 @@ bool ValidateRestrictedServiceDescriptor(const RestrictedServiceDescriptor& desc
         error = "PAYMASTER_INVALID_IDENTITY";
         return false;
     }
-    if (!descriptor.p2p_endpoint.IsValid() ||
-        (!descriptor.p2p_endpoint.IsRoutable() &&
-         !(allow_local_endpoint && descriptor.p2p_endpoint.IsLocal()))) {
+    if (!IsSupportedPaymasterEndpoint(descriptor.p2p_endpoint, allow_local_endpoint)) {
         error = "PAYMASTER_UNROUTABLE_ENDPOINT";
         return false;
     }
