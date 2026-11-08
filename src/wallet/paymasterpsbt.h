@@ -24,6 +24,29 @@ class CWallet;
 bool CheckPaymasterNewSignatureInputs(
     const CWallet& wallet, const std::vector<COutPoint>& inputs, std::string& error);
 
+enum class Bip86ControlSigningError {
+    NONE,
+    WALLET_LOCKED,
+    PREVOUT_NOT_FOUND,
+    NOT_SPENDABLE,
+    NOT_BIP86,
+    KEY_UNAVAILABLE,
+    SIGNING_FAILED,
+};
+
+struct Bip86ControlSignature {
+    XOnlyPubKey output_key;
+    std::vector<unsigned char> signature;
+};
+
+/** Resolve and sign a wallet-owned BIP86 prevout under cs_wallet. The caller
+ * supplies the already domain-separated digest and exact expected script;
+ * protocol/session/expiry binding remains with that caller. No key or partial
+ * signature escapes on failure. This ownership proof authorizes no payment. */
+Bip86ControlSigningError SignPaymasterBip86Control(
+    CWallet& wallet, const COutPoint& input, const CScript& expected_script,
+    const uint256& digest, Bip86ControlSignature& result);
+
 /** Sign and finalize only inputs assigned to party. The untrusted PSBT is
  * validated before signing, and the result is reconstructed from the trusted
  * input so FillPSBT cannot add or alter fields outside the permitted signature

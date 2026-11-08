@@ -146,37 +146,6 @@ uint256 GetOfferId(const ProviderIdentityRecord& identity,
     return hasher.GetSHA256();
 }
 
-bool SignBip86ControlHash(CWallet& wallet,
-                          const CScript& script,
-                          const uint256& hash,
-                          std::vector<unsigned char>& signature)
-{
-    CTxDestination destination;
-    if (!ExtractDestination(script, destination)) return false;
-    const auto* taproot = std::get_if<WitnessV1Taproot>(&destination);
-    if (!taproot) return false;
-    const XOnlyPubKey output_key{*taproot};
-    for (ScriptPubKeyMan* script_manager : wallet.GetScriptPubKeyMans(script)) {
-        auto* descriptor = dynamic_cast<DescriptorScriptPubKeyMan*>(script_manager);
-        if (!descriptor) continue;
-        auto provider = descriptor->GetSigningProviderWithKeys(script);
-        TaprootSpendData spend_data;
-        CKey internal_key;
-        if (!provider || !provider->GetTaprootSpendData(output_key, spend_data) ||
-            !spend_data.internal_key.IsFullyValid() || !spend_data.merkle_root.IsNull() ||
-            !spend_data.scripts.empty() ||
-            !provider->GetKeyByXOnly(spend_data.internal_key, internal_key) ||
-            !internal_key.IsValid()) continue;
-        const auto tweaked = spend_data.internal_key.CreateTapTweak(nullptr);
-        if (!tweaked || tweaked->first != output_key) continue;
-        signature.resize(64);
-        const uint256 empty_merkle_root;
-        return internal_key.SignSchnorr(hash, signature, &empty_merkle_root,
-                                        GetRandHash());
-    }
-    return false;
-}
-
 uint256 GetCapacitySnapshotId(const PaymasterCapacityProof& proof)
 {
     HashWriter hasher = TaggedHash("DigiByte Paymaster Capacity Snapshot v2");
@@ -2364,25 +2333,29 @@ bool BuildPaymasterCapacityProof(CWallet& wallet,
 
         for (size_t index = 0; index < dgb_entries.size(); ++index) {
             CapacityDGBInput& input{proof.liquidity_slots.front().dgb_inputs[index]};
-            if (!SignBip86ControlHash(
-                    wallet, dgb_entries[index]->script_pub_key,
+            Bip86ControlSignature signed_control;
+            if (SignPaymasterBip86Control(
+                    wallet, dgb_entries[index]->outpoint, dgb_entries[index]->script_pub_key,
                     GetCapacityControlHash(proof, input.input.outpoint,
                                            input.control_proof.expires_at),
-                    input.control_proof.signature)) {
+                    signed_control) != Bip86ControlSigningError::NONE) {
                 error = "PAYMASTER_CAPACITY_DGB_SIGNING_FAILED";
                 return false;
             }
+            input.control_proof.signature = std::move(signed_control.signature);
         }
         if (carrier_entry != nullptr) {
             CapacityDDCarrier& carrier{*proof.liquidity_slots.front().carrier};
-            if (!SignBip86ControlHash(
-                    wallet, carrier_entry->script_pub_key,
+            Bip86ControlSignature signed_control;
+            if (SignPaymasterBip86Control(
+                    wallet, carrier_entry->outpoint, carrier_entry->script_pub_key,
                     GetCapacityControlHash(proof, carrier.carrier.outpoint,
                                            carrier.control_proof.expires_at),
-                    carrier.control_proof.signature)) {
+                    signed_control) != Bip86ControlSigningError::NONE) {
                 error = "PAYMASTER_CAPACITY_CARRIER_SIGNING_FAILED";
                 return false;
             }
+            carrier.control_proof.signature = std::move(signed_control.signature);
         }
     }
 
@@ -2730,13 +2703,15 @@ bool BuildPaymasterAnnouncement(CWallet& wallet,
         slot.dgb_value = dgb_entry.dgb_value;
         slot.reference_block = reference_block;
         slot.expires_at = announcement.expires_at;
-        if (!SignBip86ControlHash(wallet, dgb_entry.script_pub_key,
+        Bip86ControlSignature signed_dgb_control;
+        if (SignPaymasterBip86Control(wallet, dgb_entry.outpoint, dgb_entry.script_pub_key,
                                   GetAdmissionControlHash(identity.provider_id, sequence,
                                                           reference_block, slot.dgb_outpoint, slot.expires_at, false),
-                                  slot.dgb_control_signature)) {
+                                  signed_dgb_control) != Bip86ControlSigningError::NONE) {
             error = "PAYMASTER_ADMISSION_DGB_SIGNING_FAILED";
             return false;
         }
+        slot.dgb_control_signature = std::move(signed_dgb_control.signature);
         if (needs_carriers) {
             const ProviderPoolEntry& carrier_entry{*carrier_entries[index]};
             const CWalletTx* carrier_tx{wallet.GetWalletTx(carrier_entry.outpoint.hash)};
@@ -2748,13 +2723,15 @@ bool BuildPaymasterAnnouncement(CWallet& wallet,
             slot.carrier_outpoint = carrier_entry.outpoint;
             slot.carrier_creating_tx = CMutableTransaction{*carrier_tx->tx};
             slot.carrier_value = carrier_entry.carrier_value;
-            if (!SignBip86ControlHash(wallet, carrier_entry.script_pub_key,
+            Bip86ControlSignature signed_carrier_control;
+            if (SignPaymasterBip86Control(wallet, carrier_entry.outpoint, carrier_entry.script_pub_key,
                                       GetAdmissionControlHash(identity.provider_id, sequence,
                                                               reference_block, slot.carrier_outpoint, slot.expires_at, true),
-                                      slot.carrier_control_signature)) {
+                                      signed_carrier_control) != Bip86ControlSigningError::NONE) {
                 error = "PAYMASTER_ADMISSION_CARRIER_SIGNING_FAILED";
                 return false;
             }
+            slot.carrier_control_signature = std::move(signed_carrier_control.signature);
         }
         announcement.admission_slots.push_back(std::move(slot));
     }

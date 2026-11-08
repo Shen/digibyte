@@ -69,6 +69,38 @@ std::vector<COutPoint> InputsOwnedBy(
 
 BOOST_FIXTURE_TEST_SUITE(paymaster_wallet_psbt_tests, PaymasterWalletSetup)
 
+BOOST_AUTO_TEST_CASE(shared_bip86_control_signer_binds_prevout_script_and_digest)
+{
+    CKey key;
+    key.MakeNewKey(true);
+    FlatSigningProvider provider;
+    std::string error;
+    auto descriptor = Parse("tr(" + EncodeSecret(key) + ")", provider, error, false);
+    BOOST_REQUIRE(descriptor);
+    WalletDescriptor wallet_descriptor{std::move(descriptor), 0, 0, 1, 0};
+    LOCK(m_wallet.cs_wallet);
+    m_wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+    BOOST_REQUIRE(m_wallet.AddWalletDescriptor(wallet_descriptor, provider, "", false));
+    TaprootBuilder taproot;
+    taproot.Finalize(XOnlyPubKey{key.GetPubKey()});
+    const auto script = GetScriptForDestination(taproot.GetOutput());
+    CMutableTransaction creating;
+    creating.vin.emplace_back(COutPoint{uint256::ONE, 0});
+    creating.vout.emplace_back(0, script);
+    BOOST_REQUIRE(m_wallet.AddToWallet(MakeTransactionRef(creating), TxStateInactive{}));
+    const COutPoint input{creating.GetHash(), 0};
+    const uint256 digest = (HashWriter{} << std::string{"Paymaster control regression"}).GetHash();
+    Bip86ControlSignature signed_control;
+    BOOST_REQUIRE(SignPaymasterBip86Control(m_wallet, input, script, digest, signed_control) == Bip86ControlSigningError::NONE);
+    BOOST_CHECK(signed_control.output_key.VerifySchnorr(digest, signed_control.signature));
+    BOOST_CHECK(!signed_control.output_key.VerifySchnorr(uint256::ONE, signed_control.signature));
+    // A successful previous result cannot survive a failed ownership lookup.
+    BOOST_CHECK(SignPaymasterBip86Control(m_wallet, {input.hash, 1}, script, digest, signed_control) == Bip86ControlSigningError::PREVOUT_NOT_FOUND);
+    BOOST_CHECK(signed_control.signature.empty());
+    BOOST_CHECK(SignPaymasterBip86Control(m_wallet, input, CScript{} << OP_TRUE, digest, signed_control) == Bip86ControlSigningError::PREVOUT_NOT_FOUND);
+    BOOST_CHECK(signed_control.signature.empty());
+}
+
 BOOST_AUTO_TEST_CASE(wallet_with_both_keys_signs_only_requested_role)
 {
     CKey key;

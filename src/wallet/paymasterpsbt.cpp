@@ -89,6 +89,68 @@ bool CheckPaymasterNewSignatureInputs(
     return true;
 }
 
+Bip86ControlSigningError SignPaymasterBip86Control(
+    CWallet& wallet, const COutPoint& input, const CScript& expected_script,
+    const uint256& digest, Bip86ControlSignature& result)
+{
+    result = {};
+    LOCK(wallet.cs_wallet);
+    if (wallet.IsLocked()) return Bip86ControlSigningError::WALLET_LOCKED;
+    const auto* transaction = wallet.GetWalletTx(input.hash);
+    if (!transaction || input.n >= transaction->tx->vout.size() ||
+        transaction->tx->vout[input.n].scriptPubKey != expected_script) {
+        return Bip86ControlSigningError::PREVOUT_NOT_FOUND;
+    }
+    if (!(wallet.IsMine(expected_script) & ISMINE_SPENDABLE)) {
+        return Bip86ControlSigningError::NOT_SPENDABLE;
+    }
+    CTxDestination destination;
+    if (!ExtractDestination(expected_script, destination)) return Bip86ControlSigningError::NOT_BIP86;
+    const auto* taproot = std::get_if<WitnessV1Taproot>(&destination);
+    if (!taproot) return Bip86ControlSigningError::NOT_BIP86;
+    const XOnlyPubKey output_key{*taproot};
+    for (ScriptPubKeyMan* manager : wallet.GetScriptPubKeyMans(expected_script)) {
+        std::unique_ptr<SigningProvider> provider;
+        if (auto* descriptor = dynamic_cast<DescriptorScriptPubKeyMan*>(manager)) {
+            provider = descriptor->GetSigningProviderWithKeys(expected_script);
+        } else {
+            provider = manager->GetSolvingProvider(expected_script);
+        }
+        TaprootSpendData spend_data;
+        CKey key;
+        if (!provider || !provider->GetTaprootSpendData(output_key, spend_data) ||
+            !spend_data.internal_key.IsFullyValid() || !spend_data.merkle_root.IsNull() ||
+            !spend_data.scripts.empty() || !provider->GetKeyByXOnly(spend_data.internal_key, key) || !key.IsValid()) continue;
+        const auto tweaked = spend_data.internal_key.CreateTapTweak(nullptr);
+        if (!tweaked || tweaked->first != output_key) continue;
+        std::vector<unsigned char> signature(64);
+        const uint256 empty_merkle_root;
+        if (!key.SignSchnorr(digest, signature, &empty_merkle_root, GetRandHash())) {
+            return Bip86ControlSigningError::SIGNING_FAILED;
+        }
+        result.output_key = output_key;
+        result.signature = std::move(signature);
+        return Bip86ControlSigningError::NONE;
+    }
+    return Bip86ControlSigningError::KEY_UNAVAILABLE;
+}
+
+namespace {
+bool SetInputControlSigningError(Bip86ControlSigningError result, const char* signing_error, std::string& error)
+{
+    switch (result) {
+    case Bip86ControlSigningError::NONE: return true;
+    case Bip86ControlSigningError::WALLET_LOCKED: error = "PAYMASTER_WALLET_LOCKED"; break;
+    case Bip86ControlSigningError::PREVOUT_NOT_FOUND: error = "PAYMASTER_USER_PREVOUT_NOT_FOUND"; break;
+    case Bip86ControlSigningError::NOT_SPENDABLE: error = "PAYMASTER_USER_PREVOUT_NOT_SPENDABLE"; break;
+    case Bip86ControlSigningError::NOT_BIP86: error = "PAYMASTER_USER_PREVOUT_NOT_BIP86"; break;
+    case Bip86ControlSigningError::KEY_UNAVAILABLE: error = "PAYMASTER_USER_PREVOUT_KEY_UNAVAILABLE"; break;
+    case Bip86ControlSigningError::SIGNING_FAILED: error = signing_error; break;
+    }
+    return false;
+}
+} // namespace
+
 bool SignCollaborativePSBTForParty(
     CWallet& wallet,
     PartiallySignedTransaction& psbt,
@@ -197,60 +259,16 @@ bool SignPaymentIntentInputs(
             error = "PAYMASTER_USER_PREVOUT_NOT_FOUND";
             return false;
         }
-        const CScript& script = wallet_tx->tx->vout[outpoint.n].scriptPubKey;
-        if (!(wallet.IsMine(script) & ISMINE_SPENDABLE)) {
-            error = "PAYMASTER_USER_PREVOUT_NOT_SPENDABLE";
-            return false;
-        }
-        CTxDestination destination;
-        if (!ExtractDestination(script, destination)) {
-            error = "PAYMASTER_USER_PREVOUT_NOT_BIP86";
-            return false;
-        }
-        const auto* taproot = std::get_if<WitnessV1Taproot>(&destination);
-        if (!taproot) {
-            error = "PAYMASTER_USER_PREVOUT_NOT_BIP86";
-            return false;
-        }
-        const XOnlyPubKey output_key{*taproot};
-        CKey internal_key;
-        bool found_key{false};
-        for (ScriptPubKeyMan* script_manager : wallet.GetScriptPubKeyMans(script)) {
-            std::unique_ptr<SigningProvider> provider;
-            if (auto* descriptor = dynamic_cast<DescriptorScriptPubKeyMan*>(script_manager)) {
-                provider = descriptor->GetSigningProviderWithKeys(script);
-            } else {
-                provider = script_manager->GetSolvingProvider(script);
-            }
-            TaprootSpendData spend_data;
-            if (!provider || !provider->GetTaprootSpendData(output_key, spend_data) ||
-                !spend_data.internal_key.IsFullyValid() || !spend_data.merkle_root.IsNull() ||
-                !spend_data.scripts.empty() ||
-                !provider->GetKeyByXOnly(spend_data.internal_key, internal_key) ||
-                !internal_key.IsValid()) {
-                continue;
-            }
-            const auto tweaked = spend_data.internal_key.CreateTapTweak(nullptr);
-            if (tweaked && tweaked->first == output_key) {
-                found_key = true;
-                break;
-            }
-        }
-        if (!found_key) {
-            error = "PAYMASTER_USER_PREVOUT_KEY_UNAVAILABLE";
-            return false;
-        }
+        Bip86ControlSignature signed_control;
+        if (!SetInputControlSigningError(SignPaymasterBip86Control(
+                wallet, outpoint, wallet_tx->tx->vout[outpoint.n].scriptPubKey,
+                GetUserInputControlHash(intent, outpoint), signed_control),
+                "PAYMASTER_USER_INPUT_SIGNING_FAILED", error)) return false;
         UserInputControlProof proof;
         proof.outpoint = outpoint;
-        proof.signature.resize(64);
-        const uint256 empty_merkle_root;
-        if (!internal_key.SignSchnorr(GetUserInputControlHash(intent, outpoint), proof.signature,
-                                      &empty_merkle_root, GetRandHash())) {
-            error = "PAYMASTER_USER_INPUT_SIGNING_FAILED";
-            return false;
-        }
+        proof.signature = std::move(signed_control.signature);
         proofs.push_back(std::move(proof));
-        resolved_output_keys.push_back(output_key);
+        resolved_output_keys.push_back(signed_control.output_key);
     }
     PaymentIntent signed_intent{intent};
     signed_intent.user_input_proofs = proofs;
@@ -377,63 +395,16 @@ bool SignAlternativeRecoveryRequestInputs(
             error = "PAYMASTER_USER_PREVOUT_NOT_FOUND";
             return false;
         }
-        const CScript& script = wallet_tx->tx->vout[outpoint.n].scriptPubKey;
-        if (!(wallet.IsMine(script) & ISMINE_SPENDABLE)) {
-            error = "PAYMASTER_USER_PREVOUT_NOT_SPENDABLE";
-            return false;
-        }
-        CTxDestination destination;
-        if (!ExtractDestination(script, destination)) {
-            error = "PAYMASTER_USER_PREVOUT_NOT_BIP86";
-            return false;
-        }
-        const auto* taproot = std::get_if<WitnessV1Taproot>(&destination);
-        if (!taproot) {
-            error = "PAYMASTER_USER_PREVOUT_NOT_BIP86";
-            return false;
-        }
-        const XOnlyPubKey output_key{*taproot};
-        CKey internal_key;
-        bool found_key{false};
-        for (ScriptPubKeyMan* script_manager : wallet.GetScriptPubKeyMans(script)) {
-            std::unique_ptr<SigningProvider> provider;
-            if (auto* descriptor =
-                    dynamic_cast<DescriptorScriptPubKeyMan*>(script_manager)) {
-                provider = descriptor->GetSigningProviderWithKeys(script);
-            } else {
-                provider = script_manager->GetSolvingProvider(script);
-            }
-            TaprootSpendData spend_data;
-            if (!provider ||
-                !provider->GetTaprootSpendData(output_key, spend_data) ||
-                !spend_data.internal_key.IsFullyValid() ||
-                !spend_data.merkle_root.IsNull() || !spend_data.scripts.empty() ||
-                !provider->GetKeyByXOnly(spend_data.internal_key, internal_key) ||
-                !internal_key.IsValid()) {
-                continue;
-            }
-            const auto tweaked = spend_data.internal_key.CreateTapTweak(nullptr);
-            if (tweaked && tweaked->first == output_key) {
-                found_key = true;
-                break;
-            }
-        }
-        if (!found_key) {
-            error = "PAYMASTER_USER_PREVOUT_KEY_UNAVAILABLE";
-            return false;
-        }
+        Bip86ControlSignature signed_control;
+        if (!SetInputControlSigningError(SignPaymasterBip86Control(
+                wallet, outpoint, wallet_tx->tx->vout[outpoint.n].scriptPubKey,
+                GetAlternativeRecoveryInputControlHash(signed_request, outpoint), signed_control),
+                "PAYMASTER_RECOVERY_INPUT_SIGNING_FAILED", error)) return false;
         AlternativeRecoveryInputProof proof;
         proof.outpoint = outpoint;
-        proof.signature.resize(64);
-        const uint256 empty_merkle_root;
-        if (!internal_key.SignSchnorr(
-                GetAlternativeRecoveryInputControlHash(signed_request, outpoint),
-                proof.signature, &empty_merkle_root, GetRandHash())) {
-            error = "PAYMASTER_RECOVERY_INPUT_SIGNING_FAILED";
-            return false;
-        }
+        proof.signature = std::move(signed_control.signature);
         signed_request.user_input_proofs.push_back(std::move(proof));
-        resolved_keys.push_back(output_key);
+        resolved_keys.push_back(signed_control.output_key);
     }
     if (!ValidateAlternativeRecoveryRequestEnvelope(
             signed_request, signed_request.genesis_hash, now, error) ||
