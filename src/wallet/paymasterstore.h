@@ -530,6 +530,8 @@ public:
         DigiDollar::Paymaster::ProviderCommitRecord& commit) const;
     bool ListProviderCommits(
         std::vector<DigiDollar::Paymaster::ProviderCommitRecord>& commits) const;
+    bool ListProviderCommits(std::vector<DigiDollar::Paymaster::ProviderCommitRecord>& commits,
+        bool bounded) const;
     /** Idempotently reconstruct wallet-owned pool successors for durable
      * provider commits created by older builds before successor persistence
      * was atomic. */
@@ -541,6 +543,8 @@ public:
      * they cannot block recovery of independent valid attempts. */
     bool ListProviderSignedAttemptsWithoutCommit(
         std::vector<DigiDollar::Paymaster::ProviderAttempt>& attempts) const;
+    bool ListProviderSignedAttemptsWithoutCommit(
+        std::vector<DigiDollar::Paymaster::ProviderAttempt>& attempts, bool bounded) const;
 
     /** Persist a provider result monotonically. Once a final transaction is
      * durable, every later result must retain its exact TXID, witness and raw
@@ -764,6 +768,8 @@ public:
     bool ListClientDurableFinalTransactions(
         std::vector<CTransactionRef>& transactions,
         std::string& error) const;
+    bool ListClientDurableFinalTransactions(std::vector<CTransactionRef>& transactions,
+        std::string& error, bool bounded) const;
 
     /** Reconstruct and revalidate the exact current client authority for one
      * durable final immediately before a startup/retry broadcast. This checks

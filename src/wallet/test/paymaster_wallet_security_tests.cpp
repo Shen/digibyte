@@ -3878,10 +3878,18 @@ BOOST_AUTO_TEST_CASE(provider_recovery_pruning_is_bounded_and_preserves_signed_r
         BOOST_REQUIRE(batch.TxnCommit());
     }
     size_t expired{0};
+    std::vector<AlternativeRecoveryRecord> first_page;
+    uint256 next;
+    BOOST_REQUIRE(WalletBatch{m_wallet.GetDatabase()}.ListPaymasterAlternativeRecoveriesPage({}, first_page, next));
+    BOOST_REQUIRE_EQUAL(first_page.size(), 64U);
+    BOOST_CHECK(!next.IsNull());
+    const size_t prunable = std::count_if(first_page.begin(), first_page.end(), [](const auto& record) {
+        return record.expired && record.phase <= AlternativeRecoveryPhase::RESPONSE_VALIDATED;
+    });
     BOOST_REQUIRE_MESSAGE(store.ExpireAlternativeRecoveries(observation, expired, error), error);
     std::vector<AlternativeRecoveryRecord> remaining;
     BOOST_REQUIRE(WalletBatch{m_wallet.GetDatabase()}.ListPaymasterAlternativeRecoveries(remaining));
-    BOOST_CHECK_EQUAL(remaining.size(), 3U);
+    BOOST_CHECK_EQUAL(remaining.size(), 67U - prunable);
     BOOST_REQUIRE_MESSAGE(store.ExpireAlternativeRecoveries(observation, expired, error), error);
     BOOST_REQUIRE(WalletBatch{m_wallet.GetDatabase()}.ListPaymasterAlternativeRecoveries(remaining));
     BOOST_REQUIRE_EQUAL(remaining.size(), 1U);

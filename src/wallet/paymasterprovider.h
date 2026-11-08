@@ -126,6 +126,9 @@ DurablePaymasterCommitRecovery RecoverDurablePaymasterCommit(
 DurablePaymasterRecoveryReport RecoverDurablePaymasterCommits(
     CWallet& wallet,
     int64_t now);
+/** Periodic recovery uses bounded raw pages; startup retains a complete pass. */
+DurablePaymasterRecoveryReport RecoverDurablePaymasterCommits(
+    CWallet& wallet, int64_t now, bool bounded);
 
 bool SetPaymasterProviderPolicy(CWallet& wallet,
                                 const DigiDollar::Paymaster::ProviderPolicy& policy,

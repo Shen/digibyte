@@ -216,6 +216,19 @@ fee reservations on that basis. Actual unsigned nonce-reservation release remain
 a separate operation vetoed by either owner family and validated against current
 pool and budget records. Drain work point-reads only live reserved admissions.
 
+Tip/periodic session reconciliation, unsigned quote expiry, capacity-snapshot
+compaction and recovery expiry use independent disposable continuations. Session
+pages scan at most 64 rows and 512 KiB before filtering; record pages also bound
+raw rows and bytes before their canonical point reads. A failed maintenance page
+does not publish progress. Cleanup is eventual across pages. Cursors never prove
+absence of authorization or grant releases: unsigned client release still makes
+the complete independent recovery-evidence check. That financial proof, cold
+index reconstruction and startup recovery remain complete operations.
+Periodic durable rebroadcast pages provider commits, signed attempts and client
+finals; validation then uses the transaction-to-session index to reload only
+matching sessions. Exact manifests, signatures, chain preflight and reorg/pruning
+checks remain mandatory.
+
 ## Wallet lifecycle
 
 Protected DGB/DD reserves are excluded from ordinary coin selection and shown

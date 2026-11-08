@@ -1620,8 +1620,11 @@ bool PaymasterStore::ExpireProviderQuotes(int64_t now,
 
     LOCK(m_wallet.cs_wallet);
     WalletBatch batch{m_wallet.GetDatabase()};
+    PaymasterScanPage page{m_wallet.GetDatabase(), PaymasterScan::QUOTE_EXPIRY};
+    std::string next;
     std::vector<PaymentSession> sessions;
-    if (!batch.ListPaymasterSessions(sessions)) {
+    if (!batch.ListPaymasterSessionsPage(page.after.request, PAYMASTER_BACKGROUND_SESSION_ROWS,
+                PAYMASTER_BACKGROUND_SESSION_BYTES, sessions, next)) {
         error = "PAYMASTER_SESSION_DATABASE_READ";
         return false;
     }
@@ -1928,6 +1931,7 @@ bool PaymasterStore::ExpireProviderQuotes(int64_t now,
             break;
         }
     }
+    page.Complete(next);
     return true;
 }
 
@@ -2269,8 +2273,10 @@ bool PaymasterStore::CompactClientCapacitySnapshots(
 
     LOCK(m_wallet.cs_wallet);
     WalletBatch batch{m_wallet.GetDatabase()};
+    PaymasterScanPage page{m_wallet.GetDatabase(), PaymasterScan::CAPACITY_SNAPSHOTS};
+    uint256 next;
     std::vector<ValidatedCapacitySnapshot> snapshots;
-    if (!batch.ListPaymasterCapacitySnapshots(snapshots)) {
+    if (!batch.ListPaymasterCapacitySnapshotsPage(page.after.record, snapshots, next)) {
         error = "PAYMASTER_CAPACITY_SNAPSHOT_DATABASE_READ";
         return false;
     }
@@ -2357,6 +2363,7 @@ bool PaymasterStore::CompactClientCapacitySnapshots(
         }
         ++compacted_snapshots;
     }
+    page.Complete(next);
     return true;
 }
 

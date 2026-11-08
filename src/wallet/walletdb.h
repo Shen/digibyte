@@ -517,6 +517,8 @@ public:
     // reject a missing/corrupt archive body or an active/archive duplicate.
     bool ListPaymasterAlternativeRecoveries(
         std::vector<DigiDollar::Paymaster::AlternativeRecoveryRecord>& recoveries);
+    bool ListPaymasterAlternativeRecoveriesPage(const uint256& after,
+        std::vector<DigiDollar::Paymaster::AlternativeRecoveryRecord>& recoveries, uint256& next);
     // Move a fully validated, sufficiently confirmed provider completion out
     // of active scans. Caller must hold an atomic wallet DB transaction.
     bool ArchivePaymasterAlternativeRecovery(
@@ -549,6 +551,8 @@ public:
         DigiDollar::Paymaster::ValidatedCapacitySnapshot& snapshot);
     bool ListPaymasterCapacitySnapshots(
         std::vector<DigiDollar::Paymaster::ValidatedCapacitySnapshot>& snapshots);
+    bool ListPaymasterCapacitySnapshotsPage(const uint256& after,
+        std::vector<DigiDollar::Paymaster::ValidatedCapacitySnapshot>& snapshots, uint256& next);
     bool ErasePaymasterCapacitySnapshot(const uint256& snapshot_id);
     bool WritePaymasterCapacitySlot(const uint256& resource_commitment,
                                     const uint256& snapshot_id,
@@ -648,6 +652,8 @@ public:
     bool ErasePaymasterProviderCommit(const uint256& commit_key);
     bool ListPaymasterProviderCommits(
         std::vector<DigiDollar::Paymaster::ProviderCommitRecord>& commits);
+    bool ListPaymasterProviderCommitsPage(const uint256& after,
+        std::vector<DigiDollar::Paymaster::ProviderCommitRecord>& commits, uint256& next);
     bool WritePaymasterUserAuthorization(const DigiDollar::Paymaster::UserAuthorizationRecord& authorization, bool overwrite = false);
     DatabaseReadStatus ReadPaymasterUserAuthorizationWithStatus(
         const uint256& commit_key,

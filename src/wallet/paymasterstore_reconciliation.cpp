@@ -223,12 +223,22 @@ bool PaymasterStore::ListClientDurableFinalTransactions(
     std::vector<CTransactionRef>& transactions,
     std::string& error) const
 {
+    return ListClientDurableFinalTransactions(transactions, error, false);
+}
+
+bool PaymasterStore::ListClientDurableFinalTransactions(
+    std::vector<CTransactionRef>& transactions, std::string& error, bool bounded) const
+{
     transactions.clear();
     error.clear();
     LOCK(m_wallet.cs_wallet);
     WalletBatch batch{m_wallet.GetDatabase()};
     std::vector<PaymentSession> sessions;
-    if (!batch.ListPaymasterSessions(sessions)) {
+    PaymasterScanPage page{m_wallet.GetDatabase(), PaymasterScan::CLIENT_FINALS};
+    std::string next;
+    if (bounded ? !batch.ListPaymasterSessionsPage(page.after.request,
+            PAYMASTER_BACKGROUND_SESSION_ROWS, PAYMASTER_BACKGROUND_SESSION_BYTES, sessions, next)
+                : !batch.ListPaymasterSessions(sessions)) {
         error = "PAYMASTER_SESSION_DATABASE_READ";
         return false;
     }
@@ -260,6 +270,7 @@ bool PaymasterStore::ListClientDurableFinalTransactions(
         }
         transactions.push_back(MakeTransactionRef(selected.transaction));
     }
+    if (bounded) page.Complete(next);
     return true;
 }
 
@@ -293,7 +304,7 @@ bool PaymasterStore::ValidateClientDurableFinalForBroadcast(
         LOCK(m_wallet.cs_wallet);
         WalletBatch batch{m_wallet.GetDatabase()};
         std::vector<PaymentSession> sessions;
-        if (!batch.ListPaymasterSessions(sessions)) {
+        if (!ListPaymasterFinalSessions(batch, m_wallet.GetDatabase(), txid, sessions)) {
             error = "PAYMASTER_SESSION_DATABASE_READ";
             return false;
         }
@@ -817,15 +828,17 @@ bool PaymasterStore::ReconcileFinalSessionsAtTip(int64_t now,
     std::vector<ReconciliationCandidate> candidates;
     std::set<uint256> scheduled_wtxids;
     size_t pruned_unsigned{0};
+    PaymasterScanPage page{m_wallet.GetDatabase(), PaymasterScan::RECONCILIATION};
+    std::string next;
     {
         LOCK(m_wallet.cs_wallet);
         WalletBatch batch{m_wallet.GetDatabase()};
         std::vector<PaymentSession> sessions;
-        if (!batch.ListPaymasterSessions(sessions)) {
+        if (!batch.ListPaymasterSessionsPage(page.after.request, PAYMASTER_BACKGROUND_SESSION_ROWS,
+                PAYMASTER_BACKGROUND_SESSION_BYTES, sessions, next)) {
             error = "PAYMASTER_SESSION_DATABASE_READ";
             return false;
         }
-        PrimePaymasterSessionIndex(m_wallet.GetDatabase(), sessions);
         for (const PaymentSession& session : sessions) {
             if (session.provider_side && session.state == SessionState::FAILED &&
                 TimeDeltaExceeds(now, session.updated_at, CAPACITY_REPLAY_RETENTION_SECONDS) &&
@@ -904,6 +917,7 @@ bool PaymasterStore::ReconcileFinalSessionsAtTip(int64_t now,
             return false;
         }
     }
+    page.Complete(next);
     return true;
 }
 

@@ -5,6 +5,7 @@
 /** \file Self-recovery and alternative-provider recovery state. */
 
 #include <wallet/paymasterstore.h>
+#include <wallet/paymastersessionindex.h>
 #include <wallet/paymasterstore_internal.h>
 
 #include <chainparams.h>
@@ -1158,8 +1159,10 @@ bool PaymasterStore::ExpireAlternativeRecoveries(
 
     LOCK(m_wallet.cs_wallet);
     WalletBatch batch{m_wallet.GetDatabase()};
+    PaymasterScanPage page{m_wallet.GetDatabase(), PaymasterScan::RECOVERIES};
+    uint256 next;
     std::vector<AlternativeRecoveryRecord> recoveries;
-    if (!batch.ListPaymasterAlternativeRecoveries(recoveries)) {
+    if (!batch.ListPaymasterAlternativeRecoveriesPage(page.after.record, recoveries, next)) {
         error = "PAYMASTER_RECOVERY_DATABASE_READ";
         return false;
     }
@@ -1209,7 +1212,10 @@ bool PaymasterStore::ExpireAlternativeRecoveries(
         }
         expiring.push_back(std::move(recovery));
     }
-    if (expiring.empty() && pruning.empty() && archiving.empty()) return true;
+    if (expiring.empty() && pruning.empty() && archiving.empty()) {
+        page.Complete(next);
+        return true;
+    }
 
     // Expiry releases financial bindings before the later pruning pass. Prove
     // absence of independent authority here too, not only before deletion.
@@ -1370,6 +1376,7 @@ bool PaymasterStore::ExpireAlternativeRecoveries(
         return false;
     }
     expired_recoveries = expiring.size();
+    page.Complete(next);
     return true;
 }
 

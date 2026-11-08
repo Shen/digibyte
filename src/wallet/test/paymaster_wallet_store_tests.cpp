@@ -843,6 +843,67 @@ void CheckUnreadableClientArtifact(WalletTestingSetup& fixture, const PaymentSes
 
 BOOST_FIXTURE_TEST_SUITE(paymaster_wallet_store_tests, WalletTestingSetup)
 
+BOOST_AUTO_TEST_CASE(background_maintenance_pages_terminal_history_and_reuses_final_index)
+{
+    SyncWithValidationInterfaceQueue();
+    auto owned = std::make_unique<SessionIndexDatabase>();
+    auto& db = *owned;
+    wallet::CWallet observed_wallet{m_node.chain.get(), "bounded-background", std::move(owned)};
+    WalletBatch batch{db};
+    {
+        LOCK(observed_wallet.cs_wallet);
+        BOOST_REQUIRE(batch.TxnBegin());
+        for (size_t i{0}; i < 1025; ++i) {
+            PaymentSession session;
+            session.request_id = strprintf("550e8400-e29b-41d4-a716-%012u", i);
+            session.session_id = uint256S(strprintf("%064x", i + 1));
+            session.created_at = session.updated_at = 100;
+            session.state = SessionState::FAILED;
+            BOOST_REQUIRE(batch.WritePaymasterSession(session));
+        }
+        BOOST_REQUIRE(batch.TxnCommit());
+    }
+    PaymasterStore store{observed_wallet};
+    std::string error;
+    const auto before = db.m_records;
+    for (size_t pass{0}; pass < 17; ++pass) {
+        db.session_rows = db.session_bytes = 0;
+        BOOST_REQUIRE_MESSAGE(store.ReconcileFinalSessionsAtTip(1000, error), error);
+        BOOST_CHECK_LE(db.session_rows, 2 * PAYMASTER_BACKGROUND_SESSION_ROWS);
+        BOOST_CHECK_LE(db.session_bytes, 2 * PAYMASTER_BACKGROUND_SESSION_BYTES);
+        const auto position = GetPaymasterScanPosition(db, PaymasterScan::RECONCILIATION);
+        BOOST_CHECK_EQUAL(position.request.empty(), pass == 16);
+        db.session_rows = 0;
+        const auto recovery = RecoverDurablePaymasterCommits(observed_wallet, 1000, true);
+        BOOST_CHECK(recovery.errors.empty());
+        BOOST_CHECK_EQUAL(recovery.candidates, 0U);
+        BOOST_CHECK_LE(db.session_rows, 2 * PAYMASTER_BACKGROUND_SESSION_ROWS);
+        BOOST_CHECK_EQUAL(GetPaymasterScanPosition(db, PaymasterScan::CLIENT_FINALS).request.empty(), pass == 16);
+        BOOST_CHECK_EQUAL(GetPaymasterScanPosition(db, PaymasterScan::SIGNED_ATTEMPTS).request.empty(), pass == 16);
+    }
+    BOOST_CHECK_EQUAL(db.session_scans, 0U);
+    BOOST_CHECK(db.m_records == before);
+    // One cold reconstruction, then point lookups. The derived index still
+    // cannot authorize this unrelated transaction.
+    CMutableTransaction transaction;
+    transaction.vin.emplace_back(COutPoint{uint256S("abc"), 0});
+    transaction.vout.emplace_back(1, CScript{});
+    for (size_t i{0}; i < 10; ++i) {
+        BOOST_CHECK(!store.ValidateClientDurableFinalForBroadcast(CTransaction{transaction}, 1000, nullptr, error));
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_CLIENT_FINAL_AUTHORIZATION_REQUIRED");
+        BOOST_CHECK_EQUAL(db.session_scans, 1U);
+    }
+    // Failed pages discard progress. Reopen/unload forgets it as well.
+    SetPaymasterScanPosition(db, PaymasterScan::RECONCILIATION,
+        {"550e8400-e29b-41d4-a716-000000001024", {}});
+    BOOST_REQUIRE(db.MakeBatch()->Write(std::make_pair(DBKeys::PAYMASTER_SESSION,
+        std::string{"550e8400-e29b-41d4-a716-999999999999"}), uint16_t{65535}));
+    BOOST_CHECK(!store.ReconcileFinalSessionsAtTip(1000, error));
+    BOOST_CHECK(GetPaymasterScanPosition(db, PaymasterScan::RECONCILIATION).request.empty());
+    ForgetPaymasterSessionIndex(db);
+    BOOST_CHECK(GetPaymasterScanPosition(db, PaymasterScan::CLIENT_FINALS).request.empty());
+}
+
 BOOST_AUTO_TEST_CASE(client_session_pages_bound_raw_rows_before_filtering)
 {
     SyncWithValidationInterfaceQueue();

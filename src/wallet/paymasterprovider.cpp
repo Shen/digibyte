@@ -1111,17 +1111,23 @@ DurablePaymasterRecoveryReport RecoverDurablePaymasterCommits(
     CWallet& wallet,
     int64_t now)
 {
+    return RecoverDurablePaymasterCommits(wallet, now, false);
+}
+
+DurablePaymasterRecoveryReport RecoverDurablePaymasterCommits(
+    CWallet& wallet, int64_t now, bool bounded)
+{
     LOG_TIME_MILLIS_WITH_CATEGORY("Paymaster durable transaction recovery", BCLog::BENCH);
     DurablePaymasterRecoveryReport report;
     PaymasterStore store{wallet};
     std::vector<ProviderCommitRecord> commits;
-    if (!store.ListProviderCommits(commits)) {
+    if (!store.ListProviderCommits(commits, bounded)) {
         report.errors.emplace_back("PAYMASTER_COMMIT_DATABASE_READ");
         return report;
     }
     std::vector<ProviderAttempt> provider_signed_attempts;
     if (!store.ListProviderSignedAttemptsWithoutCommit(
-            provider_signed_attempts)) {
+            provider_signed_attempts, bounded)) {
         report.errors.emplace_back(
             "PAYMASTER_PROVIDER_SIGNED_ATTEMPT_DATABASE_READ");
         return report;
@@ -1160,7 +1166,7 @@ DurablePaymasterRecoveryReport RecoverDurablePaymasterCommits(
     std::vector<CTransactionRef> client_finals;
     std::string list_error;
     if (!store.ListClientDurableFinalTransactions(client_finals,
-                                                  list_error)) {
+                                                  list_error, bounded)) {
         report.errors.push_back(
             list_error.empty() ? "PAYMASTER_CLIENT_FINAL_DATABASE_READ" : std::move(list_error));
         return report;

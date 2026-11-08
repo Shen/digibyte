@@ -32,6 +32,7 @@ struct SessionIndex {
     bool valid{false};
     uint64_t revision{0};
     uint256 capacity_cleanup_after;
+    std::map<PaymasterScan, PaymasterScanPosition> scans;
     std::map<uint256, std::set<std::string>> by_transaction;
     std::map<std::string, FinalIds> by_request;
 
@@ -94,6 +95,7 @@ void PaymasterSessionIndexEnd(const WalletBatch* owner, bool committed)
         ++index->second.revision;
         if (!committed) {
             index->second.valid = false;
+            index->second.scans.clear();
         } else if (index->second.valid) {
             for (const auto& [request, ids] : pending->second.updates) {
                 index->second.Update(request, ids);
@@ -107,6 +109,32 @@ void ForgetPaymasterSessionIndex(WalletDatabase& database)
 {
     std::lock_guard<std::mutex> lock{session_index_mutex};
     session_indexes.erase(&database);
+}
+
+PaymasterScanPosition GetPaymasterScanPosition(WalletDatabase& database, PaymasterScan scan)
+{
+    std::lock_guard<std::mutex> lock{session_index_mutex};
+    return session_indexes[&database].scans[scan];
+}
+
+void SetPaymasterScanPosition(WalletDatabase& database, PaymasterScan scan, const PaymasterScanPosition& position)
+{
+    std::lock_guard<std::mutex> lock{session_index_mutex};
+    session_indexes[&database].scans[scan] = position;
+}
+
+PaymasterScanPage::PaymasterScanPage(WalletDatabase& database, PaymasterScan scan)
+    : m_database(database), m_scan(scan), after(GetPaymasterScanPosition(database, scan))
+{
+    SetPaymasterScanPosition(database, scan, {});
+}
+void PaymasterScanPage::Complete(const std::string& next)
+{
+    SetPaymasterScanPosition(m_database, m_scan, {next, {}});
+}
+void PaymasterScanPage::Complete(const uint256& next)
+{
+    SetPaymasterScanPosition(m_database, m_scan, {{}, next});
 }
 
 uint256 GetPaymasterCapacityCleanupCursor(WalletDatabase& database)
@@ -128,6 +156,7 @@ void PrimePaymasterSessionIndex(WalletDatabase& database,
     std::lock_guard<std::mutex> lock{session_index_mutex};
     rebuilt.revision = session_indexes[&database].revision + 1;
     rebuilt.capacity_cleanup_after = session_indexes[&database].capacity_cleanup_after;
+    rebuilt.scans = std::move(session_indexes[&database].scans);
     session_indexes[&database] = std::move(rebuilt);
 }
 
@@ -158,6 +187,7 @@ bool ListPaymasterFinalSessions(WalletBatch& batch, WalletDatabase& database,
         if (index.revision != revision) return false;
         rebuilt.revision = revision;
         rebuilt.capacity_cleanup_after = index.capacity_cleanup_after;
+        rebuilt.scans = std::move(index.scans);
         index = std::move(rebuilt);
         const auto found = index.by_transaction.find(txid);
         if (found != index.by_transaction.end()) requests = found->second;
@@ -675,6 +705,76 @@ bool WalletBatch::ReadPaymasterAlternativeRecovery(
 {
     return ReadPaymasterAlternativeRecoveryWithStatus(recovery_id, recovery) ==
            DatabaseReadStatus::FOUND;
+}
+
+namespace {
+/** Bound raw rows and bytes before filtering. Point reads reuse the canonical
+ * version/binding checks, including active/archive conflicts for recoveries.
+ * The caller holds cs_wallet, so the cursor and point read see the same row. */
+template <typename Record, typename Read>
+bool ReadPaymasterRecordPage(DatabaseBatch& batch, const std::string& prefix,
+    const uint256& after, size_t maximum_row_bytes, std::vector<Record>& records,
+    uint256& next, Read read)
+{
+    records.clear();
+    next.SetNull();
+    DataStream begin;
+    begin << prefix;
+    SerializeData end{begin.begin(), begin.end()};
+    if (end.empty() || end.back() == std::byte{0xff}) return false;
+    end.back() = std::byte{static_cast<unsigned char>(std::to_integer<unsigned char>(end.back()) + 1)};
+    if (!after.IsNull()) begin << after << uint8_t{0};
+    auto cursor = batch.GetNewRangeCursor(begin, end);
+    if (!cursor) return false;
+    size_t bytes{0};
+    constexpr size_t maximum_rows{64};
+    const size_t maximum_bytes{2 * maximum_row_bytes};
+    while (records.size() < maximum_rows && bytes <= maximum_bytes - maximum_row_bytes) {
+        DataStream key, value;
+        const auto status = cursor->Next(key, value);
+        if (status == DatabaseCursor::Status::DONE) { next.SetNull(); return true; }
+        if (status != DatabaseCursor::Status::MORE || key.size() > maximum_row_bytes ||
+            value.size() > maximum_row_bytes - key.size()) return false;
+        bytes += key.size() + value.size();
+        try {
+            std::string type;
+            uint256 id;
+            key >> type >> id;
+            Record record;
+            if (!key.empty() || type != prefix || id.IsNull() ||
+                (!after.IsNull() && !(after < id)) || !read(id, record)) return false;
+            records.push_back(std::move(record));
+            next = id;
+        } catch (const std::ios_base::failure&) { return false; }
+    }
+    return true;
+}
+} // namespace
+
+bool WalletBatch::ListPaymasterAlternativeRecoveriesPage(const uint256& after,
+    std::vector<DigiDollar::Paymaster::AlternativeRecoveryRecord>& recoveries, uint256& next)
+{
+    return ReadPaymasterRecordPage(*m_batch, DBKeys::PAYMASTER_ALT_RECOVERY, after,
+        16 * DigiDollar::Paymaster::MAX_DIRECT_MESSAGE_BYTES, recoveries, next,
+        [this](const auto& id, auto& record) { return ReadPaymasterAlternativeRecovery(id, record); });
+}
+
+bool WalletBatch::ListPaymasterCapacitySnapshotsPage(const uint256& after,
+    std::vector<DigiDollar::Paymaster::ValidatedCapacitySnapshot>& snapshots, uint256& next)
+{
+    return ReadPaymasterRecordPage(*m_batch, DBKeys::PAYMASTER_CAPACITY, after,
+        DigiDollar::Paymaster::MAX_DIRECT_MESSAGE_BYTES + 8192, snapshots, next,
+        [this](const auto& id, auto& record) {
+            return ReadPaymasterCapacitySnapshot(id, record) && !record.provider_id.IsNull();
+        });
+}
+
+bool WalletBatch::ListPaymasterProviderCommitsPage(const uint256& after,
+    std::vector<DigiDollar::Paymaster::ProviderCommitRecord>& commits, uint256& next)
+{
+    return ReadPaymasterRecordPage(*m_batch, DBKeys::PAYMASTER_PROVIDER_COMMIT, after,
+        4 * DigiDollar::Paymaster::MAX_DIRECT_MESSAGE_BYTES + 8192, commits, next,
+        [this](const auto& id, auto& record) { return ReadPaymasterProviderCommit(id, record); });
 }
 
 bool WalletBatch::ListPaymasterAlternativeRecoveries(

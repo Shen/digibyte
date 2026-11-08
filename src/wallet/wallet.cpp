@@ -2582,7 +2582,7 @@ void MaybeResendWalletTxs(WalletContext& context)
         // transient txindex/mempool condition at wallet load must defer them,
         // not make recovery depend on startpaymaster or wallet unlock.
         const DurablePaymasterRecoveryReport paymaster_recovery =
-            RecoverDurablePaymasterCommits(*pwallet, GetTime());
+            RecoverDurablePaymasterCommits(*pwallet, GetTime(), /*bounded=*/true);
         if (!paymaster_recovery.errors.empty()) {
             pwallet->WalletLogPrintf(
                 "Paymaster durable-commit retry: %u candidate(s), %u "

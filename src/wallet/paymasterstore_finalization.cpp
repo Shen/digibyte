@@ -5,6 +5,7 @@
 /** \file Provider commits, exact results, and client finalization state. */
 
 #include <wallet/paymasterstore.h>
+#include <wallet/paymastersessionindex.h>
 #include <wallet/paymasterstore_internal.h>
 #include <paymaster/finance.h>
 
@@ -583,8 +584,19 @@ bool PaymasterStore::GetProviderCommit(
 bool PaymasterStore::ListProviderCommits(
     std::vector<ProviderCommitRecord>& commits) const
 {
+    return ListProviderCommits(commits, false);
+}
+
+bool PaymasterStore::ListProviderCommits(std::vector<ProviderCommitRecord>& commits, bool bounded) const
+{
     LOCK(m_wallet.cs_wallet);
-    return WalletBatch{m_wallet.GetDatabase()}.ListPaymasterProviderCommits(commits);
+    WalletBatch batch{m_wallet.GetDatabase()};
+    if (!bounded) return batch.ListPaymasterProviderCommits(commits);
+    PaymasterScanPage page{m_wallet.GetDatabase(), PaymasterScan::PROVIDER_COMMITS};
+    uint256 next;
+    if (!batch.ListPaymasterProviderCommitsPage(page.after.record, commits, next)) return false;
+    page.Complete(next);
+    return true;
 }
 
 bool PaymasterStore::ReconcileProviderPoolSuccessors(size_t& recovered,
@@ -721,11 +733,21 @@ bool PaymasterStore::ReconcileProviderPoolSuccessors(size_t& recovered,
 bool PaymasterStore::ListProviderSignedAttemptsWithoutCommit(
     std::vector<ProviderAttempt>& attempts) const
 {
+    return ListProviderSignedAttemptsWithoutCommit(attempts, false);
+}
+
+bool PaymasterStore::ListProviderSignedAttemptsWithoutCommit(
+    std::vector<ProviderAttempt>& attempts, bool bounded) const
+{
     attempts.clear();
     LOCK(m_wallet.cs_wallet);
     WalletBatch batch{m_wallet.GetDatabase()};
     std::vector<PaymentSession> sessions;
-    if (!batch.ListPaymasterSessions(sessions)) return false;
+    PaymasterScanPage page{m_wallet.GetDatabase(), PaymasterScan::SIGNED_ATTEMPTS};
+    std::string next;
+    if (bounded ? !batch.ListPaymasterSessionsPage(page.after.request,
+            PAYMASTER_BACKGROUND_SESSION_ROWS, PAYMASTER_BACKGROUND_SESSION_BYTES, sessions, next)
+                : !batch.ListPaymasterSessions(sessions)) return false;
     for (const PaymentSession& session : sessions) {
         if (!session.provider_side) continue;
         for (const uint256& attempt_id : session.attempt_ids) {
@@ -749,6 +771,7 @@ bool PaymasterStore::ListProviderSignedAttemptsWithoutCommit(
             }
         }
     }
+    if (bounded) page.Complete(next);
     return true;
 }
 
