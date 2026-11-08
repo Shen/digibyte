@@ -1282,9 +1282,8 @@ RPCHelpMan getpaymasterinfo()
                 {
                     LOCK(wallet->cs_wallet);
                     ProviderFinanceMetadata finance;
-                    if (finance_current && AreProviderFinancesCurrent(*wallet) &&
-                        WalletBatch{wallet->GetDatabase()}.ReadPaymasterFinanceMetadata(finance) == DatabaseReadStatus::FOUND &&
-                        finance.provider_id == readiness.identity.provider_id && finance.genesis_hash == Params().GenesisBlock().GetHash()) {
+                    if (finance_current && ReadProviderFinanceSummary(*wallet, finance, finance_error) &&
+                        finance.provider_id == readiness.identity.provider_id) {
                         UniValue summary{UniValue::VOBJ};
                         summary.pushKV("service_fee_income_cents", finance.totals.total.dd_income.value);
                         summary.pushKV("dgb_operating_cost_satoshis", finance.totals.total.dgb_cost.value);

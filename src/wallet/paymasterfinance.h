@@ -76,6 +76,10 @@ bool ReconcileProviderFinanceReport(CWallet& wallet, bool continuation, std::str
 /** Requires cs_wallet; only observes the derived work state. It performs no
  * reconciliation or database reads and never grants payment authority. */
 bool AreProviderFinancesCurrent(const CWallet& wallet);
+/** Read a source-checked summary without scanning history or granting authority.
+ * Reconciliation must have completed; damaged derivations invalidate the cache. */
+bool ReadProviderFinanceSummary(CWallet& wallet,
+    DigiDollar::Paymaster::ProviderFinanceMetadata& summary, std::string& error);
 std::optional<DigiDollar::Paymaster::DGBSatoshis> GetProviderFinanceTransactionFee(
     CWallet& wallet, const CTransactionRef& transaction);
 bool RecordProviderFinanceTransaction(CWallet& wallet,

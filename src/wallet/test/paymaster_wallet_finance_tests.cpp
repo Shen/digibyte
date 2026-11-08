@@ -1478,6 +1478,17 @@ BOOST_AUTO_TEST_CASE(warm_reports_detect_missing_time_and_day_records_without_fu
     auto metadata = Metadata();
     metadata.totals = {};
     BOOST_REQUIRE(database->MakeBatch()->Write(DBKeys::PAYMASTER_FINANCE_LEDGER, metadata));
+    ProviderFinanceMetadata summary;
+    std::string summary_error;
+    database->reads = {};
+    BOOST_CHECK(!ReadProviderFinanceSummary(*provider, summary, summary_error));
+    BOOST_CHECK_EQUAL(summary_error, "PAYMASTER_FINANCE_INDEX_INVALID");
+    BOOST_CHECK_EQUAL(database->reads.prefixes, 0U);
+    BOOST_CHECK_EQUAL(database->reads.rows, 0U);
+    BOOST_REQUIRE(std::holds_alternative<ProviderFinanceStatus>(CaptureProviderFinanceStatus(*provider, query)));
+    BOOST_REQUIRE(ReadProviderFinanceSummary(*provider, summary, summary_error));
+    BOOST_CHECK_EQUAL(summary.totals.total.dd_income.value, 3);
+    BOOST_REQUIRE(database->MakeBatch()->Write(DBKeys::PAYMASTER_FINANCE_LEDGER, metadata));
     BOOST_REQUIRE(std::holds_alternative<ProviderFinanceStatusFailure>(CaptureProviderFinanceStatus(*provider, query)));
     BOOST_REQUIRE(std::holds_alternative<ProviderFinanceStatus>(CaptureProviderFinanceStatus(*provider, query)));
 }

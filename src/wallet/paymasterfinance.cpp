@@ -1127,14 +1127,21 @@ bool ReconcileProviderFinanceReport(CWallet& wallet, bool /*continuation*/, std:
 }
 
 namespace {
+const char* CheckFinanceSummary(const FinanceState& state, const ProviderFinanceMetadata& metadata)
+{
+    if (!state.initialized || !state.pending.empty()) return "PAYMASTER_FINANCE_RECONCILING";
+    if (metadata.provider_id != state.provider || metadata.event_count != state.events_by_time.size() ||
+        !(metadata.totals == state.totals)) return "PAYMASTER_FINANCE_INDEX_INVALID";
+    return nullptr;
+}
+
 // The source-built cache verifies only the returned page and the bounded
 // calendar window. Missing index rows cannot masquerade as an empty history.
 const char* CheckFinanceReport(const FinanceState& state, const ProviderFinanceQuery& query,
                                const ProviderFinanceReport& report, const std::optional<FinancePosition>& after)
 {
     constexpr const char* invalid{"PAYMASTER_FINANCE_INDEX_INVALID"};
-    if (!state.initialized || report.metadata.event_count != state.events_by_time.size() ||
-        !(report.metadata.totals == state.totals)) return invalid;
+    if (const auto* failure = CheckFinanceSummary(state, report.metadata)) return failure;
     const int64_t today = (query.now / PROVIDER_BUDGET_WINDOW_SECONDS) * PROVIDER_BUDGET_WINDOW_SECONDS;
     const std::array<int64_t, 4> cutoffs{today, std::max<int64_t>(0, today - 6 * PROVIDER_BUDGET_WINDOW_SECONDS),
                                       std::max<int64_t>(0, today - 29 * PROVIDER_BUDGET_WINDOW_SECONDS), 0};
@@ -1290,6 +1297,32 @@ ProviderFinanceStatusResult CaptureProviderFinanceStatus(CWallet& wallet, Provid
         result.valuation = ProviderFinanceValuation{oracle_price, query.now, static_cast<double>(income_usd - cost_usd)};
     }
     return result;
+}
+
+bool ReadProviderFinanceSummary(CWallet& wallet, ProviderFinanceMetadata& summary, std::string& error)
+{
+    LOCK(wallet.cs_wallet);
+    summary = {};
+    error.clear();
+    WalletBatch batch{wallet.GetDatabase()};
+    ProviderIdentityRecord identity;
+    ProviderFinanceMetadata candidate;
+    if (!batch.ReadPaymasterIdentity(identity) ||
+        batch.ReadPaymasterFinanceMetadata(candidate) != DatabaseReadStatus::FOUND ||
+        candidate.provider_id != identity.provider_id || candidate.genesis_hash != Params().GenesisBlock().GetHash()) {
+        error = "PAYMASTER_INVALID_FINANCE_LEDGER";
+        return false;
+    }
+    const auto state = FindFinanceState(wallet.GetDatabase());
+    if (!state) { error = "PAYMASTER_FINANCE_RECONCILING"; return false; }
+    std::lock_guard<std::mutex> lock{state->mutex};
+    if (const auto* failure = CheckFinanceSummary(*state, candidate)) {
+        error = failure;
+        if (error == "PAYMASTER_FINANCE_INDEX_INVALID") state->initialized = false;
+        return false;
+    }
+    summary = std::move(candidate);
+    return true;
 }
 
 bool AreProviderFinancesCurrent(const CWallet& wallet)

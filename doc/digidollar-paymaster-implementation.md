@@ -398,6 +398,9 @@ Unknown record versions and damaged sources remain unavailable. Warm reports
 and transaction reconciliation compare bounded pages against committed source
 observations; missing index rows invalidate the cache and require reconstruction.
 Failed maintenance with a saved transaction ID remains visible as open work.
+The compact `getpaymasterinfo.finance_summary` shares the native report's
+metadata/source-cache consistency check. A mismatched total or event count is
+unavailable and invalidates derived state; it is never presented as known zero.
 
 ## Execution and presentation
 
