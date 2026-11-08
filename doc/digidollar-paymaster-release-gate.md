@@ -4,6 +4,30 @@ There is **no complete current-revision release certification** in this record.
 The candidate below and historical checkpoints identify actual verification;
 implemented behavior alone does not establish release acceptance.
 
+## Service, client budgets and bounded background work
+
+AP1–AP5 on `bb7df87700fc9a439e15ab47dbea8baf31fdc1b8`, verified in the
+dirty worktree on 2026-11-08. Current contracts and reproducible commands are in
+the [implementation guide](digidollar-paymaster-implementation.md),
+[client contract](digidollar-paymaster-integration.md#offer-selection-and-presentation)
+and [focused test selection](digidollar-paymaster-testing.md#review-follow-up-regressions).
+
+| Executed check | Result and scope |
+|---|---|
+| Combined native selection | Exit 0: **47 cases / 42,243 assertions**, no selected failures or skips. Covers signed payment during pending finite setup; shared fee admission/observation and RPC offers/status; 1,025-session background and periodic recovery paging; cold/warm final indexes; compact finance corruption; atomic expiry, signed recovery archival/reorgs, commit failures, restore/checkpoints, manual locks and ordinary DGB/DD wallet/database regressions. |
+| Qt | **9 functions / 37 feature rows**, zero failures/skips, Windows/Fusion. Lost reply requires a fresh snapshot; warnings and completion dialogs tolerate wallet changes/destruction; fallback, exact recovery, expiry and all 20 review/cancellation variants pass. Test registration was freshly generated from the current header. |
+| Compilation | All **22 changed C++ units**, two ordinary-wallet test consumers and Qt test registration freshly compiled with MSVC 14.43.34808, `/W3 /WX /Od /MT /std:c++20`. All 22 changed units also pass C++17 syntax checks. Source/object hashes were checked. |
+| Local controls | Dependency/cycle lint, six boundary fixtures, changed paths/shared-Core records against unchanged HEAD policy, JSON and `git diff --check` pass. No boundary-policy or financial-validation exception. |
+
+Native SHA-256: `46a7bf3f27231492ffced57ff742863fe55ebf6753db57d1126f90c0b50c7e94`.
+Qt SHA-256: `4f6b92d172dc7dec00766313b0bda65e94e94ec1934d81ab9b92da4661705e3b`.
+Logs and source/object manifests are local under `.ai/implement-ap1-ap5-bb7df877/`.
+These are isolated partial links with retained dependencies, without complete
+transitive-header provenance. Clean product builds, full functional suites,
+sanitizers and cross-platform release checks remain operator work. Complete
+financial absence proofs and cold/startup reconstruction remain deliberate full
+operations; background enumeration and periodic recovery use bounded pages.
+
 ## Persistence and native execution recovery
 
 AP1–AP6 follow-up on `8b34d33e308370323ab773673da0cf3005dceed2`, checked in

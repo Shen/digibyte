@@ -546,6 +546,41 @@ git diff -w $paymasterBases.official_baseline HEAD
 
 ## Review follow-up regressions
 
+For service scheduling, shared client budget observation, dialog lifetime,
+compact finance integrity and bounded background scans (AP1–AP5), run on a
+freshly built executable from the repository root:
+
+```powershell
+& ./build_msvc/x64/Release/test_digibyte.exe '--run_test=paymaster_provider_tests/client_fee_budget*:paymaster_application_tests/provider_pending_setup_continues_admitted_work_only,client_fee_observation_and_rpc_reject_free_offer_above_daily_limit:paymaster_wallet_store_tests/background_maintenance_pages_terminal_history_and_reuses_final_index:paymaster_wallet_finance_tests/warm_reports_detect_missing_time_and_day_records_without_full_scans:paymaster_wallet_security_tests/automatic_pending_setup_processes_valid_signed_payment' --report_level=detailed
+if ($LASTEXITCODE -ne 0) { throw 'Paymaster AP1-AP5 regression failed' }
+$env:DIGIBYTE_QT_TEST_SUITE = 'PaymasterWidgetTests'
+foreach ($paymasterQtCase in @('paymasterSendControllerAuthorizationAndLostReply', 'paymasterSendControllerCancellationAndWalletChange', 'paymasterSendControllerClosureFreshness', 'paymasterSendControllerRecoveryReview', 'paymasterSignedRecoverySurvivesQuoteExpiry', 'paymasterClientRecoveryExpiryIsFailClosed', 'paymasterClientCompletionNoticeLifetime', 'paymasterClientFallbackContinues', 'paymasterClientReviewCancellation')) {
+    $env:DIGIBYTE_QT_TEST_FUNCTION = $paymasterQtCase
+    & ./build_msvc/x64/Release/test_digibyte-qt.exe
+    if ($LASTEXITCODE -ne 0) { throw "Paymaster Qt regression failed: $paymasterQtCase" }
+}
+Remove-Item Env:DIGIBYTE_QT_TEST_FUNCTION, Env:DIGIBYTE_QT_TEST_SUITE
+```
+
+The signed-payment fixture pays DigiByte's normal relay fee while finite setup
+remains pending; require one durable exact commit and unchanged replay bytes.
+Budget coverage compares observation against actual admission after policy
+tightening, at/over the limit, with zero fees and clock rollback/aging. The RPC
+fixture checks rejected free offers and status against the same liabilities.
+The Qt case denies retry after a lost reply until a fresh snapshot and exercises
+wallet rebinding/widget deletion during a warning. Background coverage uses 1,025
+terminal client sessions, raw row/byte counts, independent progress, failed-page
+restart and one cold index reconstruction followed by repeated narrow lookups.
+The finance case corrupts a structurally readable summary and requires an
+unavailable compact observation before repair, without a full scan in that read.
+The Qt selection takes several minutes on Windows. Cancellation cases wait for
+queued observations and require an explicit fresh capability after an
+unstructured error; error text alone must not authorize an unsigned release.
+Also rerun the neighboring expiry, exact-final/reorg, recovery archival,
+manual-lock, checkpoint and ordinary wallet database selections below. Complete
+product/functional/platform builds remain operator checks; partial links with
+retained dependencies establish only the selected local test evidence.
+
 For the AP1–AP6 persistence/replay follow-up, run the following on a freshly
 built native executable. These are bounded selections (normally under a minute
 for the first command), with exit 0 and no failed/skipped selected cases as the
