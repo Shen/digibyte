@@ -1332,6 +1332,105 @@ BOOST_FIXTURE_TEST_CASE(concurrent_replenishment_retains_one_current_budget_plan
     BOOST_CHECK_EQUAL(usage.reserved_fee.value, policy.maximum_maintenance_fee_per_transaction.value);
 }
 
+BOOST_FIXTURE_TEST_CASE(withdrawal_preview_replacement_preserves_independent_signed_evidence, WalletTestingSetup)
+{
+    LOCK(m_wallet.cs_wallet);
+    m_wallet.SetLastBlockProcessed(0, Params().GenesisBlock().GetHash());
+    m_wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+    m_wallet.SetupDescriptorScriptPubKeyMans();
+    const auto script = [&] {
+        const auto destination = m_wallet.GetNewDestination(OutputType::BECH32M, "withdrawal release");
+        BOOST_REQUIRE(destination);
+        return GetScriptForDestination(*destination);
+    };
+    const int64_t now = GetTime();
+    CMutableTransaction funding;
+    funding.vin.emplace_back(COutPoint{GetRandHash(), 0});
+    funding.vout.emplace_back(0, script());
+    const auto parent = MakeTransactionRef(funding);
+    BOOST_REQUIRE(m_wallet.AddToWallet(parent, TxStateInactive{}));
+    ProviderMaintenanceOutput output;
+    output.asset = PoolAsset::DD_CARRIER;
+    output.purpose = PoolPurpose::OPERATIONAL;
+    output.script_pub_key = script();
+    output.carrier_value = DDCents{100};
+    ProviderCarrierWithdrawalPlan previous;
+    previous.plan_id = GetRandHash();
+    previous.operation_id = GetRandHash();
+    previous.mode = CarrierWithdrawalMode::ALL_EXCESS;
+    previous.source_carriers = {{parent->GetHash(), 0}};
+    previous.replacement_carriers = {output};
+    previous.excess_script_pub_key = script();
+    previous.excess_amount = DDCents{100};
+    previous.estimated_fee = DGBSatoshis{10000000};
+    previous.liquidity_policy_updated_at = previous.created_at = now;
+    previous.expires_at = now + 600;
+    ProviderMaintenanceRecord record;
+    record.operation_id = previous.operation_id;
+    record.plan_id = previous.plan_id;
+    record.kind = ProviderMaintenanceKind::WITHDRAW_CARRIER_EXCESS;
+    record.outputs = previous.replacement_carriers;
+    record.source_inputs = previous.source_carriers;
+    record.withdrawal_excess_script_pub_key = previous.excess_script_pub_key;
+    record.withdrawal_excess_amount = previous.excess_amount;
+    record.maximum_fee = previous.estimated_fee;
+    record.created_at = record.updated_at = now;
+    ProviderMaintenanceLedger ledger;
+    ledger.records = {record};
+    ProviderPoolEntry carrier;
+    carrier.outpoint = previous.source_carriers.front();
+    carrier.asset = PoolAsset::DD_CARRIER;
+    carrier.purpose = PoolPurpose::OPERATIONAL;
+    carrier.script_pub_key = parent->vout.front().scriptPubKey;
+    carrier.carrier_value = DDCents{200};
+    carrier.state = PoolEntryState::RESERVED;
+    carrier.reservation_id = record.operation_id;
+    carrier.updated_at = now;
+    WalletBatch batch{m_wallet.GetDatabase()};
+    BOOST_REQUIRE(batch.WritePaymasterMaintenanceLedger(ledger));
+    BOOST_REQUIRE(batch.WritePaymasterProviderPool({carrier}));
+    BOOST_REQUIRE(batch.WritePaymasterCarrierWithdrawalPlan(previous));
+    auto next = previous;
+    next.plan_id = GetRandHash();
+    next.operation_id = GetRandHash();
+    std::string error;
+    // Deliberately exceed a maintenance-history page. Release must prove absence
+    // itself rather than interpret an incomplete derived observation as absence.
+    for (int i = 0; i < 260; ++i) {
+        CMutableTransaction unrelated;
+        unrelated.vin.emplace_back(COutPoint{GetRandHash(), 0});
+        unrelated.vout.emplace_back(1, CScript() << OP_TRUE);
+        BOOST_REQUIRE(m_wallet.AddToWallet(MakeTransactionRef(unrelated), TxStateInactive{}));
+    }
+    for (int mutation = 0; mutation < 3; ++mutation) {
+        CMutableTransaction signed_work;
+        signed_work.vin.emplace_back(mutation == 2 ? COutPoint{GetRandHash(), 0} : carrier.outpoint);
+        signed_work.vin.front().scriptWitness.stack = {std::vector<unsigned char>(64, 1)};
+        signed_work.vout.emplace_back(0, mutation == 0 ? output.script_pub_key : previous.excess_script_pub_key);
+        const auto tx = MakeTransactionRef(signed_work);
+        BOOST_REQUIRE(m_wallet.AddToWallet(tx, mutation == 1 ? TxState{TxStateConflicted{Params().GenesisBlock().GetHash(), 0}} : TxState{TxStateInactive{true}}));
+        const auto before = GetMockableDatabase(m_wallet).m_records;
+        BOOST_CHECK(!SaveCarrierWithdrawalPreview(m_wallet, next, error));
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_MAINTENANCE_SIGNED_OR_AMBIGUOUS");
+        BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == before);
+        std::vector<uint256> remove{tx->GetHash()}, removed;
+        BOOST_REQUIRE(m_wallet.ZapSelectTx(remove, removed) == DBErrors::LOAD_OK);
+        BOOST_REQUIRE_EQUAL(removed.size(), 1U);
+    }
+    const auto before = GetMockableDatabase(m_wallet).m_records;
+    GetMockableDatabase(m_wallet).FailWriteAt(0);
+    BOOST_CHECK(!SaveCarrierWithdrawalPreview(m_wallet, next, error));
+    GetMockableDatabase(m_wallet).ClearFailureInjection();
+    BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == before);
+    BOOST_REQUIRE_MESSAGE(SaveCarrierWithdrawalPreview(m_wallet, next, error), error);
+    BOOST_REQUIRE(batch.ReadPaymasterMaintenanceLedger(ledger));
+    BOOST_CHECK(ledger.records.front().state == ProviderMaintenanceState::RELEASED);
+    std::vector<ProviderPoolEntry> pool;
+    BOOST_REQUIRE(batch.ReadPaymasterProviderPool(pool));
+    BOOST_CHECK(pool.front().state == PoolEntryState::AVAILABLE);
+    BOOST_CHECK(pool.front().reservation_id.IsNull());
+}
+
 BOOST_AUTO_TEST_SUITE_END()
 } // namespace
 } // namespace wallet

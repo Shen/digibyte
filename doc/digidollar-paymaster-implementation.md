@@ -355,10 +355,15 @@ implement this journal's recovery or ordinary fee-input protection.
 Policy and pool setters initialize records only after a status-bearing read
 proves `NOT_FOUND`. Read errors and unsupported versions preserve budgets, pool
 reservations and checkpoint state. Finite setup cancellation, selected maintenance
-cancellation and capital release share `PreparePaymasterMaintenanceCancellation`:
-selected records must be planned and unsigned, with no signed sibling or wallet
-output using their scripts, including partial or conflicted output matches. Each
-caller retains its own policy/revocation consequences and atomic write.
+cancellation, obsolete/downsized refill replacement and capital release share
+the reserve-funding wrapper of `PreparePaymasterMaintenanceRelease`. Carrier
+withdrawal preview replacement and expired withdrawal release use its separate
+withdrawal mode, which also binds every reserved source carrier. Selected records
+must be planned and unsigned, with no native execution journal, signed sibling,
+wallet source spend or output using their scripts. The complete wallet proof
+includes partial, conflicted and abandoned matches and does not depend on a
+background history page completing. Each caller retains its own policy/revocation
+consequences and atomic write of the released budget and source reservations.
 
 Checkpoint file reads hold the same per-path recursive mutex as atomic file replacement
 for the complete read-handle lifetime. On Windows, a CRT reader otherwise can

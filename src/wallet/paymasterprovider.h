@@ -265,6 +265,20 @@ struct PaymasterMaintenanceCancellation {
     uint256 plan_id;
     int64_t released_fee_budget{0};
 };
+enum class PaymasterMaintenanceReleaseKind { RESERVE_FUNDING, CARRIER_WITHDRAWAL };
+struct PaymasterMaintenanceRelease {
+    DigiDollar::Paymaster::ProviderMaintenanceLedger ledger;
+    std::vector<DigiDollar::Paymaster::ProviderPoolEntry> pool;
+    int64_t released_fee_budget{0};
+};
+/** Prepare a release only after excluding independent signing evidence. Caller
+ * holds cs_wallet and atomically persists both returned accounting records.
+ * Withdrawal additionally requires the exact reserved, unspent source pool. */
+bool PreparePaymasterMaintenanceRelease(
+    CWallet& wallet, const DigiDollar::Paymaster::ProviderMaintenanceLedger& current,
+    const std::vector<DigiDollar::Paymaster::ProviderPoolEntry>& pool,
+    const std::vector<uint256>& operation_ids, PaymasterMaintenanceReleaseKind kind,
+    int64_t now, PaymasterMaintenanceRelease& released, std::string& error);
 /** Build the same conservative cancellation transition for setup, selected
  * maintenance and retirement. Caller retains cs_wallet and atomically writes
  * the returned ledger with its role-specific policy changes. No I/O mutation. */

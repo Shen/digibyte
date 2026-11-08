@@ -918,20 +918,13 @@ bool SaveCarrierWithdrawalPreview(
             });
         if (record != ledger.records.end() &&
             record->state == ProviderMaintenanceState::PLANNED) {
-            if (!ReleaseProviderMaintenanceBudget(
-                    ledger, previous.operation_id, GetTime(), error)) {
-                return false;
-            }
+            PaymasterMaintenanceRelease released;
+            if (!PreparePaymasterMaintenanceRelease(wallet, ledger, pool, {previous.operation_id},
+                    PaymasterMaintenanceReleaseKind::CARRIER_WITHDRAWAL, GetTime(), released, error)) return false;
+            ledger = std::move(released.ledger);
+            pool = std::move(released.pool);
             ledger_changed = true;
-            for (ProviderPoolEntry& entry : pool) {
-                if (entry.state == PoolEntryState::RESERVED &&
-                    entry.reservation_id == previous.operation_id) {
-                    entry.state = PoolEntryState::AVAILABLE;
-                    entry.reservation_id.SetNull();
-                    entry.updated_at = GetTime();
-                    pool_changed = true;
-                }
-            }
+            pool_changed = true;
         }
     } else if (previous_status != DatabaseReadStatus::FOUND &&
                previous_status != DatabaseReadStatus::NOT_FOUND) {
@@ -1224,17 +1217,16 @@ bool ReconcileProviderMaintenance(CWallet& wallet,
                             }) &&
                         sources.size() == record.source_inputs.size();
                     if (can_release) {
-                        if (!ReleaseProviderMaintenanceBudget(
-                                ledger, record.operation_id, now, error)) {
-                            return false;
-                        }
+                        PaymasterMaintenanceRelease released;
+                        if (!PreparePaymasterMaintenanceRelease(wallet, ledger, pool, {record.operation_id},
+                                PaymasterMaintenanceReleaseKind::CARRIER_WITHDRAWAL, now, released, error)) return false;
+                        // Keep references into ledger.records valid for the surrounding pass.
+                        record = *std::find_if(released.ledger.records.begin(), released.ledger.records.end(),
+                            [&](const auto& candidate) { return candidate.operation_id == record.operation_id; });
+                        ledger.accounting_time_high_water = released.ledger.accounting_time_high_water;
+                        pool = std::move(released.pool);
                         ledger_changed = true;
-                        for (ProviderPoolEntry* source : sources) {
-                            source->state = PoolEntryState::AVAILABLE;
-                            source->reservation_id.SetNull();
-                            source->updated_at = now;
-                            pool_changed = true;
-                        }
+                        pool_changed = true;
                     }
                 }
             }
@@ -1497,15 +1489,18 @@ bool ReleaseSatisfiedProviderReplenishment(CWallet& wallet, bool dgb_satisfied,
         error = "PAYMASTER_INVALID_MAINTENANCE_LEDGER";
         return false;
     }
-    bool changed{false};
+    std::vector<uint256> release_ids;
     for (const auto& record : ledger.records) {
         const bool unneeded = (dgb_satisfied && record.kind == ProviderMaintenanceKind::REPLENISH_DGB) ||
                               (carriers_satisfied && record.kind == ProviderMaintenanceKind::REPLENISH_CARRIER);
         if (!unneeded || record.state != ProviderMaintenanceState::PLANNED || !record.transaction_id.IsNull()) continue;
-        if (!ReleaseProviderMaintenanceBudget(ledger, record.operation_id, GetTime(), error)) return false;
-        changed = true;
+        release_ids.push_back(record.operation_id);
     }
-    if (changed && !batch.WritePaymasterMaintenanceLedger(ledger)) {
+    if (release_ids.empty()) return true;
+    ProviderMaintenanceLedger released;
+    int64_t released_fee{0};
+    if (!PreparePaymasterMaintenanceCancellation(wallet, ledger, release_ids, GetTime(), released, released_fee, error)) return false;
+    if (!batch.WritePaymasterMaintenanceLedger(released)) {
         error = "PAYMASTER_DATABASE_WRITE";
         return false;
     }
@@ -1548,8 +1543,11 @@ static bool ReduceReplenishmentPlan(
     } while (smaller.operation_id.IsNull());
     smaller.outputs.resize(output_count);
     smaller.plan_id = MaintenancePlanId(smaller.kind, smaller.outputs, policy);
-    if (!ReleaseProviderMaintenanceBudget(ledger, operation.operation_id, GetTime(), error) ||
-        !ReserveProviderMaintenanceBudget(ledger, policy, smaller, GetTime(), error)) return false;
+    ProviderMaintenanceLedger released;
+    int64_t released_fee{0};
+    if (!PreparePaymasterMaintenanceCancellation(wallet, ledger, {operation.operation_id}, GetTime(), released, released_fee, error)) return false;
+    ledger = std::move(released);
+    if (!ReserveProviderMaintenanceBudget(ledger, policy, smaller, GetTime(), error)) return false;
     if (!batch.WritePaymasterMaintenanceLedger(ledger)) {
         error = "PAYMASTER_DATABASE_WRITE";
         return false;
@@ -2227,10 +2225,11 @@ bool RunAutomaticDGBReplenishment(
                 operation->plan_id ==
                     MaintenancePlanId(operation->kind, operation->outputs, policy);
             if (!plan_matches) {
-                if (!ReleaseProviderMaintenanceBudget(
-                        ledger, operation->operation_id, GetTime(), error)) {
-                    return false;
-                }
+                ProviderMaintenanceLedger released;
+                int64_t released_fee{0};
+                if (!PreparePaymasterMaintenanceCancellation(wallet, ledger, {operation->operation_id},
+                        GetTime(), released, released_fee, error)) return false;
+                ledger = std::move(released);
                 {
                     LOCK(wallet.cs_wallet);
                     if (!WalletBatch{wallet.GetDatabase()}
@@ -2432,10 +2431,11 @@ bool RunAutomaticCarrierReplenishment(
                 operation->plan_id ==
                     MaintenancePlanId(operation->kind, operation->outputs, policy);
             if (!plan_matches) {
-                if (!ReleaseProviderMaintenanceBudget(
-                        ledger, operation->operation_id, GetTime(), error)) {
-                    return false;
-                }
+                ProviderMaintenanceLedger released;
+                int64_t released_fee{0};
+                if (!PreparePaymasterMaintenanceCancellation(wallet, ledger, {operation->operation_id},
+                        GetTime(), released, released_fee, error)) return false;
+                ledger = std::move(released);
                 {
                     LOCK(wallet.cs_wallet);
                     if (!WalletBatch{wallet.GetDatabase()}

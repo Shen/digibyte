@@ -1939,34 +1939,68 @@ bool ReleasePaymasterCapital(CWallet& wallet, bool execute, const uint256& expec
     return true;
 }
 
-bool PreparePaymasterMaintenanceCancellation(
+bool PreparePaymasterMaintenanceRelease(
     CWallet& wallet, const ProviderMaintenanceLedger& current,
-    const std::vector<uint256>& operation_ids, int64_t now,
-    ProviderMaintenanceLedger& cancelled, int64_t& released_fee_budget, std::string& error)
+    const std::vector<ProviderPoolEntry>& pool,
+    const std::vector<uint256>& operation_ids, PaymasterMaintenanceReleaseKind kind,
+    int64_t now, PaymasterMaintenanceRelease& released, std::string& error)
 {
     AssertLockHeld(wallet.cs_wallet);
     error.clear();
-    released_fee_budget = 0;
     const auto fail = [&](const char* code) { error = code; return false; };
     const std::set<uint256> selected{operation_ids.begin(), operation_ids.end()};
     if (now <= 0 || selected.empty() || selected.size() > 256 ||
-        selected.size() != operation_ids.size() || selected.count(uint256{}))
+        selected.size() != operation_ids.size() || selected.count(uint256{}) ||
+        (kind != PaymasterMaintenanceReleaseKind::RESERVE_FUNDING &&
+         kind != PaymasterMaintenanceReleaseKind::CARRIER_WITHDRAWAL))
         return fail("PAYMASTER_INVALID_MAINTENANCE_SELECTION");
+    if (!ValidateProviderMaintenanceLedger(current, error) ||
+        !ValidateProviderPoolEntries(pool, error)) return false;
+    PaymasterMaintenanceExecution execution;
+    const auto execution_status = WalletBatch{wallet.GetDatabase()}.ReadPaymasterMaintenanceExecutionWithStatus(execution);
+    if (execution_status != DatabaseReadStatus::NOT_FOUND)
+        return fail("PAYMASTER_MAINTENANCE_SIGNED_OR_AMBIGUOUS");
+    PaymasterMaintenanceRelease next{current, pool, 0};
     const auto& ledger = current;
     std::set<CScript> scripts;
+    std::set<COutPoint> sources;
     size_t found{0};
     for (const auto& record : ledger.records) {
         if (!selected.count(record.operation_id)) continue;
         ++found;
         if (record.state != ProviderMaintenanceState::PLANNED || !record.transaction_id.IsNull() ||
-            record.actual_fee.value != 0 || !record.source_inputs.empty() || record.outputs.empty() ||
-            (!record.IsPreparation() && record.kind != ProviderMaintenanceKind::REPLENISH_DGB &&
-             record.kind != ProviderMaintenanceKind::REPLENISH_CARRIER))
+            record.actual_fee.value != 0 || record.outputs.empty())
             return fail("PAYMASTER_MAINTENANCE_NOT_CANCELLABLE");
+        if (kind == PaymasterMaintenanceReleaseKind::RESERVE_FUNDING) {
+            if (!record.source_inputs.empty() ||
+                (!record.IsPreparation() && record.kind != ProviderMaintenanceKind::REPLENISH_DGB &&
+                 record.kind != ProviderMaintenanceKind::REPLENISH_CARRIER))
+                return fail("PAYMASTER_MAINTENANCE_NOT_CANCELLABLE");
+        } else {
+            if (record.kind != ProviderMaintenanceKind::WITHDRAW_CARRIER_EXCESS ||
+                record.source_inputs.empty() || record.withdrawal_excess_script_pub_key.empty())
+                return fail("PAYMASTER_MAINTENANCE_NOT_CANCELLABLE");
+            scripts.insert(record.withdrawal_excess_script_pub_key);
+            for (const auto& source : record.source_inputs) {
+                const auto entry = std::find_if(next.pool.begin(), next.pool.end(),
+                    [&](const auto& candidate) { return candidate.outpoint == source; });
+                if (!sources.insert(source).second || entry == next.pool.end() ||
+                    entry->asset != PoolAsset::DD_CARRIER || entry->reservation_id != record.operation_id ||
+                    (entry->state != PoolEntryState::RESERVED && entry->state != PoolEntryState::COMMITTED) ||
+                    wallet.IsSpent(source)) return fail("PAYMASTER_MAINTENANCE_SOURCE_CONFLICT");
+                entry->state = PoolEntryState::AVAILABLE;
+                entry->reservation_id.SetNull();
+                entry->updated_at = now;
+            }
+            for (const auto& entry : pool) {
+                if (entry.reservation_id == record.operation_id && !sources.count(entry.outpoint))
+                    return fail("PAYMASTER_MAINTENANCE_SOURCE_CONFLICT");
+            }
+        }
         if (record.maximum_fee.value < 0 ||
-            record.maximum_fee.value > std::numeric_limits<int64_t>::max() - released_fee_budget)
+            record.maximum_fee.value > std::numeric_limits<int64_t>::max() - next.released_fee_budget)
             return fail("PAYMASTER_MAINTENANCE_AMOUNT_OVERFLOW");
-        released_fee_budget += record.maximum_fee.value;
+        next.released_fee_budget += record.maximum_fee.value;
         for (const auto& output : record.outputs) scripts.insert(output.script_pub_key);
     }
     if (found != selected.size()) return fail("PAYMASTER_MAINTENANCE_OPERATION_NOT_FOUND");
@@ -1976,22 +2010,42 @@ bool PreparePaymasterMaintenanceCancellation(
         if (selected.count(record.operation_id) || record.transaction_id.IsNull()) continue;
         for (const auto& output : record.outputs)
             if (scripts.count(output.script_pub_key)) return fail("PAYMASTER_MAINTENANCE_SIGNED_OR_AMBIGUOUS");
+        if (scripts.count(record.withdrawal_excess_script_pub_key))
+            return fail("PAYMASTER_MAINTENANCE_SIGNED_OR_AMBIGUOUS");
+        for (const auto& source : record.source_inputs)
+            if (sources.count(source)) return fail("PAYMASTER_MAINTENANCE_SIGNED_OR_AMBIGUOUS");
     }
     // A lost reply may have left a signed transaction without a journal txid.
     // Any matching output, even with another amount or conflicted/abandoned,
     // keeps the entire requested cancellation closed. No signature is erased.
     for (const auto& [txid, tx] : wallet.mapWallet) {
         if (!tx.tx) return fail("PAYMASTER_MAINTENANCE_SIGNED_OR_AMBIGUOUS");
+        for (const auto& input : tx.tx->vin)
+            if (sources.count(input.prevout)) return fail("PAYMASTER_MAINTENANCE_SIGNED_OR_AMBIGUOUS");
         for (const auto& output : tx.tx->vout)
             if (scripts.count(output.scriptPubKey)) return fail("PAYMASTER_MAINTENANCE_SIGNED_OR_AMBIGUOUS");
     }
-    cancelled = current;
     for (const auto& id : operation_ids) {
-        if (!ReleaseProviderMaintenanceBudget(cancelled, id, now, error)) return false;
-        for (auto& record : cancelled.records) {
+        if (!ReleaseProviderMaintenanceBudget(next.ledger, id, now, error)) return false;
+        for (auto& record : next.ledger.records) {
             if (record.operation_id == id) record.preparation_error.clear();
         }
     }
+    released = std::move(next);
+    return true;
+}
+
+bool PreparePaymasterMaintenanceCancellation(
+    CWallet& wallet, const ProviderMaintenanceLedger& current,
+    const std::vector<uint256>& operation_ids, int64_t now,
+    ProviderMaintenanceLedger& cancelled, int64_t& released_fee_budget, std::string& error)
+{
+    released_fee_budget = 0;
+    PaymasterMaintenanceRelease released;
+    if (!PreparePaymasterMaintenanceRelease(wallet, current, {}, operation_ids,
+            PaymasterMaintenanceReleaseKind::RESERVE_FUNDING, now, released, error)) return false;
+    cancelled = std::move(released.ledger);
+    released_fee_budget = released.released_fee_budget;
     return true;
 }
 
