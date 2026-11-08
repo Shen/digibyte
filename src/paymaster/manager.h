@@ -403,7 +403,9 @@ public:
         const PaymasterId& provider_id, size_t maximum);
     DirectMessageLease LeaseRecoveryRequests(const PaymasterId& provider_id,
                                               size_t maximum);
-    std::vector<DirectMessage> TakeRecoveryResponses(
+    /** Protect recovery quotes until their durable acceptance. Local failures
+     * release only the lease; consumers acknowledge permanent peer defects. */
+    DirectMessageLease LeaseRecoveryResponses(
         const std::string& request_id, const uint256& session_id,
         const PaymasterId& provider_id, size_t maximum);
     std::vector<DirectMessage> TakeRecoverySubmits(

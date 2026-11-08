@@ -14,6 +14,8 @@
 #include <streams.h>
 #include <test/util/setup_common.h>
 
+#include <stdexcept>
+
 using namespace DigiDollar::Paymaster;
 
 namespace {
@@ -111,6 +113,137 @@ PaymasterQuote SignedQuote(const CKey& provider_key,
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(paymaster_protocol_tests, BasicTestingSetup)
+
+BOOST_AUTO_TEST_CASE(recovery_response_survives_local_failure_until_acknowledgement)
+{
+    Manager manager{true};
+    constexpr int64_t now{100000};
+    AlternativeRecoveryResponse response;
+    response.request_id = "550e8400-e29b-41d4-a716-446655440020";
+    response.session_id = uint256S("e201");
+    response.recovery_provider_id = uint256S("e202");
+    response.recovery_id = uint256S("e203");
+    const uint256 message_id{uint256S("e204")};
+    BOOST_REQUIRE(manager.EnqueueDirectMessageResult(
+                      1, message_id, 100, DirectPayload{response}, now) ==
+                  DirectEnqueueResult::ACCEPTED);
+
+    uint64_t queue_sequence{0};
+    // A local database failure unwinds both scopes without acknowledging the
+    // quote. Releasing one observer must not cancel another observer's lease.
+    BOOST_CHECK_THROW([&] {
+        auto first = manager.LeaseRecoveryResponses(
+            response.request_id, response.session_id,
+            response.recovery_provider_id, 1);
+        BOOST_REQUIRE_EQUAL(first.Messages().size(), 1U);
+        queue_sequence = first.Messages().front().queue_sequence;
+        const auto second = manager.LeaseRecoveryResponses(
+            response.request_id, response.session_id,
+            response.recovery_provider_id, 1);
+        BOOST_REQUIRE_EQUAL(second.Messages().size(), 1U);
+        first.Release();
+        manager.PruneDirectMessages(
+            SaturatingAddSeconds(now, MAX_DIRECT_MESSAGE_TTL_SECONDS));
+        BOOST_CHECK_EQUAL(manager.DirectMessageCount(), 1U);
+        throw std::runtime_error{"local database failure"};
+    }(), std::runtime_error);
+
+    {
+        const auto retry = manager.LeaseRecoveryResponses(
+            response.request_id, response.session_id,
+            response.recovery_provider_id, 1);
+        BOOST_REQUIRE_EQUAL(retry.Messages().size(), 1U);
+        BOOST_CHECK(retry.Messages().front().message_id == message_id);
+        BOOST_CHECK_EQUAL(retry.Messages().front().queue_sequence, queue_sequence);
+        BOOST_REQUIRE(manager.AcknowledgeDirectMessagesIfPresent({message_id}));
+        BOOST_CHECK(!manager.HasDirectMessages());
+        BOOST_CHECK(manager.AcknowledgeDirectMessagesIfPresent({message_id}));
+    }
+    BOOST_CHECK(manager.LeaseRecoveryResponses(
+        response.request_id, response.session_id,
+        response.recovery_provider_id, 1).Messages().empty());
+
+    // A failed attempt releases its prune protection; it does not retain an
+    // unauthenticated response indefinitely after the ordinary inbox TTL.
+    response.recovery_id = uint256S("e205");
+    BOOST_REQUIRE(manager.EnqueueDirectMessageResult(
+                      1, uint256S("e206"), 100, DirectPayload{response}, now + 1) ==
+                  DirectEnqueueResult::ACCEPTED);
+    {
+        const auto retry = manager.LeaseRecoveryResponses(
+            response.request_id, response.session_id,
+            response.recovery_provider_id, 1);
+        BOOST_REQUIRE_EQUAL(retry.Messages().size(), 1U);
+    }
+    manager.PruneDirectMessages(
+        SaturatingAddSeconds(now + 1, MAX_DIRECT_MESSAGE_TTL_SECONDS));
+    BOOST_CHECK(!manager.HasDirectMessages());
+}
+
+BOOST_AUTO_TEST_CASE(recovery_response_retry_preserves_ownership_and_fair_selection)
+{
+    Manager manager{true};
+    constexpr int64_t now{100000};
+    AlternativeRecoveryResponse response;
+    response.request_id = "550e8400-e29b-41d4-a716-446655440021";
+    response.session_id = uint256S("e211");
+    response.recovery_provider_id = uint256S("e212");
+    const auto enqueue = [&](const AlternativeRecoveryResponse& value,
+                             const uint256& message_id, uint64_t group) {
+        AlternativeRecoveryResponse unique{value};
+        unique.recovery_id = message_id;
+        BOOST_REQUIRE(manager.EnqueueDirectMessageResult(
+                          static_cast<int64_t>(group), message_id, 100,
+                          DirectPayload{unique}, now, group) ==
+                      DirectEnqueueResult::ACCEPTED);
+    };
+    const uint256 first{uint256S("e213")};
+    const uint256 second{uint256S("e214")};
+    const uint256 third{uint256S("e215")};
+    enqueue(response, first, 100);
+    enqueue(response, second, 200);
+    AlternativeRecoveryResponse concurrent{response};
+    concurrent.request_id = "550e8400-e29b-41d4-a716-446655440023";
+    enqueue(concurrent, third, 100);
+    AlternativeRecoveryResponse unrelated{response};
+    unrelated.request_id = "550e8400-e29b-41d4-a716-446655440022";
+    enqueue(unrelated, uint256S("e216"), 1);
+    unrelated = response;
+    unrelated.session_id = uint256S("e217");
+    enqueue(unrelated, uint256S("e218"), 1);
+    unrelated = response;
+    unrelated.recovery_provider_id = uint256S("e219");
+    enqueue(unrelated, uint256S("e21a"), 1);
+
+    {
+        const auto lease = manager.LeaseRecoveryResponses(
+            response.request_id, response.session_id,
+            response.recovery_provider_id, 3);
+        BOOST_REQUIRE_EQUAL(lease.Messages().size(), 2U);
+        BOOST_CHECK(lease.Messages()[0].message_id == first);
+        BOOST_CHECK(lease.Messages()[1].message_id == second);
+    }
+    // Observing a failed batch must not advance fairness or consume other
+    // wallets' responses. Only acknowledging a finished turn advances it.
+    for (const auto& expected : {first, second}) {
+        const auto lease = manager.LeaseRecoveryResponses(
+            response.request_id, response.session_id,
+            response.recovery_provider_id, 1);
+        BOOST_REQUIRE_EQUAL(lease.Messages().size(), 1U);
+        BOOST_CHECK(lease.Messages().front().message_id == expected);
+        BOOST_REQUIRE(manager.AcknowledgeDirectMessagesIfPresent({expected}));
+    }
+    BOOST_CHECK(manager.LeaseRecoveryResponses(
+        response.request_id, response.session_id,
+        response.recovery_provider_id, 1).Messages().empty());
+    const auto concurrent_lease = manager.LeaseRecoveryResponses(
+        concurrent.request_id, concurrent.session_id,
+        concurrent.recovery_provider_id, 1);
+    BOOST_REQUIRE_EQUAL(concurrent_lease.Messages().size(), 1U);
+    BOOST_CHECK(concurrent_lease.Messages().front().message_id == third);
+    BOOST_REQUIRE(manager.AcknowledgeDirectMessagesIfPresent({third}));
+    BOOST_CHECK_EQUAL(manager.DirectMessageCount(), 3U);
+}
 
 BOOST_AUTO_TEST_CASE(manager_semantic_conflicts_are_retained_and_spend_tokens)
 {

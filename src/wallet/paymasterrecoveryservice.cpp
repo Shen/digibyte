@@ -544,9 +544,17 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
     }
 
     if (recovery.phase == AlternativeRecoveryPhase::REQUEST_READY) {
-        const auto responses = context.paymaster->TakeRecoveryResponses(
+        // Authenticate local authority before interpreting a peer reply. A
+        // damaged request must neither discard a valid quote nor grant it
+        // spending authority.
+        if (!paymaster_store::internal::ValidateAlternativeRecoveryRecordShape(recovery, error) ||
+            recovery.capacity_request.genesis_hash != Params().GenesisBlock().GetHash()) {
+            throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_RECOVERY_DATABASE_READ");
+        }
+        const auto response_lease = context.paymaster->LeaseRecoveryResponses(
             recovery.request_id, recovery.session_id,
             recovery.recovery_provider_id, 1);
+        const auto& responses = response_lease.Messages();
         if (responses.empty()) {
             PaymasterCapacityProof proof;
             if (!DeserializeCanonicalRecoveryMessage(
@@ -573,9 +581,13 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
             !ValidateAlternativeRecoveryResponse(
                 *response, recovery.recovery_request,
                 recovery.recovery_provider_identity_key, now, error)) {
+            const std::string rejection = error.empty() ? "PAYMASTER_INVALID_RECOVERY_RESPONSE" : error;
+            if (!AcknowledgeRejectedDirectMessage(*context.paymaster, responses.front(), error)) {
+                throw ApplicationError(ErrorKind::WALLET, error);
+            }
             throw ApplicationError(
                 ErrorKind::INVALID_INPUT,
-                error.empty() ? "PAYMASTER_INVALID_RECOVERY_RESPONSE" : error);
+                rejection);
         }
         candidate.recovery_response = *response;
         candidate.phase = AlternativeRecoveryPhase::RESPONSE_VALIDATED;
@@ -596,6 +608,9 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
             !store.UpdateAlternativeRecovery(candidate, error) ||
             !store.GetAlternativeRecovery(session.request_id, recovery)) {
             throw ApplicationError(ErrorKind::WALLET, error);
+        }
+        if (!context.paymaster->AcknowledgeDirectMessagesIfPresent({responses.front().message_id})) {
+            throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_DIRECT_INBOX_ACK_CONFLICT");
         }
     }
 

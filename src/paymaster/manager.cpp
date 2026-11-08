@@ -1272,27 +1272,30 @@ DirectMessageLease Manager::LeaseRecoveryRequests(
     return DirectMessageLease{*this, std::move(result)};
 }
 
-std::vector<DirectMessage> Manager::TakeRecoveryResponses(
+DirectMessageLease Manager::LeaseRecoveryResponses(
     const std::string& request_id, const uint256& session_id,
     const PaymasterId& provider_id, size_t maximum)
 {
     std::vector<DirectMessage> result;
     if (request_id.empty() || session_id.IsNull() || provider_id.IsNull() ||
         maximum == 0) {
-        return result;
+        return DirectMessageLease{*this, std::move(result)};
     }
-    LOCK(m_direct_mutex);
-    return TakeMatchingFair(
-        m_direct_messages, m_direct_bytes, m_leased_direct_ids,
-        m_last_inbound_group,
-        m_last_inbound_session_by_group, maximum,
-        [&](const DirectMessage& direct) {
-            const auto* message =
-                std::get_if<AlternativeRecoveryResponse>(&direct.payload);
-            return message != nullptr && message->request_id == request_id &&
-                   message->session_id == session_id &&
-                   message->recovery_provider_id == provider_id;
-        });
+    {
+        LOCK(m_direct_mutex);
+        result = PeekMatchingFair(
+            m_direct_messages, m_last_inbound_group,
+            m_last_inbound_session_by_group, maximum,
+            [&](const DirectMessage& direct) {
+                const auto* message =
+                    std::get_if<AlternativeRecoveryResponse>(&direct.payload);
+                return message != nullptr && message->request_id == request_id &&
+                       message->session_id == session_id &&
+                       message->recovery_provider_id == provider_id;
+            });
+        AddDirectMessageLeases(m_leased_direct_ids, result);
+    }
+    return DirectMessageLease{*this, std::move(result)};
 }
 
 std::vector<DirectMessage> Manager::TakeRecoverySubmits(

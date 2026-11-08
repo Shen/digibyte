@@ -6496,7 +6496,8 @@ static void ExerciseFirstProviderRecoveryCommit(node::NodeContext& node,
 }
 
 static void ExerciseClientRecoveryResult(ClientRecoveryReadSetup& setup, bool confirmed_before_result,
-                                         bool exercise_provider_history = false)
+                                         bool exercise_provider_history = false,
+                                         bool exercise_quote_intake = false)
 {
     auto& m_node = setup.m_node;
     auto& context = setup.context;
@@ -6823,6 +6824,109 @@ static void ExerciseClientRecoveryResult(ClientRecoveryReadSetup& setup, bool co
         BOOST_REQUIRE(batch.WritePaymasterAlternativeRecovery(recovery));
         BOOST_REQUIRE(batch.WritePaymasterAlternativeRecoveryRequest(session.request_id, recovery.recovery_id));
     }
+    if (exercise_quote_intake) {
+        const AlternativeRecoveryResponse reply{response};
+        recovery.phase = AlternativeRecoveryPhase::REQUEST_READY;
+        recovery.recovery_response = {};
+        recovery.recovery_authorization = {};
+        BOOST_REQUIRE_MESSAGE(paymaster_store::internal::ValidateAlternativeRecoveryRecordShape(recovery, error), error);
+        WalletBatch batch{client.GetDatabase()};
+        BOOST_REQUIRE(batch.WritePaymasterAlternativeRecovery(recovery));
+        const AlternativeRecoveryRecord request_ready{recovery};
+        const auto encoded = SerializePaymasterSecurityObject(reply);
+        const uint256 message_id{Hash(encoded)};
+        BOOST_REQUIRE(manager.EnqueueDirectMessage(45, message_id, encoded.size(), DirectPayload{reply}, now));
+        paymaster_app::ClientRecoveryOptions options;
+        options.prepare_only = true;
+        const auto invoke = [&] {
+            return paymaster_app::ResolveAlternativePaymasterRecovery(
+                context, client, store, session, original_attempt, options);
+        };
+        auto& database = GetMockableDatabase(client);
+        const auto unchanged_fee_ledger = SerializePaymasterSecurityObject(ledger);
+        const auto check_unsigned_reservation = [&] {
+            AlternativeRecoveryRecord saved;
+            BOOST_REQUIRE(store.GetAlternativeRecovery(session.request_id, saved));
+            BOOST_CHECK(saved.user_signed_psbt.empty());
+            BOOST_CHECK(saved.final_transaction.empty());
+            BOOST_CHECK(saved.accepted_recovery_authorization_commitment.IsNull());
+            BOOST_CHECK_EQUAL(saved.recovery_authorization_accepted_at, 0);
+            ClientFeeLedger retained;
+            BOOST_REQUIRE(batch.ReadPaymasterClientFeeLedger(retained));
+            BOOST_CHECK(SerializePaymasterSecurityObject(retained) == unchanged_fee_ledger);
+            BOOST_CHECK(IsPaymasterInputReserved(client, session.user_inputs.front()));
+            BOOST_CHECK(WITH_LOCK(client.cs_wallet, return client.IsLockedCoin(session.user_inputs.front())));
+        };
+
+        // A readable local defect must be found before interpreting or
+        // discarding the selected provider's valid response.
+        auto damaged = request_ready;
+        damaged.recovery_request.original_commit_key = SecurityTestId(seed, 150);
+        BOOST_REQUIRE(batch.WritePaymasterAlternativeRecovery(damaged));
+        const auto damaged_rows = database.m_records;
+        BOOST_CHECK_EXCEPTION(invoke(), ApplicationError,
+            [](const ApplicationError& failure) {
+                return failure.kind == ErrorKind::WALLET &&
+                       failure.code == "PAYMASTER_RECOVERY_DATABASE_READ";
+            });
+        BOOST_CHECK(database.m_records == damaged_rows);
+        BOOST_CHECK_EQUAL(manager.DirectMessageCount(), 1U);
+        check_unsigned_reservation();
+        BOOST_REQUIRE(batch.WritePaymasterAlternativeRecovery(request_ready));
+
+        // With intact local authority a forged peer signature is terminal,
+        // but neither a recovery authorization nor a user signature is saved.
+        {
+            Manager invalid_manager{true};
+            context.paymaster = &invalid_manager;
+            auto invalid_reply = reply;
+            invalid_reply.identity_signature.back() ^= 1;
+            const auto invalid_bytes = SerializePaymasterSecurityObject(invalid_reply);
+            BOOST_REQUIRE(invalid_manager.EnqueueDirectMessage(45, Hash(invalid_bytes),
+                invalid_bytes.size(), DirectPayload{invalid_reply}, now));
+            const auto before = database.m_records;
+            BOOST_CHECK_EXCEPTION(invoke(), ApplicationError,
+                [](const ApplicationError& failure) {
+                    return failure.kind == ErrorKind::INVALID_INPUT &&
+                           failure.code == "PAYMASTER_RECOVERY_RESPONSE_MISMATCH";
+                });
+            BOOST_CHECK_EQUAL(invalid_manager.DirectMessageCount(), 0U);
+            BOOST_CHECK(database.m_records == before);
+            check_unsigned_reservation();
+            context.paymaster = &manager;
+        }
+
+        for (const bool fail_commit : {false, true}) {
+            const auto before = database.m_records;
+            if (fail_commit) database.FailCommit();
+            else database.FailWriteAt(0);
+            BOOST_CHECK_EXCEPTION(invoke(), ApplicationError,
+                [](const ApplicationError& failure) {
+                    return failure.kind == ErrorKind::WALLET &&
+                           failure.code == "PAYMASTER_DATABASE_WRITE";
+                });
+            database.ClearFailureInjection();
+            BOOST_CHECK(database.m_records == before);
+            BOOST_REQUIRE(store.GetAlternativeRecovery(session.request_id, recovery));
+            BOOST_CHECK(recovery.phase == AlternativeRecoveryPhase::REQUEST_READY);
+            BOOST_CHECK_EQUAL(manager.DirectMessageCount(), 1U);
+            check_unsigned_reservation();
+        }
+
+        const auto prepared = invoke();
+        BOOST_CHECK_EQUAL(manager.DirectMessageCount(), 0U);
+        BOOST_REQUIRE(store.GetAlternativeRecovery(session.request_id, recovery));
+        BOOST_CHECK(recovery.phase == AlternativeRecoveryPhase::RESPONSE_VALIDATED);
+        BOOST_CHECK(SerializePaymasterSecurityObject(recovery.recovery_response) == encoded);
+        BOOST_CHECK(!recovery.recovery_authorization.authorization_commitment.IsNull());
+        BOOST_REQUIRE(prepared.view.recovery);
+        BOOST_CHECK(prepared.view.recovery->phase == AlternativeRecoveryPhase::RESPONSE_VALIDATED);
+        check_unsigned_reservation();
+        const auto committed = database.m_records;
+        BOOST_CHECK_NO_THROW(invoke());
+        BOOST_CHECK(database.m_records == committed);
+        return;
+    }
     BOOST_REQUIRE_MESSAGE(store.AcceptAlternativeRecoveryAuthorization(session.request_id,
         recovery.recovery_authorization.authorization_commitment, now, error), error);
     if (confirmed_before_result) {
@@ -7043,6 +7147,13 @@ BOOST_FIXTURE_TEST_CASE(client_recovery_result_commit_failure_survives_ttl_and_e
                         ClientRecoveryReadSetup)
 {
     ExerciseClientRecoveryResult(*this, /*confirmed_before_result=*/false);
+}
+
+BOOST_FIXTURE_TEST_CASE(client_recovery_quote_intake_retains_local_failures_and_retries_before_signing,
+                        ClientRecoveryReadSetup)
+{
+    ExerciseClientRecoveryResult(*this, /*confirmed_before_result=*/false,
+        /*exercise_provider_history=*/false, /*exercise_quote_intake=*/true);
 }
 
 BOOST_FIXTURE_TEST_CASE(client_recovery_confirmed_before_first_result_survives_expiry_and_reload,
