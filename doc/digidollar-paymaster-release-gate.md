@@ -4,6 +4,53 @@ There is **no complete current-revision release certification** in this record.
 The candidate below and historical checkpoints identify actual verification;
 implemented behavior alone does not establish release acceptance.
 
+## Persistence and native execution recovery
+
+AP1–AP6 follow-up on `8b34d33e308370323ab773673da0cf3005dceed2`, checked in
+the dirty worktree on 2026-11-08. Contracts are in the
+[implementation guide](digidollar-paymaster-implementation.md#wallet-lifecycle)
+and [client integration guide](digidollar-paymaster-integration.md); reproducible
+commands and remaining operator work are in the
+[test runbook](digidollar-paymaster-testing.md#review-follow-up-regressions).
+This adds immutable `pmnativeexec` version 1 and client-order version 2 with
+read-only version-1 compatibility. The checkpoint file layout stays at version 2;
+consensus and wire rules are unchanged.
+
+| Executed check | Result and scope |
+|---|---|
+| Native final combined selection | Exit 0: **56 distinct cases / 3,611 assertions**, no selected failures/skips (`verified-native-final-v2.log`). Covers unreadable policy/ledger setters; native transaction-write/accounting failures and restart; exact bytes, protected fee inputs, abandoned/conflicted transactions, tampering and stale clones; adjacent checkpoint commit gaps; accepted unsigned fallback/expiry; immutable selection pairs and legacy reads; all three cancellation callers; raw session paging; independent authority errors; ordinary locks and database cursor backends. |
+| Qt | Four selected functions / **24 feature rows**, zero failures/skips, Windows/Fusion. Exact native-record/RPC/Qt preferred-pair restoration, empty intermediate pages before session selection, discovery errors/detachment and the detail-action matrix. The last native changes were followed by fresh links and repeated selections on both final executables. |
+| Compilation | All 22 changed non-fuzz C++ units and nine direct consumers/support units freshly compiled: MSVC toolset 14.43.34808, `/W3 /WX /Od /MT /std:c++20`. Source/object hashes match. All 23 changed C++ units pass C++17 `/Zs`; the persistence fuzzer also passes C++20 syntax with `/Zc:preprocessor`. Syntax checks do not establish a fuzz campaign. |
+| Local controls | Dependency/cycle check, six positive/negative boundary fixtures, changed-path/shared-Core records against unchanged HEAD policy, JSON and `git diff --check` pass. No allowlist, validation or checkpoint exception. |
+
+The ten code commits additionally pass 41 exact-index syntax checks
+with staged source/header snapshots: C++17 production and C++20 tests,
+including Qt and the conforming-preprocessor fuzz check, with `/W3 /WX`.
+Each prefix passes the boundary checker against unchanged `8b34d33e30`
+policy. Logs and commit/blob identities are retained under
+`.ai/commit-review-ap1-6-8b34/`. These checks do not establish clean
+intermediate product builds; the final product source is byte-identical
+to the tested implementation.
+
+Commands, full logs, source/object/header hashes and executable identities are
+under `.ai/implement-review-ap1-6-8b34/verification.json` and `runs.jsonl`.
+Final native SHA256:
+`2870e5558b4699937adb71d6294206fa1e9bdfd1d0627e94a2039516dfd6488a`.
+Final Qt SHA256:
+`010499264178d947067f51bc0131dadb5bfa3163f833341f24d8aeca922b6a2c`.
+These are isolated partial links with retained dependencies, **not clean product
+builds or complete transitive-header provenance**. An initial Qt partial link
+crashed before a feature result; its allocating consumer and test support were
+freshly compiled before the passing selections. Earlier failed native/Qt and
+syntax-run statuses remain in `runs.jsonl`; successful results above exclude
+intermediate failed checks.
+
+Not executed: full product rebuild, complete native/Qt/functional suites,
+cross-platform/C++17 product builds, sanitizers, Tidy plugin, long fuzzing and
+live-network acceptance. The functional crash/restart matrix, including both
+native retirement legs, remains an operator check. Legacy pending checkpoints
+without an exact journal remain fenced; no blind marker clearing is supported.
+
 ## Maintenance, replay caches and shared observations
 
 AP1–AP6 corrections based on `4b271d56805fe65f058e3707e8aa5dff7ebf1997`,

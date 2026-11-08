@@ -843,7 +843,14 @@ units share internal helpers. `paymasterdb.cpp` persists wallet records;
 local read/version failures before inbound processing validates stored shape.
 The separate `ClientPaymentOrder` record retains original replay arguments;
 `LoadClientPaymentOrder` validates them against existing request identity before
-native status exposes them to RPC/Qt. It grants no signing authority.
+native status exposes them to RPC/Qt. Version 2 retains the original public
+provider/offer constraint; version 1 remains readable for exact artifact replay.
+`ClientAuthorizationState` / `GetClientAuthorizationState` separate accepted terms, closed unsigned history
+and signed/final authority after validating independent evidence and fee state.
+Replay metadata grants no signing authority.
+`CheckIndexedClientAuthorizationEvidence` and the store's
+`CheckClientSessionSummaryEvidence` share bounded artifact checks with the full
+unsigned firewall; only the full proof includes unindexed recovery scans.
 Confirmed provider recovery finals move to terminal archival storage after the
 existing safety depth; active scans exclude them and exact replay/finance read
 their full evidence by the recovery ID bound in the commit.
@@ -894,6 +901,13 @@ interfaces for existing callers; it owns no implementation.
 `ExecuteProviderMaintenanceTransactions` in `paymasterapplication.cpp` owns the
 typed finite/refill/withdrawal/retirement execution contract, including current
 authority, source locks, fees, checkpoint, commits and accounting.
+`PaymasterMaintenanceExecution` in `walletdb.h` is the immutable native execution
+record, encoded by `paymasterdb.cpp`. `ResumeProviderMaintenanceTransactions`
+replays its exact signed legs and atomic before/after accounting; checkpoint
+Begin/Resume/Complete bind its hash without relaxing the stale-clone fence.
+`PrepareMaintenanceAccounting`, `CheckMaintenanceExecutionState` and
+`CommitMaintenanceExecution` construct, validate and apply its exact transition
+without reconstructing or signing replacement work.
 
 ### src/wallet/paymasterclientview*, paymasterrecoveryservice*
 
@@ -905,6 +919,10 @@ acceptance; local failures retain the reply for retry.
 `LoadClientPaymentReplay` in `paymasterclient.cpp` binds the original order before
 preparation effects; `SelectCreatedClientPaymentInputs` rechecks its original
 inputs for both ordinary payments and sweeps.
+`ListClientSessionPage` uses `ListPaymasterSessionsPage` and
+`PaymasterStore::ListClientSessionsPage` for bounded raw rows/bytes before
+filtering. Summary views expose refresh only; detail reads retain complete
+authorization proofs. Qt follows forward cursors through empty filtered pages.
 
 ### src/wallet/paymastersessionindex.h / paymasterdb.cpp
 
@@ -938,6 +956,9 @@ and loaded-wallet lifetime handling.
   selected uncreated DGB/DD setup/refill operations. It rejects signing evidence
   in the wallet and journal, atomically disables refill and releases only the
   selected fee allowances; exposed by `cancelpaymastermaintenance` in wallet RPC.
+- `PreparePaymasterMaintenanceCancellation` shares unsigned/signature evidence
+  and proposed ledger transitions across finite setup, selected cancellation and
+  full capital release; callers retain their separate policy consequences.
 - `AdoptPaymasterBackup` and `WalletBatch::AdoptPaymasterCheckpoint` implement
   reviewed current-backup adoption using the full-capital read-only safeguards.
   `adoptpaymasterbackup` is registered in wallet RPC and CLI JSON conversion;
@@ -1724,7 +1745,7 @@ Current Paymaster fuzz source inventory:
 | `paymaster_pool_lifecycle.cpp` | Stateful provider-pool and maintenance-ledger operation ordering, successor creation/confirmation/reorg/conflict, restart serialization, target accounting, withdrawal binding, and duplicate-operation resistance |
 | `paymaster_wire.cpp` | Announcement and all direct-message deserialization plus bounded envelope-validation paths |
 | `paymaster_stateful.cpp` | Stateful Capacity → Intent → Quote → Submit → Result → Recovery transitions, budgets, replay, and timestamp/amount boundaries |
-| `wallet/test/fuzz/paymaster_persistence.cpp` | Raw wallet-record decoding across all 35 status-aware Paymaster codecs plus property mutations for session-id, template-commitment, and unsigned-txid referential integrity |
+| `wallet/test/fuzz/paymaster_persistence.cpp` | Status-aware wallet-record decoding, read-only legacy client orders, immutable native-maintenance journals, and session-id/template/unsigned-txid reference-integrity mutations |
 
 ### Paymaster Assurance Workflows (`.github/workflows/`)
 

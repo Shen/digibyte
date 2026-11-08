@@ -546,6 +546,51 @@ git diff -w $paymasterBases.official_baseline HEAD
 
 ## Review follow-up regressions
 
+For the AP1–AP6 persistence/replay follow-up, run the following on a freshly
+built native executable. These are bounded selections (normally under a minute
+for the first command), with exit 0 and no failed/skipped selected cases as the
+success criterion. The broader commands below cover neighboring behavior.
+
+```powershell
+& ./build_msvc/x64/Release/test_digibyte.exe '--run_test=paymaster_wallet_identity_tests/policy_setters_never_initialize_over_unreadable_accounting,carrier_refill_fences_only_after_exact_construction,finite_setup_revocation_survives_refill_pruning_and_reopen:paymaster_wallet_store_tests/client_attempt_artifacts_and_authorization_are_append_only_and_atomic,client_session_pages_bound_raw_rows_before_filtering,client_view_unsigned_authority_failure_returns_no_actions:paymaster_application_tests/client_selection_pair_survives_replay_and_rejects_changed_callers,client_order_replay_uses_persisted_terms_and_existing_hash:paymaster_wallet_security_tests/checkpoint_native_journal_repairs_only_adjacent_exact_commit_gaps,checkpoint_pending_native_operation_survives_restart' --report_level=detailed
+if ($LASTEXITCODE -ne 0) { throw 'Paymaster persistence/replay regression failed' }
+```
+
+The read-failure fixture refuses both reads and existence probes while writes
+remain possible; assert unchanged budgets, active pool entries and checkpoint.
+Native maintenance covers a failed `WriteTx` with a surviving in-memory entry,
+failed accounting, reopen, exact signed bytes/history, protected ordinary fee
+inputs, abandoned/conflicted wallet states, tampered/future journals and stale
+clones. Checkpoint tests separately
+exercise adjacent pending and completion commit gaps, while the legacy pending
+marker continues to block. Client cases retain closed acceptance history, release
+expired unsigned fees, reject unreadable independent authority and changed or
+omitted saved selection pairs, and retain version-1 order readability without
+inventing new selection permission. Session paging asserts raw row/byte bounds,
+empty filtered pages, conservative reused-input summaries and no global recovery
+scan in the list path. Detailed views still require the complete evidence proof.
+
+Run Qt functions `paymasterClientRestoresOriginalOrderFromNativeStatus`,
+`paymasterClientMultipleRestartSessionsRequireSelection`,
+`paymasterClientSessionDiscoveryFailures` and `paymasterClientSessionActionMatrix`
+using the environment filters above. These cover preserved preferred pairs,
+empty intermediate pages before session selection, malformed cursors/responses,
+wallet detachment and the unchanged detail-action firewall.
+
+Full product/release verification remains an operator job. From the repository
+root in the configured Visual Studio developer shell, with dependencies and
+static Qt prepared as in [the MSVC guide](../build_msvc/README.md), run:
+
+```powershell
+msbuild build_msvc/digibyte.sln -target:Rebuild -property:Configuration=Release -maxCpuCount:2 -verbosity:minimal
+if ($LASTEXITCODE -ne 0) { throw 'Clean product rebuild failed' }
+```
+
+This is a long build (minutes to hours); require exit 0 and newly produced
+daemon, wallet, native-test and Qt-test artifacts. Then execute the functional,
+ordinary-wallet and platform/sanitizer matrices in this runbook. Isolated local
+links and syntax checks do not substitute for those results.
+
 Run these focused regressions with a freshly linked candidate. Use a short
 isolated `TEMP`/`TMP` as described above; all wallets/funds are test fixtures.
 
