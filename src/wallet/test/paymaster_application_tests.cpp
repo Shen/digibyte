@@ -4,6 +4,7 @@
 #include <wallet/paymasterapplication_internal.h>
 #include <wallet/paymasterclient.h>
 #include <wallet/paymasterfinance.h>
+#include <wallet/paymasterservice.h>
 #include <wallet/context.h>
 #include <wallet/digidollarwallet.h>
 #include <wallet/rpc/paymaster_internal.h>
@@ -41,6 +42,66 @@ using namespace paymaster_app;
 using namespace paymaster_rpc::internal;
 
 BOOST_FIXTURE_TEST_SUITE(paymaster_application_tests, BasicTestingSetup)
+
+BOOST_FIXTURE_TEST_CASE(provider_lifecycle_observation_matches_runtime_intent_without_authorizing_work, WalletTestingSetup)
+{
+    CWallet observed_wallet{m_node.chain.get(), "lifecycle-observation", CreateMockableWalletDatabase()};
+    BOOST_REQUIRE(observed_wallet.LoadWallet() == DBErrors::LOAD_OK);
+    const SecureString passphrase{"lifecycle observation fixture"};
+    BOOST_REQUIRE(observed_wallet.EncryptWallet(passphrase));
+    Manager manager{true};
+    WalletContext context;
+    context.paymaster = &manager;
+    ProviderReadiness readiness;
+    readiness.have_identity = readiness.have_settings = true;
+    readiness.identity.provider_id = uint256S("a505");
+    const auto records = GetMockableDatabase(observed_wallet).m_records;
+    for (const bool locked : {true, false}) {
+        if (!locked) BOOST_REQUIRE(observed_wallet.Unlock(passphrase));
+        for (const bool enabled : {false, true}) {
+            for (const bool autostart : {false, true}) {
+                for (const bool requested : {false, true}) {
+                    for (const bool running : {false, true}) {
+                        manager.StopProvider(observed_wallet.GetName());
+                        readiness.settings.enabled = enabled;
+                        readiness.settings.autostart = autostart;
+                        if (requested) {
+                            ProviderWorkGuard guard{manager, observed_wallet.GetName(), readiness.identity.provider_id, false};
+                            BOOST_REQUIRE(guard.Acquired());
+                            BOOST_REQUIRE(manager.RequestProviderStart(observed_wallet.GetName(), readiness.identity.provider_id));
+                        }
+                        if (running) BOOST_REQUIRE(manager.StartProvider(observed_wallet.GetName(), readiness.identity.provider_id));
+                        for (const auto mode : {ProviderOperationMode::AUTOMATIC, ProviderOperationMode::MANUAL}) {
+                            readiness.settings.operation_mode = mode;
+                            manager.SetProviderServiceStatus(observed_wallet.GetName(), ProviderServiceState::FAULT, "fixture fault");
+                            const auto status = CaptureProviderLifecycleStatus(observed_wallet, context, readiness, false);
+                            BOOST_CHECK_EQUAL(status.running, running);
+                            BOOST_CHECK_EQUAL(status.start_requested, requested);
+                            ProviderServiceState expected{ProviderServiceState::STOPPED};
+                            if (enabled && running) {
+                                expected = mode == ProviderOperationMode::MANUAL ? ProviderServiceState::MANUAL
+                                    : locked ? ProviderServiceState::WAITING_FOR_UNLOCK : ProviderServiceState::FAULT;
+                            } else if (enabled && (autostart || requested)) {
+                                expected = locked ? ProviderServiceState::WAITING_FOR_UNLOCK : ProviderServiceState::WAITING_FOR_READINESS;
+                            }
+                            BOOST_CHECK(status.service.state == expected);
+                            BOOST_CHECK(manager.GetProviderServiceStatus(observed_wallet.GetName()).state == ProviderServiceState::FAULT);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    BOOST_CHECK(GetMockableDatabase(observed_wallet).m_records == records);
+    readiness.settings.enabled = true;
+    readiness.settings.operation_mode = ProviderOperationMode::AUTOMATIC;
+    readiness.ready = true;
+    manager.SetProviderServiceStatus(observed_wallet.GetName(), ProviderServiceState::WAITING_FOR_READINESS, "PAYMASTER_PROVIDER_SYNCING");
+    BOOST_CHECK(CaptureProviderLifecycleStatus(observed_wallet, context, readiness, false).service.state == ProviderServiceState::WAITING_FOR_READINESS);
+    BOOST_CHECK(CaptureProviderLifecycleStatus(observed_wallet, context, readiness, true).service.state == ProviderServiceState::ACTIVE);
+    context.paymaster = nullptr;
+    BOOST_CHECK(CaptureProviderLifecycleStatus(observed_wallet, context, readiness, true).service.state == ProviderServiceState::STOPPED);
+}
 
 BOOST_FIXTURE_TEST_CASE(client_order_replay_uses_persisted_terms_and_existing_hash, WalletTestingSetup)
 {

@@ -28,6 +28,14 @@ class PaymasterOperatorTest(DigiByteTestFramework):
         self.skip_if_no_wallet()
         self.skip_if_no_sqlite()
 
+    def check_lifecycle(self, wallet, expected_state):
+        info = wallet.getpaymasterinfo()
+        operator = wallet.getpaymasteroperatorinfo()["provider"]
+        for field in ("enabled", "running", "start_requested", "operation_mode", "autostart", "service_state"):
+            assert_equal(info[field], operator[field])
+        assert_equal(info.get("last_service_error"), operator.get("last_service_error"))
+        assert_equal(info["service_state"], expected_state)
+
     def check_operating_unlock(self):
         self.log.info("Paymaster-only continuous unlock remains volatile and replaces old timers")
         node = self.nodes[0]
@@ -45,6 +53,8 @@ class PaymasterOperatorTest(DigiByteTestFramework):
         }
         provider.setpaymasterpolicy(policy)
         provider.setpaymasterenabled(False)
+        provider.setpaymasterruntimesettings({"autostart": True})
+        self.check_lifecycle(provider, "stopped")
         assert_raises_rpc_error(-8, "requires timeout=0", provider.walletpassphrase,
                                 "test passphrase", 60, True)
         provider.walletpassphrase("test passphrase", 1)
@@ -62,6 +72,7 @@ class PaymasterOperatorTest(DigiByteTestFramework):
         assert_equal(provider.getwalletinfo()["unlocked_until"], -1)
         provider.walletlock()
         assert_equal(provider.getwalletinfo()["unlocked_until"], 0)
+        self.check_lifecycle(provider, "stopped")
         provider.walletpassphrase("test passphrase", 0, True)
         provider.walletpassphrase("test passphrase", 1)
         self.wait_until(lambda: provider.getwalletinfo()["unlocked_until"] == 0)
@@ -159,8 +170,10 @@ class PaymasterOperatorTest(DigiByteTestFramework):
         assert_equal(waiting["start_requested"], True)
         assert_equal(wallet.getpaymasteroperatorinfo()["provider"]["start_requested"], True)
         assert_equal(wallet.getpaymasteroperatorinfo()["provider"]["autostart"], False)
+        self.check_lifecycle(wallet, "waiting_for_readiness")
         wallet.stoppaymaster()
         assert_equal(wallet.getpaymasteroperatorinfo()["provider"]["start_requested"], False)
+        self.check_lifecycle(wallet, "stopped")
         wallet.startpaymaster({"wait_for_readiness": True})
         node.unloadwallet("operator")
         node.loadwallet("operator")
@@ -183,6 +196,7 @@ class PaymasterOperatorTest(DigiByteTestFramework):
         node.unloadwallet("operator")
         node.loadwallet("operator")
         after = wallet.getpaymasteroperatorinfo()
+        self.check_lifecycle(wallet, "stopped")
         assert before["wallet_generation"] != after["wallet_generation"]
         assert_equal(after["provider"]["provider_id"], identity["provider_id"])
         assert_equal(after["provider"]["policy"], before["provider"]["policy"])

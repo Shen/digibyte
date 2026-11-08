@@ -141,6 +141,17 @@ struct ProviderReadiness {
     std::vector<std::string> errors;
 };
 
+/** Read-only lifecycle observation. Neither a waiting state nor a pending
+ * start request grants signing, maintenance or unlock authority. */
+struct ProviderLifecycleStatus {
+    bool running{false};
+    bool start_requested{false};
+    DigiDollar::Paymaster::ProviderServiceStatus service;
+};
+ProviderLifecycleStatus CaptureProviderLifecycleStatus(
+    const CWallet& wallet, const WalletContext& context,
+    const ProviderReadiness& readiness, bool synchronized);
+
 struct ProviderActivitySnapshot {
     uint64_t active_payments{0};
     uint64_t capacity_requests{0};

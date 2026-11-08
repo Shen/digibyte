@@ -2478,6 +2478,38 @@ ProviderActivitySnapshot CaptureProviderActivity(const ProviderReadiness& readin
     return result;
 }
 
+ProviderLifecycleStatus CaptureProviderLifecycleStatus(
+    const CWallet& wallet, const WalletContext& context,
+    const ProviderReadiness& readiness, bool synchronized)
+{
+    using namespace DigiDollar::Paymaster;
+    LOCK(wallet.cs_wallet);
+    ProviderLifecycleStatus result;
+    const auto* manager = context.paymaster;
+    if (!manager || !manager->Enabled() || !readiness.have_identity) return result;
+    result.running = manager->IsProviderRunning(wallet.GetName(), readiness.identity.provider_id);
+    result.start_requested = manager->HasRequestedProviderStart(wallet.GetName(), readiness.identity.provider_id);
+    if (!readiness.have_settings || !readiness.settings.enabled) return result;
+    result.service = ProviderServiceStatusForObservation(
+        manager->GetProviderServiceStatus(wallet.GetName()), readiness.ready, synchronized);
+    if (!result.running) {
+        result.service = {};
+        if (readiness.settings.autostart || result.start_requested) {
+            result.service.state = wallet.IsLocked() ? ProviderServiceState::WAITING_FOR_UNLOCK
+                                                   : ProviderServiceState::WAITING_FOR_READINESS;
+        }
+    } else if (readiness.settings.operation_mode == ProviderOperationMode::MANUAL) {
+        result.service.state = ProviderServiceState::MANUAL;
+    } else if (wallet.IsLocked()) {
+        result.service.state = ProviderServiceState::WAITING_FOR_UNLOCK;
+        result.service.last_error = "PAYMASTER_WALLET_LOCKED";
+    } else if (result.service.state == ProviderServiceState::STOPPED) {
+        result.service.state = ProviderServiceState::ACTIVE;
+    }
+    return result;
+}
+
+
 ProviderAutomationSnapshot CaptureProviderAutomationStatus(const CWallet& wallet, const WalletContext& context,
                                         const ProviderReadiness& readiness, int64_t now, bool synchronized)
 {
@@ -2487,8 +2519,8 @@ ProviderAutomationSnapshot CaptureProviderAutomationStatus(const CWallet& wallet
     const bool configured = readiness.have_liquidity_policy;
     const bool enabled = configured && policy.automatic_replenishment;
     const bool approved = configured && policy.paid_maintenance_approved;
-    const bool running = readiness.have_identity && context.paymaster &&
-        context.paymaster->IsProviderRunning(wallet.GetName(), readiness.identity.provider_id);
+    const auto lifecycle = CaptureProviderLifecycleStatus(wallet, context, readiness, synchronized);
+    const bool running = lifecycle.running;
     ProviderAutomationState state{ProviderAutomationState::READY};
     std::string reason;
     bool pending{false}, planned{false};
@@ -2511,8 +2543,7 @@ ProviderAutomationSnapshot CaptureProviderAutomationStatus(const CWallet& wallet
     } else if (readiness.settings.operation_mode != ProviderOperationMode::AUTOMATIC) {
         state = ProviderAutomationState::PAUSED; reason = "PAYMASTER_MANUAL_PROCESSING";
     } else {
-        const auto service = ProviderServiceStatusForObservation(
-            context.paymaster->GetProviderServiceStatus(wallet.GetName()), readiness.ready, synchronized);
+        const auto& service = lifecycle.service;
         reason = service.last_error;
         const bool faulted = service.state == ProviderServiceState::FAULT;
         if (faulted) {

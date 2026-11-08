@@ -6,6 +6,7 @@
 
 #include <wallet/rpc/paymaster.h>
 #include <wallet/paymasterproviderops.h>
+#include <wallet/paymasterservice.h>
 #include <wallet/rpc/paymaster_internal.h>
 #include <paymaster/finance.h>
 
@@ -1138,6 +1139,7 @@ RPCHelpMan getpaymasterinfo()
                                                                         {RPCResult::Type::BOOL, "settings_present", "Whether this wallet has a persisted provider settings record"},
                                                                         {RPCResult::Type::BOOL, "enabled", "Configured provider enablement"},
                                                                         {RPCResult::Type::BOOL, "running", "Runtime provider state"},
+                                                                        {RPCResult::Type::BOOL, "start_requested", "Volatile one-shot start intent"},
                                                                         {RPCResult::Type::STR, "operation_mode", "automatic or manual"},
                                                                         {RPCResult::Type::BOOL, "autostart", "Whether optional provider autostart is enabled"},
                                                                         {RPCResult::Type::STR, "service_state", "stopped, waiting_for_unlock, waiting_for_readiness, active, manual, drain_only, or error"},
@@ -1215,30 +1217,10 @@ RPCHelpMan getpaymasterinfo()
                          finance_error);
             }
             const ProviderReadiness readiness = GetProviderReadiness(*wallet, context);
-            const bool running = readiness.have_identity && context.paymaster &&
-                                 context.paymaster->IsProviderRunning(wallet->GetName(), readiness.identity.provider_id);
-            ProviderServiceStatus service_status;
-            if (context.paymaster) {
-                service_status = ProviderServiceStatusForObservation(
-                    context.paymaster->GetProviderServiceStatus(wallet->GetName()), readiness.ready,
-                    AutomaticProviderStateIsSynchronized(*wallet));
-            }
-            if (!running) {
-                if (readiness.have_settings && readiness.settings.autostart &&
-                    wallet->IsLocked()) {
-                    service_status.state = ProviderServiceState::WAITING_FOR_UNLOCK;
-                } else if (readiness.have_settings &&
-                           readiness.settings.autostart && !readiness.ready) {
-                    service_status.state = ProviderServiceState::WAITING_FOR_READINESS;
-                } else {
-                    service_status.state = ProviderServiceState::STOPPED;
-                }
-            } else if (readiness.settings.operation_mode ==
-                       ProviderOperationMode::MANUAL) {
-                service_status.state = ProviderServiceState::MANUAL;
-            } else if (service_status.state == ProviderServiceState::STOPPED) {
-                service_status.state = ProviderServiceState::ACTIVE;
-            }
+            const auto lifecycle = CaptureProviderLifecycleStatus(
+                *wallet, context, readiness, AutomaticProviderStateIsSynchronized(*wallet));
+            const bool running = lifecycle.running;
+            const auto& service_status = lifecycle.service;
 
             UniValue pool{UniValue::VOBJ};
             pool.pushKV("activity", ToJSON(CaptureProviderActivity(readiness, GetTime())));
@@ -1260,6 +1242,7 @@ RPCHelpMan getpaymasterinfo()
             result.pushKV("settings_present", readiness.have_settings);
             result.pushKV("enabled", readiness.settings.enabled);
             result.pushKV("running", running);
+            result.pushKV("start_requested", lifecycle.start_requested);
             result.pushKV("operation_mode",
                           ProviderOperationModeName(
                               readiness.settings.operation_mode));
@@ -1392,19 +1375,14 @@ RPCHelpMan getpaymasteroperatorinfo()
             const int64_t now = GetTime();
             LOCK(wallet->cs_wallet);
             UniValue result{UniValue::VOBJ}, provider{UniValue::VOBJ}, safety{UniValue::VOBJ};
-            const bool running = readiness.have_identity && context.paymaster && context.paymaster->IsProviderRunning(wallet->GetName(), readiness.identity.provider_id);
-            std::string state = "stopped";
-            if (running) {
-                const auto service = ProviderServiceStatusForObservation(
-                    context.paymaster->GetProviderServiceStatus(wallet->GetName()), readiness.ready, synchronized);
-                state = ProviderServiceStateName(service.state);
-                if (!service.last_error.empty()) provider.pushKV("last_service_error", service.last_error);
-            } else if (readiness.settings.enabled && (readiness.settings.autostart || (context.paymaster && context.paymaster->HasRequestedProviderStart(wallet->GetName(), readiness.identity.provider_id))))
-                state = wallet->IsLocked() ? "waiting_for_unlock" : "waiting_for_readiness";
+            const auto lifecycle = CaptureProviderLifecycleStatus(*wallet, context, readiness, synchronized);
+            const bool running = lifecycle.running;
+            const auto state = ProviderServiceStateName(lifecycle.service.state);
+            if (!lifecycle.service.last_error.empty()) provider.pushKV("last_service_error", lifecycle.service.last_error);
             provider.pushKV("settings_present", readiness.have_settings);
             provider.pushKV("enabled", readiness.settings.enabled);
             provider.pushKV("running", running);
-            provider.pushKV("start_requested", context.paymaster && context.paymaster->HasRequestedProviderStart(wallet->GetName(), readiness.identity.provider_id));
+            provider.pushKV("start_requested", lifecycle.start_requested);
             provider.pushKV("operation_mode", ProviderOperationModeName(readiness.settings.operation_mode));
             provider.pushKV("autostart", readiness.settings.autostart);
             provider.pushKV("service_state", state);
