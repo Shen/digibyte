@@ -804,6 +804,20 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
                     ? ErrorKind::WALLET : ErrorKind::REJECTED, error);
             }
         }
+        if (!message) {
+            // A lost result does not imply that the provider failed to finish
+            // the recovery. As for an ordinary submit retry, only local exact
+            // chain/mempool evidence can permit retrying already spent inputs.
+            // This observation never fabricates a provider-signed result.
+            observed_final = FindLocalPaymasterFinal(
+                wallet, recovery.recovery_response.manifest.unsigned_txid);
+            if (observed_final && !PreflightFinalPaymasterTransaction(
+                    wallet, observed_final, observed_presence, error,
+                    ExactFinalTxIndexMode::NONBLOCKING, &observed_proof)) {
+                throw ApplicationError(IsTransientPaymasterFinalizationError(error)
+                    ? ErrorKind::WALLET : ErrorKind::REJECTED, error);
+            }
+        }
         const auto* final_proof = observed_proof ? &*observed_proof : nullptr;
         PartiallySignedTransaction user_psbt;
         if (!BuildRecoveryParametersFromRecord(
@@ -819,6 +833,15 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
                 Params(), *node->chainman, authorization_time,
                 observation_time,
                 final_proof, user_psbt, error)) {
+            throw ApplicationError(IsTransientPaymasterFinalizationError(error)
+                ? ErrorKind::WALLET : ErrorKind::REJECTED, error);
+        }
+
+        if (!message && observed_final &&
+            !ValidateAuthorizedFinalAlternativeRecoveryAgainstChainstate(
+                CMutableTransaction{*observed_final}, observed_final->GetWitnessHash(),
+                trusted, parameters, Params(), *node->chainman,
+                authorization_time, observation_time, final_proof, error)) {
             throw ApplicationError(IsTransientPaymasterFinalizationError(error)
                 ? ErrorKind::WALLET : ErrorKind::REJECTED, error);
         }

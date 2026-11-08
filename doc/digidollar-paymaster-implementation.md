@@ -185,6 +185,12 @@ presence enums or persisted bytes cannot manufacture it. A changed tip requires
 a fresh preflight without holding the chain lock across index waits.
 Full manifest and final-witness
 validation remains mandatory; new signing still requires unspent inputs.
+When a recovery result is missing, the client uses the same local final lookup
+as ordinary submit retry. An exact wallet/mempool/chain transaction can supply
+the transient proof after complete recovery-template and witness validation,
+including after quote expiry. The client retries the persisted submit unchanged;
+it retains `USER_SIGNED`, input protection and fee reservations until the
+authenticated provider result is committed. Local presence is not a signed result.
 
 Recovery fee exposure is retained through the 240-confirmation reorganization
 safety depth. A winning original payment is accounted once. Retained exact

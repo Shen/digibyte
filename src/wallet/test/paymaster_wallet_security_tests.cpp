@@ -6570,7 +6570,8 @@ static void ExerciseFirstProviderRecoveryCommit(node::NodeContext& node,
 
 static void ExerciseClientRecoveryResult(ClientRecoveryReadSetup& setup, bool confirmed_before_result,
                                          bool exercise_provider_history = false,
-                                         bool exercise_quote_intake = false)
+                                         bool exercise_quote_intake = false,
+                                         bool observe_without_result = false)
 {
     auto& m_node = setup.m_node;
     auto& context = setup.context;
@@ -7061,6 +7062,41 @@ static void ExerciseClientRecoveryResult(ClientRecoveryReadSetup& setup, bool co
         }
         SetMockTime(now + MAX_DIRECT_MESSAGE_TTL_SECONDS + 1);
     }
+    if (observe_without_result && !confirmed_before_result) {
+        bool already_confirmed{false};
+        BOOST_REQUIRE_MESSAGE(paymaster_app::InsertAndBroadcastPaymasterTransaction(client,
+            MakeTransactionRef(final_transaction), already_confirmed, error), error);
+        BOOST_CHECK(!already_confirmed);
+        BOOST_REQUIRE(m_node.mempool->get(CTransaction{final_transaction}.GetHash()));
+    }
+    if (confirmed_before_result || observe_without_result) {
+        // No provider reply exists yet, and all inputs are spent. The exact
+        // local final must allow the same USER_SIGNED recovery to resume even
+        // after expiry; it must not manufacture a result or consume fees.
+        const auto before_retry = GetMockableDatabase(client).m_records;
+        const auto retry_without_result = paymaster_app::ResolveAlternativePaymasterRecovery(
+            context, client, store, session, original_attempt, {});
+        BOOST_CHECK(!retry_without_result.broadcast.value_or(false));
+        BOOST_CHECK(GetMockableDatabase(client).m_records == before_retry);
+        BOOST_REQUIRE(store.GetAlternativeRecovery(session.request_id, recovery));
+        BOOST_CHECK(recovery.phase == AlternativeRecoveryPhase::USER_SIGNED);
+        BOOST_CHECK_EQUAL(recovery.signed_result.result_sequence, 0U);
+        const auto final_txid = CTransaction{final_transaction}.GetHash();
+        CTransactionRef intact;
+        {
+            LOCK(client.cs_wallet);
+            auto& observed = client.mapWallet.at(final_txid);
+            intact = observed.tx;
+            auto altered = CMutableTransaction{*intact};
+            BOOST_REQUIRE(!altered.vin.front().scriptWitness.stack.empty());
+            altered.vin.front().scriptWitness.stack.front().back() ^= 1;
+            observed.tx = MakeTransactionRef(altered);
+        }
+        BOOST_CHECK_THROW(paymaster_app::ResolveAlternativePaymasterRecovery(
+            context, client, store, session, original_attempt, {}), ApplicationError);
+        WITH_LOCK(client.cs_wallet, client.mapWallet.at(final_txid).tx = intact);
+        BOOST_CHECK(GetMockableDatabase(client).m_records == before_retry);
+    }
     const auto encoded = SerializePaymasterSecurityObject(result);
     const uint256 message_id{Hash(encoded)};
     BOOST_REQUIRE(manager.EnqueueDirectMessage(45, message_id, encoded.size(), DirectPayload{result}, now));
@@ -7233,6 +7269,14 @@ BOOST_FIXTURE_TEST_CASE(client_recovery_confirmed_before_first_result_survives_e
                         ClientRecoveryReadSetup)
 {
     ExerciseClientRecoveryResult(*this, /*confirmed_before_result=*/true);
+}
+
+BOOST_FIXTURE_TEST_CASE(client_recovery_mempool_final_without_result_retries_exact_authorization,
+                        ClientRecoveryReadSetup)
+{
+    ExerciseClientRecoveryResult(*this, /*confirmed_before_result=*/false,
+        /*exercise_provider_history=*/false, /*exercise_quote_intake=*/false,
+        /*observe_without_result=*/true);
 }
 
 BOOST_FIXTURE_TEST_CASE(provider_confirmed_recovery_archives_only_after_reorg_safety_depth,
