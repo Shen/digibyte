@@ -127,6 +127,15 @@ client signatures are persisted before releasing that lock. Chainstate/index
 validation stays outside it. The role-limited signer checks the supplied
 deadline again immediately before `FillPSBT`.
 
+For normal provider payments, the first durable USER acceptance must precede
+capacity expiry and be within the quote deadline. An exact accepted retry uses
+the receipt's authenticated `accepted_at` for historical capacity validation,
+and the current clock for `retry_until`, current wallet policy, budget, pool
+bindings, manual locks and chain resources. This permits completing a timely
+accepted payment after the short capacity TTL. Alternative recovery has no
+equivalent durable provider receipt/retry window and still requires a current
+response and capacity admission for every new provider signature.
+
 
 Normal and alternative-recovery client results use scoped inbox leases. Local
 read, preflight or database failures retain the received artifact; acknowledgement

@@ -63,10 +63,19 @@ bool PaymasterStore::AcceptUserAuthorization(
     }
 
     UserAuthorizationRecord existing;
-    if (batch.ReadPaymasterUserAuthorization(attempt.commit_key, existing)) {
+    const auto authorization_status = batch.ReadPaymasterUserAuthorizationWithStatus(attempt.commit_key, existing);
+    if (authorization_status == DatabaseReadStatus::FOUND) {
         if (existing.attempt_id == attempt_id && existing.canonical_psbt_hash == canonical_psbt_hash &&
+            attempt.state >= AttemptState::USER_PSBT_ACCEPTED && attempt.state <= AttemptState::MEMPOOL &&
+            existing.commit_key == attempt.commit_key &&
+            existing.accepted_at >= attempt.created_at && existing.accepted_at <= attempt.updated_at &&
+            existing.accepted_at <= attempt.quote_expires_at && existing.accepted_at <= now &&
             existing.retry_until == attempt.retry_until) return true;
         error = "PAYMASTER_USER_AUTHORIZATION_CONFLICT";
+        return false;
+    }
+    if (authorization_status != DatabaseReadStatus::NOT_FOUND) {
+        error = "PAYMASTER_SUBMIT_AUTHORIZATION_DATABASE_READ";
         return false;
     }
     if (!session.provider_side || attempt.state != AttemptState::USER_SIGNED) {
@@ -123,6 +132,33 @@ bool PaymasterStore::AcceptUserAuthorization(
             attempt, safety_policy, budget_ledger,
             BudgetReservationState::RESERVED,
             /*allow_historical_policy=*/true, error)) {
+        return false;
+    }
+
+    // A retry may use a timely durable receipt, but must never manufacture
+    // that receipt after the quote or its capacity admission has expired.
+    ProviderIdentityRecord identity;
+    std::vector<ProviderPoolEntry> pool;
+    PaymasterCapacityRequest capacity_request;
+    PaymasterCapacityProof capacity_proof;
+    uint256 capacity_request_hash;
+    if (now < attempt.created_at || now > attempt.quote_expires_at ||
+        !batch.ReadPaymasterIdentity(identity) ||
+        !batch.ReadPaymasterProviderPool(pool) ||
+        !ReadProviderCapacityRequestForContinuation(
+            batch, identity, quote_request.intent.genesis_hash, attempt.provider_id,
+            request_id, session.session_id, attempt.client_nonce, now,
+            capacity_request, capacity_proof, capacity_request_hash, error) ||
+        capacity_request.funding_model != quote_request.intent.funding_model ||
+        capacity_request.requires_carrier != quote_response.quote.reserved_carrier.has_value() ||
+        !ValidateProviderCapacityAdmissionForCommit(
+            budget_ledger, capacity_request, capacity_request_hash,
+            Hash(attempt.quote_request), attempt.commit_key, attempt.provider_netgroup_bucket,
+            CapacityAdmissionState::PROMOTED, now, error) ||
+        !ValidateQuoteCapacityResources(
+            capacity_proof, quote_response.quote, attempt.provider_manifest, pool,
+            attempt.client_nonce, attempt.commit_key, error)) {
+        if (error.empty()) error = "PAYMASTER_USER_AUTHORIZATION_EXPIRED";
         return false;
     }
 

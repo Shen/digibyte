@@ -2230,6 +2230,16 @@ BOOST_AUTO_TEST_CASE(
     user_signed.updated_at = now + 2;
     BOOST_REQUIRE_MESSAGE(
         store.UpdateAttempt(request_id, user_signed, error), error);
+    {
+        wallet::CWallet late_wallet{m_node.chain.get(), "late-first-acceptance",
+                           DuplicateSecurityFixtureDatabase(m_wallet.GetDatabase())};
+        AlignSecurityFixtureCheckpoint(late_wallet.GetDatabase());
+        const auto before = GetMockableDatabase(late_wallet).m_records;
+        BOOST_CHECK(!PaymasterStore{late_wallet}.AcceptUserAuthorization(request_id,
+            user_signed.attempt_id, Hash(user_signed.user_signed_psbt),
+            fixture.capacity_proof.expires_at, error));
+        BOOST_CHECK(GetMockableDatabase(late_wallet).m_records == before);
+    }
     const uint256 user_psbt_hash{Hash(user_signed.user_signed_psbt)};
 
     // Preserve the exact pre-authorization state for the stale-policy branch.
@@ -2476,6 +2486,31 @@ BOOST_AUTO_TEST_CASE(
                 SerializePaymasterSecurityObject(fixture.capacity_request));
     BOOST_CHECK(SerializePaymasterSecurityObject(capacity_proof) ==
                 SerializePaymasterSecurityObject(fixture.capacity_proof));
+
+    // Capacity TTL governs first acceptance. A timely durable receipt permits
+    // the exact normal-payment retry, bounded by retry_until and current state.
+    BOOST_REQUIRE_MESSAGE(store.ValidateProviderPreSignatureAuthorization(
+        authorized, fixture.request.intent.genesis_hash, fixture.capacity_proof.expires_at,
+        capacity_request, capacity_proof, error), error);
+    BOOST_CHECK(mock.m_records == before_validation);
+    BOOST_CHECK(!store.ValidateProviderPreSignatureAuthorization(
+        authorized, fixture.request.intent.genesis_hash, authorized.retry_until + 1,
+        capacity_request, capacity_proof, error));
+    {
+        wallet::CWallet invalid_receipt{m_node.chain.get(), "late-durable-receipt",
+                               DuplicateSecurityFixtureDatabase(m_wallet.GetDatabase())};
+        AlignSecurityFixtureCheckpoint(invalid_receipt.GetDatabase());
+        UserAuthorizationRecord receipt;
+        BOOST_REQUIRE(PaymasterStore{invalid_receipt}.GetUserAuthorization(authorized.commit_key, receipt));
+        receipt.accepted_at = fixture.capacity_proof.expires_at;
+        auto raw = invalid_receipt.GetDatabase().MakeBatch();
+        BOOST_REQUIRE(raw->Write(std::make_pair(DBKeys::PAYMASTER_USER_AUTH, authorized.commit_key), receipt));
+        const auto before = GetMockableDatabase(invalid_receipt).m_records;
+        BOOST_CHECK(!PaymasterStore{invalid_receipt}.ValidateProviderPreSignatureAuthorization(
+            authorized, fixture.request.intent.genesis_hash, receipt.accepted_at,
+            capacity_request, capacity_proof, error));
+        BOOST_CHECK(GetMockableDatabase(invalid_receipt).m_records == before);
+    }
 
     auto pool_database = DuplicateSecurityFixtureDatabase(m_wallet.GetDatabase());
     wallet::CWallet pool_wallet{m_node.chain.get(),

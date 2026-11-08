@@ -394,8 +394,10 @@ public:
      * input signature. The exact durable USER authorization, Capacity
      * admission/proof, pool reservation and budget reservation are reloaded
      * under one wallet lock. On success the returned Capacity artifacts are
-     * the canonical wallet records that the caller must revalidate against
-     * the current chainstate immediately before signing. */
+     * canonical wallet records. Validate them against current chainstate at
+     * the timely durable receipt's accepted_at for an exact retry; now still
+     * bounds new signing by retry_until. Repeat this local firewall under the
+     * final signing lock after chain/index waits. */
     bool ValidateProviderPreSignatureAuthorization(
         const DigiDollar::Paymaster::ProviderAttempt& attempt,
         const uint256& expected_genesis,

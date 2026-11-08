@@ -1436,7 +1436,10 @@ bool PaymasterStore::ValidateProviderPreSignatureAuthorization(
         authorization.attempt_id != persisted.attempt_id ||
         authorization.canonical_psbt_hash !=
             Hash(persisted.user_signed_psbt) ||
-        authorization.accepted_at <= 0 || authorization.accepted_at > now ||
+        authorization.accepted_at < persisted.created_at ||
+        authorization.accepted_at > persisted.updated_at ||
+        authorization.accepted_at > persisted.quote_expires_at ||
+        authorization.accepted_at > now ||
         authorization.retry_until != persisted.retry_until) {
         error = "PAYMASTER_USER_AUTHORIZATION_MISSING";
         return false;
@@ -1446,7 +1449,7 @@ bool PaymasterStore::ValidateProviderPreSignatureAuthorization(
     if (!ReadProviderCapacityRequestForContinuation(
             batch, identity, expected_genesis, persisted.provider_id,
             request.intent.request_id, request.intent.session_id,
-            request.intent.client_nonce, now, capacity_request,
+            request.intent.client_nonce, authorization.accepted_at, capacity_request,
             capacity_proof, capacity_request_hash, error) ||
         capacity_request.funding_model != request.intent.funding_model ||
         capacity_request.requires_carrier !=
@@ -1455,7 +1458,7 @@ bool PaymasterStore::ValidateProviderPreSignatureAuthorization(
             budget_ledger, capacity_request, capacity_request_hash,
             Hash(persisted.quote_request), persisted.commit_key,
             persisted.provider_netgroup_bucket,
-            CapacityAdmissionState::PROMOTED, now, error) ||
+            CapacityAdmissionState::PROMOTED, authorization.accepted_at, error) ||
         !ValidateQuoteCapacityResources(
             capacity_proof, response.quote, persisted.provider_manifest, pool,
             request.intent.client_nonce, persisted.commit_key, error)) {

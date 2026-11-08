@@ -118,6 +118,9 @@ std::optional<std::string> GetPermanentProviderSubmitRejection(
         else if (now > attempt.quote_expires_at) reason = "PAYMASTER_SUBMIT_QUOTE_EXPIRED";
         break;
     case AttemptState::USER_SIGNED:
+        if (now > attempt.retry_until) reason = "PAYMASTER_SUBMIT_RETRY_EXPIRED";
+        else if (now > attempt.quote_expires_at) reason = "PAYMASTER_SUBMIT_QUOTE_EXPIRED";
+        break;
     case AttemptState::USER_PSBT_ACCEPTED:
         if (now > attempt.retry_until) reason = "PAYMASTER_SUBMIT_RETRY_EXPIRED";
         break;
@@ -183,6 +186,7 @@ std::optional<std::string> GetPermanentProviderSubmitRejection(
     }
     if ((unsigned_quote && (authorization_status != DatabaseReadStatus::NOT_FOUND ||
                             result_status != DatabaseReadStatus::NOT_FOUND)) ||
+        (attempt.state == AttemptState::USER_SIGNED && authorization_status != DatabaseReadStatus::NOT_FOUND) ||
         (user_authority && attempt.state != AttemptState::USER_SIGNED &&
          authorization_status != DatabaseReadStatus::FOUND) ||
         (authorization_status == DatabaseReadStatus::FOUND &&
@@ -407,6 +411,7 @@ PaymentResult SubmitPaymasterTransactionWithGuard(CWallet& target, PartiallySign
         node::NodeContext* node_ctx = wallet->chain().context();
         PaymasterCapacityRequest capacity_request;
         PaymasterCapacityProof capacity_proof;
+        UserAuthorizationRecord authorization;
         if (!node_ctx || !node_ctx->chainman) {
             throw ApplicationError(
                 ErrorKind::INTERNAL,
@@ -415,10 +420,11 @@ PaymentResult SubmitPaymasterTransactionWithGuard(CWallet& target, PartiallySign
         if (!store.ValidateProviderPreSignatureAuthorization(
                 attempt, Params().GenesisBlock().GetHash(), now,
                 capacity_request, capacity_proof, error) ||
-            !ValidateCapacityProofAgainstChainstate(
+            !store.GetUserAuthorization(attempt.commit_key, authorization) ||
+            !ValidateAuthorizedCapacityRetryAgainstChainstate(
                 capacity_proof, capacity_request,
                 attempt.provider_identity_key, *node_ctx->chainman,
-                now, error) ||
+                authorization.accepted_at, now, /*final_proof=*/nullptr, error) ||
             !TemplateInputsAvailable(*wallet, *full_psbt.tx)) {
             throw ApplicationError(
                 ErrorKind::REJECTED,
