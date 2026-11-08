@@ -1882,6 +1882,16 @@ bool ValidateProviderPoolEntries(const std::vector<ProviderPoolEntry>& entries,
     return true;
 }
 
+uint8_t SupportedProviderPoolFundingModels(const ProviderPoolReadiness& pool, const ProviderPolicy& policy)
+{
+    if (pool.admission_dgb < REQUIRED_ADMISSION_SLOTS || pool.operational_dgb == 0) return 0;
+    uint8_t models{0};
+    if (PolicyAllowsFundingModel(policy, FundingModel::SPONSORED)) models |= FUNDING_MODEL_SPONSORED;
+    if (PolicyAllowsFundingModel(policy, FundingModel::USER_PAID) &&
+        pool.admission_carriers >= REQUIRED_ADMISSION_SLOTS && pool.operational_carriers > 0) models |= FUNDING_MODEL_USER_PAID;
+    return models;
+}
+
 ProviderPoolReadiness EvaluateProviderPoolReadiness(
     const std::vector<ProviderPoolEntry>& entries,
     const ProviderPolicy& policy,
@@ -1919,11 +1929,14 @@ ProviderPoolReadiness EvaluateProviderPoolReadiness(
         }
     }
     const bool user_paid = PolicyAllowsFundingModel(policy, FundingModel::USER_PAID);
-    result.complete_operational_slots = user_paid ? std::min(result.operational_dgb, result.operational_carriers) : result.operational_dgb;
+    const uint8_t models = SupportedProviderPoolFundingModels(result, policy);
+    result.complete_operational_slots = (models & FUNDING_MODEL_SPONSORED)
+        ? result.operational_dgb : (models & FUNDING_MODEL_USER_PAID)
+        ? std::min(result.operational_dgb, result.operational_carriers) : 0;
     if (result.admission_dgb < REQUIRED_ADMISSION_SLOTS) {
         result.errors.push_back("PAYMASTER_ADMISSION_DGB_MISSING");
     }
-    if (user_paid && result.admission_carriers < REQUIRED_ADMISSION_SLOTS) {
+    if (models == 0 && user_paid && result.admission_carriers < REQUIRED_ADMISSION_SLOTS) {
         result.errors.push_back("PAYMASTER_ADMISSION_CARRIERS_MISSING");
     }
     if (result.complete_operational_slots == 0) {

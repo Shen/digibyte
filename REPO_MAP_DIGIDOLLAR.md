@@ -622,7 +622,7 @@ API: [RPC groups](doc/digidollar-paymaster.md) and [client contract](doc/digidol
 | `src/paymaster/manager.*`, `transport.h` | Dedicated Direct channels, authenticated admission, shared connection quotas. |
 | `Manager::LeaseResults`, `LeaseRecoveryResults` | Client result leases protect received artifacts until durable acceptance and explicit acknowledgement. |
 | `src/paymaster/help.h` | Informational node/GUI RPC and terminal-assistant help, separate from argument registration. |
-| `src/paymaster/setup.*`, `cli.*` | Shared setup decisions and terminal setup/status assistant; `CalculateSetupCapital` checks known fee basis and reserve amounts before multiplication. `SetupSelectLiquidity` reviews capacity presets while preserving automation choices, `DescribeSetupFunding` explains preparation-specific capital/fees. Read-only `OperatorFeeLimitConflicts` compares offer and payment caps for GUI, CLI and operator RPC status. |
+| `src/paymaster/setup.*`, `cli.*` | Shared setup decisions and terminal setup/status assistant; `CalculateSetupCapital` checks known fee basis and reserve amounts before multiplication. `SetupSelectLiquidity` reviews capacity presets while preserving automation choices, `DescribeSetupFunding` explains preparation-specific capital/fees. Read-only `OperatorFeeLimitConflicts` checks the executable fee against offer and payment caps for GUI, CLI and operator RPC status. |
 | `src/rpc/paymaster.cpp` | Preview/apply node configuration and bounded IP/Tor endpoint diagnostics. Diagnostic leases stop at V2/capability negotiation and cannot authorize payment traffic; `rpc_paymaster_endpoint.py` covers TCP and SOCKS5 routes. |
 
 Ordinary DD consensus/history checks remain authoritative. See

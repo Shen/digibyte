@@ -758,8 +758,11 @@ QString ProviderConfiguration::configurationConflictText(const UniValue& offer, 
         const auto limit = conflict.find_value("payment_fee_limit_satoshis").getInt<int64_t>();
         lines << tr("%1: offer network-fee ceiling %2 DGB; per-payment safety limit %3 DGB.")
             .arg(name, PaymasterFormatDGB(ceiling), PaymasterFormatDGB(limit));
-        lines << (limit < ceiling
-            ? tr("This payment model cannot serve with this offer ceiling. Review the offer ceiling and spending limits; waiting for the rolling budget does not resolve this configuration conflict.")
+        const auto reason = conflict.find_value("reason").get_str();
+        lines << (reason == "offer_fee_cap_too_low"
+            ? tr("The offer ceiling is below the executable transaction fee. Review the offer ceiling and spending limits.")
+            : reason == "payment_fee_limit_too_low"
+            ? tr("The per-payment limit is below the executable transaction fee. Review the spending limits; waiting for the rolling budget does not resolve this configuration conflict.")
             : tr("The per-payment limit exceeds the offer ceiling. Core requires it to be at most the offer ceiling, including limits saved for inactive models. Review both settings."));
     }
     return lines.join(QLatin1Char('\n'));

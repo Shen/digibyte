@@ -29,7 +29,6 @@ namespace DigiDollar::Paymaster {
 namespace {
 
 constexpr CAmount MAX_DD_OUTPUT_CENTS{10000000};
-constexpr CAmount MIN_PAYMASTER_TX_FEE{COIN / 10};
 
 bool IsCanonicalP2TR(const CScript& script)
 {

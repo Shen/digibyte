@@ -2627,6 +2627,7 @@ bool BuildPaymasterAnnouncement(CWallet& wallet,
         if (error.empty()) error = "PAYMASTER_INVALID_ANNOUNCEMENT_PARAMETERS";
         return false;
     }
+    if (!GetProviderNetworkFee(policy, error)) return false;
     if (wallet.IsLocked()) {
         error = "PAYMASTER_WALLET_LOCKED";
         return false;

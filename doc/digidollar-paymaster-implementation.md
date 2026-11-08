@@ -23,6 +23,12 @@ uncapped by this provider setting. Independent client absolute, percentage
 and rolling-day limits still apply. Public sponsorship charges zero DD fee.
 Both models can be advertised by one identity with distinct offer IDs.
 
+`GetProviderNetworkFee` supplies the current executable fee (0.1 DGB) for both
+quote builders and readiness. A lower advertised cap cannot serve new work.
+Readiness intersects each model's current safety budget with its own usable
+pool resources: paid service needs DGB and carrier slots; sponsorship needs
+DGB only. A carrier shortage in a mixed policy leaves sponsorship available.
+
 A nonzero fee below the minimum DD output needs a confirmed provider DD carrier.
 The provider receives carrier principal plus fee; the principal is not charged
 to the client. Free sponsorship does not need a carrier for a service fee.

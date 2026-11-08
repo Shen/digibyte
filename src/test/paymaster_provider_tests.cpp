@@ -11,6 +11,7 @@
 #include <key.h>
 #include <paymaster/directory.h>
 #include <paymaster/provider.h>
+#include <paymaster/txbuilder.h>
 #include <paymaster/wire.h>
 #include <script/standard.h>
 #include <streams.h>
@@ -382,8 +383,11 @@ BOOST_AUTO_TEST_CASE(admission_and_operational_pool_readiness_is_disjoint)
 
     for (const auto& entry : {entries[6], entries[7]}) {
         const auto locked = EvaluateProviderPoolReadiness(entries, policy, 100, 1, {entry.outpoint});
-        BOOST_CHECK(!locked.ready);
-        BOOST_CHECK_EQUAL(locked.complete_operational_slots, 0U);
+        const bool can_sponsor = entry.asset == PoolAsset::DD_CARRIER;
+        BOOST_CHECK_EQUAL(locked.ready, can_sponsor);
+        BOOST_CHECK_EQUAL(locked.complete_operational_slots, can_sponsor ? 1U : 0U);
+        BOOST_CHECK_EQUAL(SupportedProviderPoolFundingModels(locked, policy),
+                          can_sponsor ? FUNDING_MODEL_SPONSORED : 0);
     }
     auto damaged_locked = entries;
     damaged_locked[6].state = static_cast<PoolEntryState>(255);
@@ -404,15 +408,37 @@ BOOST_AUTO_TEST_CASE(admission_and_operational_pool_readiness_is_disjoint)
     auto missing_carrier = entries;
     missing_carrier.erase(missing_carrier.begin() + 5);
     readiness = EvaluateProviderPoolReadiness(missing_carrier, policy, 100, 1);
-    BOOST_CHECK(!readiness.ready);
+    BOOST_CHECK(readiness.ready);
     BOOST_CHECK_EQUAL(readiness.admission_carriers, 2U);
+    BOOST_CHECK_EQUAL(SupportedProviderPoolFundingModels(readiness, policy), FUNDING_MODEL_SPONSORED);
+    auto paid_only = policy;
+    paid_only.funding_models = FUNDING_MODEL_USER_PAID;
+    BOOST_CHECK(!EvaluateProviderPoolReadiness(missing_carrier, paid_only, 100, 1).ready);
 
     auto reserved = entries;
     reserved.back().state = PoolEntryState::RESERVED;
     reserved.back().reservation_id = uint256S("02");
     readiness = EvaluateProviderPoolReadiness(reserved, policy, 100, 1);
-    BOOST_CHECK(!readiness.ready);
-    BOOST_CHECK_EQUAL(readiness.complete_operational_slots, 0U);
+    BOOST_CHECK(readiness.ready);
+    BOOST_CHECK_EQUAL(readiness.complete_operational_slots, 1U);
+    BOOST_CHECK_EQUAL(SupportedProviderPoolFundingModels(readiness, policy), FUNDING_MODEL_SPONSORED);
+}
+
+BOOST_AUTO_TEST_CASE(executable_network_fee_must_fit_advertised_cap)
+{
+    ProviderPolicy policy = UserPaidPolicy(50);
+    std::string error;
+    for (const CAmount cap : {MIN_PAYMASTER_TX_FEE - 1, MIN_PAYMASTER_TX_FEE, MIN_PAYMASTER_TX_FEE + 1}) {
+        policy.maximum_network_fee = DGBSatoshis{cap};
+        const auto fee = GetProviderNetworkFee(policy, error);
+        BOOST_CHECK_EQUAL(fee.has_value(), cap >= MIN_PAYMASTER_TX_FEE);
+        if (fee) {
+            BOOST_CHECK_EQUAL(fee->value, MIN_PAYMASTER_TX_FEE);
+            BOOST_CHECK(error.empty());
+        } else {
+            BOOST_CHECK_EQUAL(error, "PAYMASTER_NETWORK_FEE_CAP_TOO_LOW");
+        }
+    }
 }
 
 BOOST_AUTO_TEST_CASE(operational_dgb_below_policy_capacity_is_not_ready)

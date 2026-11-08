@@ -103,12 +103,12 @@ restore/checkpoint errors still require review before the GUI offers Resume.
 When already persistently stopped, Stop is disabled; **Retire** remains the
 entry point for reserve release and the final balance/backup review.
 
-For a spending-limit warning, compare the offer's network-fee ceiling with its
-payment safety limits as well as the rolling budget usage. For example, an offer
-ceiling of 0.50 DGB cannot fit a per-payment limit of 0.20 DGB, even when today's
-budget is unused. Review the intended offer ceiling and limits; neither changes
-automatically. RPC `can_accept_minimum_quote` only checks a hypothetical
-one-satoshi quote, not the saved offer ceiling or payment readiness.
+For a spending-limit warning, compare the executable fee (currently 0.10 DGB)
+with both the offer ceiling and per-payment safety limit, then check rolling
+budget usage. A 0.50 DGB offer ceiling and 0.20 DGB per-payment limit can serve
+the current fee; a ceiling or active limit below 0.10 DGB cannot. Limits never
+increase automatically. RPC `can_accept_minimum_quote` only checks a hypothetical
+one-satoshi quote and does not establish payment readiness.
 
 Overview, **Offer & pricing** and **Customer-payment budgets** identify conflicts
 by model and DGB amount. Forms compare edits with the other policy's saved values;
@@ -116,7 +116,7 @@ unsaved changes do not clear Overview's saved-state warning. The GUI/CLI setup
 and status use the same comparison. Inactive models do not block an offered
 model, but Core still rejects a per-payment cap above its offer ceiling.
 
-A smaller positive cap can be saved while retaining a readiness warning.
+A positive cap below the executable fee can be saved while retaining a readiness warning.
 Rejected saves preserve edits; successful saves reload combined provider status.
 Loading or failed readback is shown as unavailable. Separately saved policies
 can temporarily disagree: review both explicitly. Warnings never raise limits,

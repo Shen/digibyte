@@ -4,6 +4,7 @@
 
 #include <consensus/amount.h>
 #include <paymaster/directory.h>
+#include <paymaster/txbuilder.h>
 
 namespace DigiDollar::Paymaster {
 namespace {
@@ -140,6 +141,22 @@ bool ValidateProviderPolicy(const ProviderPolicy& policy, std::string& error)
         return false;
     }
     return true;
+}
+
+std::optional<DGBSatoshis> GetProviderNetworkFee(const ProviderPolicy& policy, std::string& error)
+{
+    if (!ValidateProviderPolicy(policy, error)) return std::nullopt;
+    return GetProviderNetworkFee(policy.maximum_network_fee, error);
+}
+
+std::optional<DGBSatoshis> GetProviderNetworkFee(DGBSatoshis maximum_network_fee, std::string& error)
+{
+    if (!MoneyRange(maximum_network_fee.value) || maximum_network_fee.value < MIN_PAYMASTER_TX_FEE) {
+        error = "PAYMASTER_NETWORK_FEE_CAP_TOO_LOW";
+        return std::nullopt;
+    }
+    error.clear();
+    return DGBSatoshis{MIN_PAYMASTER_TX_FEE};
 }
 
 bool ValidateProviderSafetyPolicy(const ProviderSafetyPolicy& safety,

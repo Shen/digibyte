@@ -1357,7 +1357,10 @@ ProviderProcessingResult ProcessProviderCapacityRequest(
                            "Provider wallet unlock is required for a capacity proof");
     }
     bool have_stored_response{false};
-    if (!readiness.ready && CapacityContinuationMayProceed(readiness)) {
+    const uint8_t requested_model = capacity_request->funding_model == FundingModel::SPONSORED
+        ? FUNDING_MODEL_SPONSORED : FUNDING_MODEL_USER_PAID;
+    const bool model_ready = readiness.ready && (readiness.available_funding_models & requested_model) != 0;
+    if (!model_ready && CapacityContinuationMayProceed(readiness)) {
         // An exact retry can arrive after its own proof reserved
         // the last slot. Do not mistake it for fresh admission.
         LOCK(wallet->cs_wallet);
@@ -1366,7 +1369,7 @@ ProviderProcessingResult ProcessProviderCapacityRequest(
         have_stored_response = batch.ReadPaymasterCapacityResponse(
             Hash(SerializeCapacityRequest(*capacity_request)), stored_response);
     }
-    if (!CapacityRequestMayProceed(readiness, have_stored_response)) {
+    if (!model_ready && !(have_stored_response && CapacityContinuationMayProceed(readiness))) {
         throw ApplicationError(ErrorKind::WALLET,
                            "PAYMASTER_PROVIDER_NOT_RUNNING");
     }
@@ -1694,7 +1697,9 @@ ProviderProcessingResult CommitProviderRecoveryQuote(
     }
     const PaymasterLiquiditySlot& slot =
         capacity_proof.liquidity_slots.front();
-    const CAmount network_fee{COIN / 10};
+    const auto network_fee_plan = GetProviderNetworkFee(readiness.policy, error);
+    if (!network_fee_plan) throw ApplicationError(ErrorKind::WALLET, error);
+    const CAmount network_fee{network_fee_plan->value};
     CAmount provider_dgb{0};
     for (const CapacityDGBInput& input : slot.dgb_inputs) {
         if (input.input.value.value >
@@ -2162,7 +2167,9 @@ ProviderProcessingResult ProcessProviderQuoteRequest(
     }
     const ServiceFeePlan* const fee_plan{&quote_preflight.fee_plan};
     const bool needs_carrier = fee_plan->output_kind == FeeOutputKind::CARRIER_SUCCESSOR;
-    const CAmount network_fee{COIN / 10};
+    const auto network_fee_plan = GetProviderNetworkFee(readiness.policy, error);
+    if (!network_fee_plan) throw ApplicationError(ErrorKind::WALLET, error);
+    const CAmount network_fee{network_fee_plan->value};
     if (!store.CheckProviderQuoteAdmission(
             *quote_request, Hash(redacted_request),
             direct.canonical_netgroup, needs_carrier,

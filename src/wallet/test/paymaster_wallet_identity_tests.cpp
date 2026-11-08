@@ -692,6 +692,12 @@ BOOST_AUTO_TEST_CASE(provider_refill_admission_requires_current_payment_readines
             BOOST_CHECK(!ProviderCanServeDuringRefill({status.state, error}, readiness, true));
         }
     }
+    readiness.available_funding_models = FUNDING_MODEL_SPONSORED;
+    BOOST_CHECK(ProviderCanServeDuringRefill({ProviderServiceState::WAITING_FOR_READINESS,
+        "PAYMASTER_LIQUIDITY_TARGETS_INCOMPLETE"}, readiness, true));
+    readiness.available_funding_models = FUNDING_MODEL_USER_PAID;
+    BOOST_CHECK(!ProviderCanServeDuringRefill({ProviderServiceState::WAITING_FOR_READINESS,
+        "PAYMASTER_LIQUIDITY_TARGETS_INCOMPLETE"}, readiness, true));
 }
 
 BOOST_AUTO_TEST_CASE(paymaster_dd_reservations_are_owned_but_not_spendable)

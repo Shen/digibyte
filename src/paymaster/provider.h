@@ -924,6 +924,14 @@ bool UpsertProviderFinanceEvent(ProviderFinanceLedger& ledger,
                                 const ProviderFinanceEvent& event,
                                 std::string& error);
 bool ProviderBackupRequired(const ProviderBackupStatus& status);
+/** Current executable fee plan. Policy storage may retain a lower cap, but
+ * such a policy cannot admit or advertise new payments. */
+std::optional<DGBSatoshis> GetProviderNetworkFee(const ProviderPolicy& policy, std::string& error);
+std::optional<DGBSatoshis> GetProviderNetworkFee(DGBSatoshis maximum_network_fee, std::string& error);
+/** Models backed by usable shared DGB capacity. USER_PAID additionally needs
+ * confirmed carrier admission and operational slots. */
+uint8_t SupportedProviderPoolFundingModels(const ProviderPoolReadiness& pool, const ProviderPolicy& policy);
+
 bool ValidateProviderPoolEntries(const std::vector<ProviderPoolEntry>& entries,
                                  std::string& error);
 /** States that still dedicate an outpoint to Paymaster operation and must

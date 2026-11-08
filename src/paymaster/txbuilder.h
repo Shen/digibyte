@@ -22,6 +22,8 @@ class ChainstateManager;
 
 namespace DigiDollar::Paymaster {
 
+inline constexpr CAmount MIN_PAYMASTER_TX_FEE{COIN / 10};
+
 enum class InputRole : uint8_t {
     USER_DD,
     USER_DGB,

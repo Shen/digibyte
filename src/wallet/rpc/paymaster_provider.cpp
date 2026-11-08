@@ -1372,6 +1372,7 @@ RPCHelpMan getpaymasteroperatorinfo()
                                                                          {RPCResult::Type::BOOL, "offered", "Model is offered by the saved policy"},
                                                                          {RPCResult::Type::NUM, "offer_fee_ceiling_satoshis", "Advertised network-fee ceiling"},
                                                                          {RPCResult::Type::NUM, "payment_fee_limit_satoshis", "Per-payment safety limit"},
+                                                                         {RPCResult::Type::STR, "reason", "offer_fee_cap_too_low, payment_fee_limit_too_low or payment_fee_limit_above_cap"},
                                                                      }}}},
                                                                      {RPCResult::Type::ARR, "diagnostics", "Ordered causes and action identifiers", {{RPCResult::Type::OBJ, "", "Diagnostic", {
                                                                                                                                                                                                   {RPCResult::Type::STR, "code", "Stable code"},

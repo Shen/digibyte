@@ -904,6 +904,13 @@ struct QuoteRequestProcessingSetup : TestChain100Setup {
     explicit QuoteRequestProcessingSetup(int outbound_connections = 0)
     {
         BOOST_REQUIRE(wallet.LoadWallet() == DBErrors::LOAD_OK);
+        environment.policy.maximum_network_fee = DGBSatoshis{COIN / 10};
+        environment.settings.policy_hash = GetProviderPolicyHash(environment.policy);
+        auto& limits = environment.safety.public_sponsored;
+        limits.maximum_network_fee_per_transaction = DGBSatoshis{COIN / 10};
+        limits.maximum_reserved_network_fee = DGBSatoshis{COIN};
+        limits.maximum_network_fee_per_hour = DGBSatoshis{COIN};
+        limits.maximum_network_fee_per_day = DGBSatoshis{COIN};
         environment.settings.operation_mode = ProviderOperationMode::MANUAL;
         std::string error;
         BOOST_REQUIRE_MESSAGE(AddTaprootSigningKey(wallet, environment.identity_key, error), error);
@@ -5229,6 +5236,13 @@ BOOST_FIXTURE_TEST_CASE(quote_prevout_lookup_failure_preserves_local_authority,
     wallet::CWallet wallet{m_node.chain.get(), "quote-lookup", CreateMockableWalletDatabase()};
     BOOST_REQUIRE(wallet.LoadWallet() == DBErrors::LOAD_OK);
     ProviderSecurityEnvironment environment = MakeProviderEnvironment(GetTime(), 2000);
+    environment.policy.maximum_network_fee = DGBSatoshis{COIN / 10};
+    environment.settings.policy_hash = GetProviderPolicyHash(environment.policy);
+    auto& runtime_limits = environment.safety.public_sponsored;
+    runtime_limits.maximum_network_fee_per_transaction = DGBSatoshis{COIN / 10};
+    runtime_limits.maximum_reserved_network_fee = DGBSatoshis{COIN};
+    runtime_limits.maximum_network_fee_per_hour = DGBSatoshis{COIN};
+    runtime_limits.maximum_network_fee_per_day = DGBSatoshis{COIN};
     environment.settings.operation_mode = ProviderOperationMode::MANUAL;
     std::string error;
     BOOST_REQUIRE_MESSAGE(AddTaprootSigningKey(wallet, environment.identity_key, error), error);
@@ -7066,7 +7080,7 @@ BOOST_FIXTURE_TEST_CASE(deferred_capacity_preserves_request_and_yields_next_turn
     const uint256 tip = m_node.chain->getBlockHash(height);
     CMutableTransaction funding;
     funding.vin.emplace_back(COutPoint{SecurityTestId(seed, 700), 0});
-    funding.vout.emplace_back(2000, environment.identity.identity_script);
+    funding.vout.emplace_back(COIN / 10, environment.identity.identity_script);
     const CTransactionRef funding_tx = MakeTransactionRef(funding);
     ProviderPoolEntry free_slot;
     free_slot.outpoint = COutPoint{funding_tx->GetHash(), 0};
@@ -7074,7 +7088,7 @@ BOOST_FIXTURE_TEST_CASE(deferred_capacity_preserves_request_and_yields_next_turn
     free_slot.asset = PoolAsset::DGB;
     free_slot.state = PoolEntryState::AVAILABLE;
     free_slot.script_pub_key = funding.vout.front().scriptPubKey;
-    free_slot.dgb_value = DGBSatoshis{2000};
+    free_slot.dgb_value = DGBSatoshis{COIN / 10};
     free_slot.confirmation_height = height;
     free_slot.updated_at = GetTime();
     {
@@ -7105,6 +7119,57 @@ BOOST_FIXTURE_TEST_CASE(deferred_capacity_preserves_request_and_yields_next_turn
         BOOST_REQUIRE(batch.WritePaymasterProviderSafetyPolicy(safety));
     }
     BOOST_REQUIRE(paymaster_app::GetProviderReadiness(wallet, context).ready);
+    {
+        // A mixed offer retains DGB-only service when carriers are absent.
+        // A budget available only to the carrier-dependent model must not
+        // produce a false ready result after intersecting the model masks.
+        auto mixed = environment.policy;
+        mixed.funding_models = FUNDING_MODEL_ALL;
+        auto settings = environment.settings;
+        settings.policy_hash = GetProviderPolicyHash(mixed);
+        ProviderSafetyPolicy original_safety;
+        BOOST_REQUIRE(GetPaymasterProviderSafetyPolicy(wallet, original_safety));
+        auto safety = original_safety;
+        safety.user_paid = safety.public_sponsored;
+        const auto save = [&] {
+            LOCK(wallet.cs_wallet);
+            WalletBatch batch{wallet.GetDatabase()};
+            BOOST_REQUIRE(batch.WritePaymasterPolicy(mixed));
+            BOOST_REQUIRE(batch.WritePaymasterSettings(settings));
+            BOOST_REQUIRE(batch.WritePaymasterProviderSafetyPolicy(safety));
+        };
+        save();
+        auto readiness = paymaster_app::GetProviderReadiness(wallet, context);
+        BOOST_REQUIRE(readiness.ready);
+        BOOST_CHECK_EQUAL(readiness.available_funding_models, FUNDING_MODEL_SPONSORED);
+        Announcement announcement;
+        BOOST_REQUIRE_MESSAGE(BuildPaymasterAnnouncement(wallet, environment.identity, mixed,
+            readiness.pool_entries, LookupNumeric("127.0.0.1:18445"), Params().GenesisBlock().GetHash(),
+            tip, GetTime(), readiness.available_funding_models, announcement, error), error);
+        BOOST_REQUIRE_EQUAL(announcement.offers.size(), 1U);
+        BOOST_CHECK(announcement.offers.front().funding_model == FundingModel::SPONSORED);
+        safety.public_sponsored.maximum_reserved_network_fee = DGBSatoshis{COIN / 10};
+        save();
+        readiness = paymaster_app::GetProviderReadiness(wallet, context);
+        BOOST_CHECK(!readiness.ready);
+        BOOST_CHECK_EQUAL(readiness.available_funding_models, 0U);
+        mixed.maximum_network_fee = DGBSatoshis{COIN / 10 - 1};
+        settings.policy_hash = GetProviderPolicyHash(mixed);
+        safety.public_sponsored.maximum_network_fee_per_transaction = mixed.maximum_network_fee;
+        safety.user_paid.maximum_network_fee_per_transaction = mixed.maximum_network_fee;
+        save();
+        readiness = paymaster_app::GetProviderReadiness(wallet, context);
+        BOOST_CHECK(!readiness.ready);
+        BOOST_CHECK(std::find(readiness.errors.begin(), readiness.errors.end(), "PAYMASTER_NETWORK_FEE_CAP_TOO_LOW") != readiness.errors.end());
+        BOOST_CHECK(!BuildPaymasterAnnouncement(wallet, environment.identity, mixed,
+            readiness.pool_entries, LookupNumeric("127.0.0.1:18445"), Params().GenesisBlock().GetHash(),
+            tip, GetTime(), FUNDING_MODEL_ALL, announcement, error));
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_NETWORK_FEE_CAP_TOO_LOW");
+        mixed = environment.policy;
+        settings = environment.settings;
+        safety = original_safety;
+        save();
+    }
     PaymasterCapacityRequest capacity = fixture.capacity_request;
     capacity.request_id = "550e8400-e29b-41d4-a716-446655441221";
     capacity.session_id = SecurityTestId(seed, 703);

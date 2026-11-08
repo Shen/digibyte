@@ -10970,7 +10970,7 @@ void PaymasterWidgetTests::paymasterReserveSettingsRefresh()
 void PaymasterWidgetTests::paymasterConfigurationConflicts_data()
 {
     QTest::addColumn<QString>("scenario");
-    for (const auto* scenario : {"user_paid", "sponsored", "mixed", "inactive", "matching", "zero", "above"})
+    for (const auto* scenario : {"user_paid", "sponsored", "mixed", "inactive", "matching", "executable", "zero", "above"})
         QTest::newRow(scenario) << QString::fromLatin1(scenario);
 }
 
@@ -10989,8 +10989,9 @@ void PaymasterWidgetTests::paymasterConfigurationConflicts()
     const bool paid = scenario != "sponsored" && scenario != "inactive";
     const bool sponsored = scenario == "sponsored" || scenario == "mixed" || scenario == "inactive";
     const int ceiling = scenario == "above" ? 10000000 : 50000000;
-    const int paid_limit = scenario == "zero" ? 0 : scenario == "matching" ? ceiling : 20000000;
-    const int sponsored_limit = scenario == "sponsored" ? 20000000 : sponsored ? ceiling : 0;
+    const int paid_limit = scenario == "zero" ? 0 : scenario == "matching" ? ceiling :
+        scenario == "executable" || scenario == "above" ? 20000000 : 5000000;
+    const int sponsored_limit = scenario == "sponsored" ? 5000000 : sponsored ? ceiling : 0;
     UniValue models{UniValue::VARR};
     if (paid) models.push_back("user_paid");
     if (sponsored) models.push_back("sponsored");
@@ -11025,7 +11026,7 @@ void PaymasterWidgetTests::paymasterConfigurationConflicts()
     paid_amount->setText(QString::fromStdString(DigiDollar::Paymaster::OperatorAmount(paid_limit)));
     sponsored_amount->setText(QString::fromStdString(DigiDollar::Paymaster::OperatorAmount(sponsored_limit)));
     panel->setOperatorStatusForTesting(snapshot);
-    const bool conflict = scenario != "matching" && scenario != "inactive";
+    const bool conflict = scenario != "matching" && scenario != "inactive" && scenario != "executable";
     for (const char* name : {"paymasterOperatorConfigWarning", "paymasterPolicyConfigWarning", "paymasterSafetyConfigWarning"}) {
         auto* label = panel->findChild<QLabel*>(name);
         QVERIFY(label);
@@ -11039,19 +11040,25 @@ void PaymasterWidgetTests::paymasterConfigurationConflicts()
     if (scenario == "user_paid") {
         auto* overview_warning = panel->findChild<QLabel*>("paymasterOperatorConfigWarning");
         QVERIFY(overview_warning->text().contains("0.50000000"));
-        QVERIFY(overview_warning->text().contains("0.20000000"));
+        QVERIFY(overview_warning->text().contains("0.05000000"));
         auto* settings = panel->findChild<QStackedWidget*>("paymasterSettingsPages");
         panel->findChild<QPushButton*>("paymasterOperatorConfigWarningLink")->click();
         QCOMPARE(settings->currentWidget(), panel->findChild<QWidget*>("paymasterSafetyPolicyPage"));
         panel->findChild<QPushButton*>("paymasterSafetyConfigWarningLink")->click();
         QCOMPARE(settings->currentWidget(), panel->findChild<QWidget*>("paymasterConfigurationPage"));
-        fee->setValue(paid_limit);
-        QVERIFY(panel->findChild<QLabel*>("paymasterPolicyConfigWarning")->parentWidget()->isHidden());
+        fee->setValue(10000000);
+        paid_amount->setText(QStringLiteral("0.10000000"));
+        QVERIFY(!panel->findChild<QLabel*>("paymasterPolicyConfigWarning")->parentWidget()->isHidden()); // A lower offer cap cannot repair the saved sub-minimum safety limit.
         QVERIFY(!overview_warning->parentWidget()->isHidden()); // Unsaved edits never clear the saved conflict.
         paid_amount->setText(QStringLiteral("0.50000000"));
         QVERIFY(panel->findChild<QLabel*>("paymasterSafetyConfigWarning")->parentWidget()->isHidden());
         QVERIFY(!overview_warning->parentWidget()->isHidden());
-        offer.pushKV("maximum_network_fee_dgb_satoshis", paid_limit);
+        auto saved_paid = limits.find_value("user_paid");
+        saved_paid.pushKV("maximum_network_fee_per_transaction_satoshis", 10000000);
+        limits.pushKV("user_paid", saved_paid);
+        safety.pushKV("policy", limits);
+        snapshot.pushKV("safety", safety);
+        offer.pushKV("maximum_network_fee_dgb_satoshis", 10000000);
         provider.pushKV("policy", offer);
         snapshot.pushKV("provider", provider);
         panel->setOperatorStatusForTesting(snapshot);

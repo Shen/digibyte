@@ -567,7 +567,13 @@ ProviderReadiness GetProviderReadiness(CWallet& wallet, WalletContext& context,
             wallet, result.pool_entries, result.policy, tip_height, 1);
         result.pool_ready = result.pool.ready;
     }
-    if (result.have_policy && result.have_safety_policy && result.have_budget_ledger) {
+    std::optional<DigiDollar::Paymaster::DGBSatoshis> network_fee;
+    if (result.have_policy) {
+        std::string fee_error;
+        network_fee = DigiDollar::Paymaster::GetProviderNetworkFee(result.policy, fee_error);
+        if (!network_fee) result.errors.push_back(fee_error);
+    }
+    if (network_fee && result.have_safety_policy && result.have_budget_ledger) {
         CScript status_recipient;
         status_recipient << OP_TRUE;
         const uint256 recipient_bucket =
@@ -578,7 +584,7 @@ ProviderReadiness GetProviderReadiness(CWallet& wallet, WalletContext& context,
             return DigiDollar::Paymaster::EvaluateProviderSafetyStatus(
                        result.budget_ledger, result.safety_policy, model, scope,
                        recipient_bucket,
-                       result.policy.maximum_network_fee, GetTime())
+                       *network_fee, GetTime())
                 .can_accept_quote;
         };
         if (DigiDollar::Paymaster::PolicyAllowsFundingModel(
@@ -598,6 +604,12 @@ ProviderReadiness GetProviderReadiness(CWallet& wallet, WalletContext& context,
         if (result.available_funding_models == 0) {
             result.errors.push_back("PAYMASTER_SAFETY_LIMIT_EXHAUSTED");
         }
+    }
+
+    result.available_funding_models &= DigiDollar::Paymaster::SupportedProviderPoolFundingModels(result.pool, result.policy);
+    if (result.pool_ready && network_fee && result.have_safety_policy &&
+        result.have_budget_ledger && result.available_funding_models == 0 && result.errors.empty()) {
+        result.errors.push_back("PAYMASTER_SAFETY_LIMIT_EXHAUSTED");
     }
 
     if (!context.paymaster || !context.paymaster->Enabled()) result.errors.push_back("PAYMASTER_DISABLED");
@@ -631,7 +643,8 @@ ProviderReadiness GetProviderReadiness(CWallet& wallet, WalletContext& context,
         // release_slot. Keep that durable configuration valid, but surface a
         // distinct readiness gate instead of pretending that an automatic
         // start can restore capacity that the saved target does not request.
-        result.errors.push_back("PAYMASTER_LIQUIDITY_TARGETS_INCOMPLETE");
+        result.available_funding_models &= ~DigiDollar::Paymaster::FUNDING_MODEL_USER_PAID;
+        if (result.available_funding_models == 0) result.errors.push_back("PAYMASTER_LIQUIDITY_TARGETS_INCOMPLETE");
     }
     if (wallet.IsLocked()) result.errors.push_back("PAYMASTER_WALLET_LOCKED");
     if (!result.have_pool) {
@@ -2190,7 +2203,9 @@ bool ProviderCanServeDuringRefill(
     case DigiDollar::Paymaster::ProviderServiceState::WAITING_FOR_LIQUIDITY_CONFIRMATION:
         return status.last_error == "PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING";
     case DigiDollar::Paymaster::ProviderServiceState::WAITING_FOR_READINESS:
-        return status.last_error == "PAYMASTER_AUTOMATIC_REPLENISHMENT_DISABLED";
+        return status.last_error == "PAYMASTER_AUTOMATIC_REPLENISHMENT_DISABLED" ||
+               (status.last_error == "PAYMASTER_LIQUIDITY_TARGETS_INCOMPLETE" &&
+                (readiness.available_funding_models & DigiDollar::Paymaster::FUNDING_MODEL_SPONSORED) != 0);
     default:
         return false;
     }
