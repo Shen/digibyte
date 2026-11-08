@@ -1918,6 +1918,62 @@ bool ReleasePaymasterCapital(CWallet& wallet, bool execute, const uint256& expec
     return true;
 }
 
+bool PreparePaymasterMaintenanceCancellation(
+    CWallet& wallet, const ProviderMaintenanceLedger& current,
+    const std::vector<uint256>& operation_ids, int64_t now,
+    ProviderMaintenanceLedger& cancelled, int64_t& released_fee_budget, std::string& error)
+{
+    AssertLockHeld(wallet.cs_wallet);
+    error.clear();
+    released_fee_budget = 0;
+    const auto fail = [&](const char* code) { error = code; return false; };
+    const std::set<uint256> selected{operation_ids.begin(), operation_ids.end()};
+    if (now <= 0 || selected.empty() || selected.size() > 256 ||
+        selected.size() != operation_ids.size() || selected.count(uint256{}))
+        return fail("PAYMASTER_INVALID_MAINTENANCE_SELECTION");
+    const auto& ledger = current;
+    std::set<CScript> scripts;
+    size_t found{0};
+    for (const auto& record : ledger.records) {
+        if (!selected.count(record.operation_id)) continue;
+        ++found;
+        if (record.state != ProviderMaintenanceState::PLANNED || !record.transaction_id.IsNull() ||
+            record.actual_fee.value != 0 || !record.source_inputs.empty() || record.outputs.empty() ||
+            (!record.IsPreparation() && record.kind != ProviderMaintenanceKind::REPLENISH_DGB &&
+             record.kind != ProviderMaintenanceKind::REPLENISH_CARRIER))
+            return fail("PAYMASTER_MAINTENANCE_NOT_CANCELLABLE");
+        if (record.maximum_fee.value < 0 ||
+            record.maximum_fee.value > std::numeric_limits<int64_t>::max() - released_fee_budget)
+            return fail("PAYMASTER_MAINTENANCE_AMOUNT_OVERFLOW");
+        released_fee_budget += record.maximum_fee.value;
+        for (const auto& output : record.outputs) scripts.insert(output.script_pub_key);
+    }
+    if (found != selected.size()) return fail("PAYMASTER_MAINTENANCE_OPERATION_NOT_FOUND");
+    // A retained signed sibling using one of the same scripts is ambiguous
+    // even if its wallet transaction is currently unavailable.
+    for (const auto& record : ledger.records) {
+        if (selected.count(record.operation_id) || record.transaction_id.IsNull()) continue;
+        for (const auto& output : record.outputs)
+            if (scripts.count(output.script_pub_key)) return fail("PAYMASTER_MAINTENANCE_SIGNED_OR_AMBIGUOUS");
+    }
+    // A lost reply may have left a signed transaction without a journal txid.
+    // Any matching output, even with another amount or conflicted/abandoned,
+    // keeps the entire requested cancellation closed. No signature is erased.
+    for (const auto& [txid, tx] : wallet.mapWallet) {
+        if (!tx.tx) return fail("PAYMASTER_MAINTENANCE_SIGNED_OR_AMBIGUOUS");
+        for (const auto& output : tx.tx->vout)
+            if (scripts.count(output.scriptPubKey)) return fail("PAYMASTER_MAINTENANCE_SIGNED_OR_AMBIGUOUS");
+    }
+    cancelled = current;
+    for (const auto& id : operation_ids) {
+        if (!ReleaseProviderMaintenanceBudget(cancelled, id, now, error)) return false;
+        for (auto& record : cancelled.records) {
+            if (record.operation_id == id) record.preparation_error.clear();
+        }
+    }
+    return true;
+}
+
 bool CancelPaymasterMaintenance(CWallet& wallet, const std::vector<uint256>& operation_ids,
                                bool execute, const uint256& expected_plan, int64_t now,
                                PaymasterMaintenanceCancellation& result, std::string& error)
@@ -1941,49 +1997,16 @@ bool CancelPaymasterMaintenance(CWallet& wallet, const std::vector<uint256>& ope
     const auto liquidity_status = batch.ReadPaymasterLiquidityPolicyWithStatus(liquidity);
     if (liquidity_status != DatabaseReadStatus::FOUND && liquidity_status != DatabaseReadStatus::NOT_FOUND)
         return fail("PAYMASTER_MAINTENANCE_DATABASE_READ");
-    std::set<CScript> scripts;
-    size_t found{0};
-    for (const auto& record : ledger.records) {
-        if (!selected.count(record.operation_id)) continue;
-        ++found;
-        if (record.state != ProviderMaintenanceState::PLANNED || !record.transaction_id.IsNull() ||
-            record.actual_fee.value != 0 || !record.source_inputs.empty() || record.outputs.empty() ||
-            (!record.IsPreparation() && record.kind != ProviderMaintenanceKind::REPLENISH_DGB &&
-             record.kind != ProviderMaintenanceKind::REPLENISH_CARRIER))
-            return fail("PAYMASTER_MAINTENANCE_NOT_CANCELLABLE");
-        if (record.maximum_fee.value < 0 ||
-            record.maximum_fee.value > std::numeric_limits<int64_t>::max() - result.released_fee_budget)
-            return fail("PAYMASTER_MAINTENANCE_AMOUNT_OVERFLOW");
-        result.released_fee_budget += record.maximum_fee.value;
-        for (const auto& output : record.outputs) scripts.insert(output.script_pub_key);
-    }
-    if (found != selected.size()) return fail("PAYMASTER_MAINTENANCE_OPERATION_NOT_FOUND");
-    // A retained signed sibling using one of the same scripts is ambiguous
-    // even if its wallet transaction is currently unavailable.
-    for (const auto& record : ledger.records) {
-        if (selected.count(record.operation_id) || record.transaction_id.IsNull()) continue;
-        for (const auto& output : record.outputs)
-            if (scripts.count(output.script_pub_key)) return fail("PAYMASTER_MAINTENANCE_SIGNED_OR_AMBIGUOUS");
-    }
-    // A lost reply may have left a signed transaction without a journal txid.
-    // Any matching output, even with another amount or conflicted/abandoned,
-    // keeps the entire requested cancellation closed. No signature is erased.
-    for (const auto& [txid, tx] : wallet.mapWallet) {
-        if (!tx.tx) return fail("PAYMASTER_MAINTENANCE_SIGNED_OR_AMBIGUOUS");
-        for (const auto& output : tx.tx->vout)
-            if (scripts.count(output.scriptPubKey)) return fail("PAYMASTER_MAINTENANCE_SIGNED_OR_AMBIGUOUS");
-    }
+    ProviderMaintenanceLedger cancelled;
+    if (!PreparePaymasterMaintenanceCancellation(wallet, ledger, operation_ids, now,
+            cancelled, result.released_fee_budget, error)) return false;
     result.plan_id = (HashWriter{} << std::string{"DigiByte Paymaster maintenance cancellation v1"}
         << Params().GenesisBlock().GetHash() << wallet.GetName() << identity.provider_id
         << operation_ids << ledger << liquidity).GetHash();
     if (!execute) return true;
     if (expected_plan.IsNull() || expected_plan != result.plan_id)
         return fail("PAYMASTER_MAINTENANCE_PLAN_CHANGED");
-    for (auto& record : ledger.records) {
-        if (!selected.count(record.operation_id)) continue;
-        if (!ReleaseProviderMaintenanceBudget(ledger, record.operation_id, now, error)) return false;
-        record.preparation_error.clear();
-    }
+    ledger = std::move(cancelled);
     if (liquidity_status == DatabaseReadStatus::FOUND) {
         if (liquidity.updated_at == std::numeric_limits<int64_t>::max())
             return fail("PAYMASTER_LIQUIDITY_POLICY_TIME_EXHAUSTED");

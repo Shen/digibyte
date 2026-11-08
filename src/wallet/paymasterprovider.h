@@ -252,6 +252,14 @@ struct PaymasterMaintenanceCancellation {
     uint256 plan_id;
     int64_t released_fee_budget{0};
 };
+/** Build the same conservative cancellation transition for setup, selected
+ * maintenance and retirement. Caller retains cs_wallet and atomically writes
+ * the returned ledger with its role-specific policy changes. No I/O mutation. */
+bool PreparePaymasterMaintenanceCancellation(
+    CWallet& wallet, const DigiDollar::Paymaster::ProviderMaintenanceLedger& current,
+    const std::vector<uint256>& operation_ids, int64_t now,
+    DigiDollar::Paymaster::ProviderMaintenanceLedger& cancelled,
+    int64_t& released_fee_budget, std::string& error);
 /** Cancel only explicitly selected, provably uncreated reserve funding and
  * disable recurring refill atomically. Retains pools, provider settings and
  * unrelated/signed work. Caller must hold the provider work guard. */
