@@ -22,6 +22,7 @@
 #include <script/signingprovider.h>
 #include <script/standard.h>
 #include <streams.h>
+#include <util/time.h>
 #include <version.h>
 #include <wallet/paymasteridentity.h>
 #include <wallet/scriptpubkeyman.h>
@@ -81,6 +82,18 @@ bool SignCollaborativePSBTForParty(
     DigiDollar::Paymaster::SigningParty party,
     std::string& error)
 {
+    return SignCollaborativePSBTForParty(wallet, psbt, trusted_template, party,
+                                       std::numeric_limits<int64_t>::max(), error);
+}
+
+bool SignCollaborativePSBTForParty(
+    CWallet& wallet,
+    PartiallySignedTransaction& psbt,
+    const DigiDollar::Paymaster::CollaborativePSBTTemplate& trusted_template,
+    DigiDollar::Paymaster::SigningParty party,
+    int64_t valid_until,
+    std::string& error)
+{
     using namespace DigiDollar::Paymaster;
     LOCK(wallet.cs_wallet);
     if (party == SigningParty::PROVIDER &&
@@ -117,6 +130,11 @@ bool SignCollaborativePSBTForParty(
 
     bool complete{false};
     size_t signed_inputs{0};
+    const int64_t signing_time{GetTime()};
+    if (signing_time <= 0 || signing_time > valid_until) {
+        error = "PAYMASTER_SIGNING_AUTHORIZATION_EXPIRED";
+        return false;
+    }
     const TransactionError signing_result = wallet.FillPSBT(
         working, complete, SIGHASH_DEFAULT, /*sign=*/true,
         /*bip32derivs=*/false, &signed_inputs, /*finalize=*/true);

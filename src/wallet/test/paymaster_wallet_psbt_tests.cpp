@@ -21,11 +21,15 @@
 #include <script/signingprovider.h>
 #include <script/standard.h>
 #include <streams.h>
+#include <util/time.h>
 #include <validation.h>
 #include <version.h>
 #include <wallet/paymasterpsbt.h>
 #include <wallet/test/wallet_test_fixture.h>
 #include <wallet/wallet.h>
+
+#include <atomic>
+#include <thread>
 
 namespace wallet {
 using namespace DigiDollar::Paymaster;
@@ -131,6 +135,36 @@ BOOST_AUTO_TEST_CASE(wallet_with_both_keys_signs_only_requested_role)
     }
 
     PartiallySignedTransaction psbt{trusted.psbt};
+    {
+        const auto unchanged = SerializePaymasterTestArtifact(psbt);
+        BOOST_CHECK(!SignCollaborativePSBTForParty(m_wallet, psbt, trusted,
+            SigningParty::USER, GetTime() - 1, error));
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_SIGNING_AUTHORIZATION_EXPIRED");
+        BOOST_CHECK(SerializePaymasterTestArtifact(psbt) == unchanged);
+    }
+    {
+        const auto old_time = GetMockTime();
+        const int64_t deadline = GetTime() + 10;
+        std::atomic<bool> waiting{false};
+        bool signed_after_wait{false};
+        std::string signing_error;
+        std::thread signer;
+        {
+            LOCK(m_wallet.cs_wallet);
+            signer = std::thread{[&] {
+                waiting = true;
+                signed_after_wait = SignCollaborativePSBTForParty(m_wallet, psbt, trusted,
+                    SigningParty::USER, deadline, signing_error);
+            }};
+            while (!waiting.load()) std::this_thread::yield();
+            SetMockTime(deadline + 1);
+        }
+        signer.join();
+        SetMockTime(old_time);
+        BOOST_CHECK(!signed_after_wait);
+        BOOST_CHECK_EQUAL(signing_error, "PAYMASTER_SIGNING_AUTHORIZATION_EXPIRED");
+        BOOST_CHECK(SerializePaymasterTestArtifact(psbt) == SerializePaymasterTestArtifact(trusted.psbt));
+    }
     BOOST_REQUIRE(SignCollaborativePSBTForParty(m_wallet, psbt, trusted, SigningParty::USER, error));
     BOOST_CHECK(PSBTInputSigned(psbt.inputs[0]));
     BOOST_CHECK(!PSBTInputSigned(psbt.inputs[1]));

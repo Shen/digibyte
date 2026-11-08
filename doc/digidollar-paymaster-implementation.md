@@ -121,6 +121,12 @@ remain with the caller so intact historical final evidence stays verifiable.
 Saved provider-signed result envelopes use the single domain decoder
 `DecodeProviderSignedResultEnvelope` for store and execution validation.
 
+Every new payment signature checks a fresh clock after acquiring the final
+wallet lock. Local persisted authority and fee policy are reloaded there;
+client signatures are persisted before releasing that lock. Chainstate/index
+validation stays outside it. The role-limited signer checks the supplied
+deadline again immediately before `FillPSBT`.
+
 
 Normal and alternative-recovery client results use scoped inbox leases. Local
 read, preflight or database failures retain the received artifact; acknowledgement

@@ -66,7 +66,7 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
 {
     using namespace DigiDollar::Paymaster;
     std::string error;
-    const int64_t now{GetTime()};
+    int64_t now{GetTime()};
     if (!CheckPaymasterClientReadiness(wallet, context, error) ||
         !CheckPaymasterPrivacyReadiness(
             original_attempt.privacy_profile, context, error)) {
@@ -669,9 +669,26 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
             // Serialize policy edits with the actual signature, without holding
             // the wallet lock while querying chainstate below.
             LOCK(wallet.cs_wallet);
-            if (!CheckPaymasterRecoveryServiceFee(wallet, recovery.recovery_response.manifest, error) ||
+            now = GetTime();
+            AlternativeRecoveryRecord current;
+            if (!store.GetAlternativeRecovery(session.request_id, current) ||
+                paymaster_store::internal::CanonicalBytes(current) != paymaster_store::internal::CanonicalBytes(recovery) ||
+                current.recovery_authorization_accepted_at <= 0 ||
+                now < current.updated_at ||
+                !ValidateRecoveryAuthorizationManifest(current.recovery_authorization,
+                    current.recovery_request, current.recovery_response, now, error) ||
+                !CheckPaymasterRecoveryServiceFee(wallet, recovery.recovery_response.manifest, error) ||
                 !SignCollaborativePSBTForParty(wallet, unsigned_psbt, trusted.trusted_template,
-                                               SigningParty::USER, error)) {
+                    SigningParty::USER, std::min(recovery.recovery_response.expires_at,
+                        recovery.capacity_snapshot.expires_at) - 1, error)) {
+                throw ApplicationError(ErrorKind::WALLET,
+                    error.empty() ? "PAYMASTER_RECOVERY_AUTHORIZATION_STATE" : error);
+            }
+            recovery.user_signed_psbt = SerializePSBT(unsigned_psbt);
+            recovery.phase = AlternativeRecoveryPhase::USER_SIGNED;
+            recovery.updated_at = now;
+            if (!store.UpdateAlternativeRecovery(recovery, error) ||
+                !store.GetAlternativeRecovery(session.request_id, recovery)) {
                 throw ApplicationError(ErrorKind::WALLET, error);
             }
         }
@@ -679,13 +696,6 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
                 unsigned_psbt, trusted, parameters, Params(),
                 *node->chainman, now,
                 CollaborativeSignatureStage::USER_SIGNED, error)) {
-            throw ApplicationError(ErrorKind::WALLET, error);
-        }
-        recovery.user_signed_psbt = SerializePSBT(unsigned_psbt);
-        recovery.phase = AlternativeRecoveryPhase::USER_SIGNED;
-        recovery.updated_at = std::max(recovery.updated_at, now);
-        if (!store.UpdateAlternativeRecovery(recovery, error) ||
-            !store.GetAlternativeRecovery(session.request_id, recovery)) {
             throw ApplicationError(ErrorKind::WALLET, error);
         }
     }

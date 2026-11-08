@@ -272,7 +272,7 @@ PaymentResult SubmitPaymasterTransactionWithGuard(CWallet& target, PartiallySign
     if (!store.GetSessionBySessionId(attempt.session_id, session)) {
         throw ApplicationError(ErrorKind::WALLET, "Paymaster session not found");
     }
-    const int64_t now = GetTime();
+    int64_t now = GetTime();
     DigiDollar::Paymaster::ProviderCommitRecord committed;
     const bool already_committed = !attempt.commit_key.IsNull() &&
                                    store.GetProviderCommit(attempt.commit_key, committed);
@@ -376,6 +376,8 @@ PaymentResult SubmitPaymasterTransactionWithGuard(CWallet& target, PartiallySign
     }
 
     if (!already_committed && attempt.state == DigiDollar::Paymaster::AttemptState::USER_SIGNED) {
+        LOCK(wallet->cs_wallet);
+        now = GetTime();
         if (!store.AcceptUserAuthorization(session.request_id, attempt.attempt_id,
                                            Hash(canonical_user_psbt), now, error) ||
             !store.GetAttempt(attempt.attempt_id, attempt)) {
@@ -428,15 +430,21 @@ PaymentResult SubmitPaymasterTransactionWithGuard(CWallet& target, PartiallySign
         }
         {
             LOCK(wallet->cs_wallet);
+            now = GetTime();
             auto provider_inputs = attempt.provider_manifest.provider_carrier_inputs;
             provider_inputs.insert(provider_inputs.end(),
                 attempt.provider_manifest.provider_dgb_inputs.begin(),
                 attempt.provider_manifest.provider_dgb_inputs.end());
             // An older wallet may already have reused a source in this quote.
             // The retained maintenance journal must veto a new signature too.
-            if (!CheckPaymasterMaintenanceInputsAvailable(*wallet, provider_inputs, error) ||
+            if (!store.ValidateProviderPreSignatureAuthorization(
+                    attempt, Params().GenesisBlock().GetHash(), now,
+                    capacity_request, capacity_proof, error) ||
+                !ValidateProviderAuthorizationForExecution(attempt, now, signing_template, error) ||
+                !CheckPaymasterMaintenanceInputsAvailable(*wallet, provider_inputs, error) ||
                 !SignCollaborativePSBTForParty(*wallet, full_psbt,
-                    signing_template, DigiDollar::Paymaster::SigningParty::PROVIDER, error)) {
+                    signing_template, DigiDollar::Paymaster::SigningParty::PROVIDER,
+                    attempt.retry_until, error)) {
                 throw ApplicationError(ErrorKind::WALLET, error);
             }
         }
@@ -689,7 +697,7 @@ CommittedProviderRecovery SignAndCommitProviderRecoverySubmit(
 {
     CWallet* const wallet = processing.wallet;
     const int64_t now = processing.now;
-    const int64_t authorization_time{now};
+    int64_t authorization_time{now};
     const ExactFinalTxIndexMode service_txindex_mode = processing.service_txindex_mode;
     node::NodeContext* const node_ctx = &node;
     std::string error;
@@ -727,12 +735,15 @@ CommittedProviderRecovery SignAndCommitProviderRecoverySubmit(
         recovery.recovery_response.manifest;
     {
         LOCK(wallet->cs_wallet);
+        authorization_time = GetTime();
         auto provider_inputs = manifest.recovery_provider_carrier_inputs;
         provider_inputs.insert(provider_inputs.end(),
             manifest.recovery_provider_dgb_inputs.begin(), manifest.recovery_provider_dgb_inputs.end());
-        if (!CheckPaymasterMaintenanceInputsAvailable(*wallet, provider_inputs, error) ||
+        if (!store.ValidateProviderAlternativeRecoveryPreSignatureAuthorization(
+                recovery, Params().GenesisBlock().GetHash(), authorization_time, error) ||
+            !CheckPaymasterMaintenanceInputsAvailable(*wallet, provider_inputs, error) ||
             !SignCollaborativePSBTForParty(*wallet, user_psbt, trusted.trusted_template,
-                SigningParty::PROVIDER, error)) {
+                SigningParty::PROVIDER, recovery.recovery_response.expires_at - 1, error)) {
             throw ApplicationError(ErrorKind::WALLET, error);
         }
     }
@@ -775,19 +786,19 @@ CommittedProviderRecovery SignAndCommitProviderRecoverySubmit(
         commit.provider_inputs.end(),
         manifest.recovery_provider_dgb_inputs.begin(),
         manifest.recovery_provider_dgb_inputs.end());
-    commit.committed_at = now;
+    commit.committed_at = authorization_time;
     commit.retry_until =
         recovery.recovery_response.expires_at;
     PaymasterResult final_result;
     if (!BuildFinalProviderResult(
-            *wallet, commit, now, final_result, error)) {
+            *wallet, commit, authorization_time, final_result, error)) {
         throw ApplicationError(ErrorKind::WALLET, error);
     }
     recovery.phase = AlternativeRecoveryPhase::FINAL_COMMITTED;
     recovery.final_transaction = commit.final_transaction;
     recovery.expected_wtxid = final_tx.GetWitnessHash();
     recovery.signed_result = final_result;
-    recovery.updated_at = std::max(recovery.updated_at, now);
+    recovery.updated_at = std::max(recovery.updated_at, authorization_time);
     if (!store.CommitProviderAlternativeRecoveryFinal(
             recovery, commit, final_result,
             Params().GenesisBlock().GetHash(), error)) {
@@ -803,7 +814,7 @@ ProviderProcessingResult BroadcastCommittedProviderRecoverySubmit(
     node::NodeContext& node, CommittedProviderRecovery committed)
 {
     CWallet* const wallet = processing.wallet;
-    const int64_t authorization_time{processing.now};
+    const int64_t authorization_time{committed.commit.committed_at};
     const ExactFinalTxIndexMode service_txindex_mode = processing.service_txindex_mode;
     node::NodeContext* const node_ctx = &node;
     AlternativeRecoveryRecord& recovery = committed.recovery;
@@ -2934,7 +2945,7 @@ PaymentResult AuthorizePaymasterPSBT(WalletContext& context, CWallet& target, Pa
                 error.empty() ? "PAYMASTER_CLIENT_AUTHORIZATION_ACCEPTANCE_FAILED" : error);
         }
     }
-    const int64_t operation_now = std::max(
+    int64_t operation_now = std::max(
         now, std::max(session.updated_at, attempt.updated_at));
     if (attempt.state != DigiDollar::Paymaster::AttemptState::QUOTED) {
         if (attempt.state >= DigiDollar::Paymaster::AttemptState::USER_SIGNED &&
@@ -3075,24 +3086,47 @@ PaymentResult AuthorizePaymasterPSBT(WalletContext& context, CWallet& target, Pa
         attempt = std::move(signing_attempt);
         {
             LOCK(wallet->cs_wallet);
-            if (!CheckPaymasterClientServiceFee(*wallet, attempt.client_manifest.recipient_amount,
+            operation_now = GetTime();
+            ProviderAttempt current_attempt;
+            PaymentSession current_session;
+            WalletBatch signing_batch{wallet->GetDatabase()};
+            for (const auto& input : attempt.client_manifest.user_dd_inputs) {
+                InputReservation reservation;
+                if (signing_batch.ReadPaymasterReservationWithStatus(input, reservation) != DatabaseReadStatus::FOUND ||
+                    reservation.session_id != session.session_id || reservation.request_id != session.request_id ||
+                    reservation.role != ReservationRole::USER_DD || reservation.authorization_may_exist) {
+                    throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_RESERVATION_NOT_CANCELABLE");
+                }
+            }
+            if (!store.GetAttempt(attempt.attempt_id, current_attempt) ||
+                paymaster_store::internal::CanonicalBytes(current_attempt) != paymaster_store::internal::CanonicalBytes(attempt) ||
+                !store.GetSessionByRequestId(session.request_id, current_session) ||
+                !store.ValidateUnsignedClientSession(current_session, error) ||
+                current_session.user_inputs != attempt.client_manifest.user_dd_inputs ||
+                (current_session.state != SessionState::AWAITING_USER_SIGNATURE &&
+                 current_session.state != SessionState::AUTHORIZED) ||
+                operation_now < attempt.updated_at ||
+                !CheckPaymasterClientServiceFee(*wallet, attempt.client_manifest.recipient_amount,
                     attempt.client_manifest.service_fee, error) ||
                 !SignCollaborativePSBTForParty(*wallet, candidate, signing_template,
-                                               DigiDollar::Paymaster::SigningParty::USER, error)) {
+                    DigiDollar::Paymaster::SigningParty::USER,
+                    std::min({attempt.quote_expires_at, attempt.client_manifest.expires_at,
+                              signing_capacity_proof.expires_at - 1}), error)) {
+                throw ApplicationError(ErrorKind::WALLET,
+                    error.empty() ? "PAYMASTER_CLIENT_AUTHORIZATION_STATE" : error);
+            }
+            const std::vector<unsigned char> signed_psbt = SerializePSBT(candidate);
+            if (!store.TransitionSession(session.request_id,
+                    DigiDollar::Paymaster::SessionState::AUTHORIZED,
+                    DigiDollar::Paymaster::PendingPhase::NONE, {}, operation_now, error)) {
                 throw ApplicationError(ErrorKind::WALLET, error);
             }
-        }
-        const std::vector<unsigned char> signed_psbt = SerializePSBT(candidate);
-        if (!store.TransitionSession(session.request_id,
-                                     DigiDollar::Paymaster::SessionState::AUTHORIZED,
-                                     DigiDollar::Paymaster::PendingPhase::NONE, {}, operation_now, error)) {
-            throw ApplicationError(ErrorKind::WALLET, error);
-        }
-        attempt.state = DigiDollar::Paymaster::AttemptState::USER_SIGNED;
-        attempt.user_signed_psbt = signed_psbt;
-        attempt.updated_at = std::max(attempt.updated_at, operation_now);
-        if (!store.UpdateAttempt(session.request_id, attempt, error)) {
-            throw ApplicationError(ErrorKind::WALLET, error);
+            attempt.state = DigiDollar::Paymaster::AttemptState::USER_SIGNED;
+            attempt.user_signed_psbt = signed_psbt;
+            attempt.updated_at = std::max(attempt.updated_at, operation_now);
+            if (!store.UpdateAttempt(session.request_id, attempt, error)) {
+                throw ApplicationError(ErrorKind::WALLET, error);
+            }
         }
     }
 

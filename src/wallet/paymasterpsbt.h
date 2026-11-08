@@ -31,6 +31,16 @@ bool SignCollaborativePSBTForParty(
     DigiDollar::Paymaster::SigningParty party,
     std::string& error);
 
+/** Check the authorization deadline under the wallet lock immediately before
+ * invoking the wallet signer. valid_until is inclusive. */
+bool SignCollaborativePSBTForParty(
+    CWallet& wallet,
+    PartiallySignedTransaction& psbt,
+    const DigiDollar::Paymaster::CollaborativePSBTTemplate& trusted_template,
+    DigiDollar::Paymaster::SigningParty party,
+    int64_t valid_until,
+    std::string& error);
+
 /** Resolve each USER_DD prevout to its wallet-owned BIP86 key and attach a
  * domain-separated control proof. No partial proof set is returned on error. */
 bool SignPaymentIntentInputs(

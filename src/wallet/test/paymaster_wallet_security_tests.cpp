@@ -3534,6 +3534,11 @@ BOOST_AUTO_TEST_CASE(
             recovery, genesis_hash, now + 2, error),
         error);
     BOOST_CHECK(mock.m_records == before_validation);
+    for (const int64_t expired_at : {response.expires_at, recovery.capacity_request.expires_at}) {
+        BOOST_CHECK(!store.ValidateProviderAlternativeRecoveryPreSignatureAuthorization(
+            recovery, genesis_hash, expired_at, error));
+        BOOST_CHECK(mock.m_records == before_validation);
+    }
 
     auto pool_database = DuplicateSecurityFixtureDatabase(m_wallet.GetDatabase());
     wallet::CWallet pool_wallet{m_node.chain.get(),
