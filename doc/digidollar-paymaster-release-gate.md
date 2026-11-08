@@ -4,6 +4,41 @@ There is **no complete current-revision release certification** in this record.
 The candidate below and historical checkpoints identify actual verification;
 implemented behavior alone does not establish release acceptance.
 
+## Unsigned authority, signing deadlines and executable service
+
+Corrections A–G based on `d698e6328bbde2f8b30ac9f6a941832c1d6dfdce`,
+checked in the dirty worktree on 2026-11-08. Current contracts are in the
+[implementation](digidollar-paymaster-implementation.md); focused commands are
+in the [test runbook](digidollar-paymaster-testing.md). No consensus, wire or
+persisted record format changed. The explicit A–G request includes E's narrow
+shared TCP logging integration, recorded in the change record and boundary policy.
+
+Twenty-eight C++ units (20 production, eight test) were freshly compiled using
+MSVC 19.43.34810 / toolset 14.43.34808, `/W3 /WX /Od /MT /std:c++20`; Qt is
+5.15.10. Isolated native/Qt links reuse remaining objects/libraries and existing
+MOC. These are targeted builds, not clean products or complete transitive-header
+provenance. Commands, source/object/header/binary hashes and final logs are under
+`.ai/correct-ag-20261108/` (`runs.jsonl`, `compiled.jsonl`, `verification.json`,
+response files and native/Qt test logs).
+
+| Executed check | Bounded result |
+|---|---|
+| Native | 130 selected cases / 164,799 assertions pass on the final native link. Includes independent valid/corrupt/future authority and idempotent release denial with unchanged DB/locks, accepted unsigned cancellation and authenticated negative results, deadline expiry while waiting for the signing lock with unchanged PSBT, per-model readiness/announcement/budget intersection, fee-cap boundaries, timely durable normal-payment retries after capacity TTL, strict recovery expiry, saved-signature decoding and ordinary DD reservation/network/transport controls. |
+| Qt | Four selected functions, 11 feature/data rows pass, zero failed/skipped: offer-response bounds 100/101/1024/1025 with excluded entries before the eligible offer, eight fee-warning configurations, signed recovery after quote expiry and wallet snapshot binding. Eight init/cleanup rows are excluded from the feature count. Windows platform/Fusion. |
+| C++17 | All 20 modified production units pass current-source `/Zs /std:c++17` with the same warning policy. No linked C++17 product is claimed. |
+| Commit snapshots | 38 targeted `/Zs` checks pass against the prepared intermediate source/header snapshots: 26 production checks in C++17 and 12 test checks in C++20, retaining `/W3 /WX`. The index is compared with these snapshots during staging. Artifacts are under `.ai/commit-ag-20261108/`; no complete intermediate product build is claimed. |
+| Local controls | Working-tree dependency/cycle checks, six boundary fixtures, changed paths/shared-Core records under the current explicitly extended policy, JSON and whitespace checks pass. This does not certify the historical task/official-baseline changed-path comparison. |
+
+Initial compilation/link, fixture and unsupported offscreen-platform attempts
+are separate from the final successful checks. The restart fixture now imports
+the same keys/scripts through extended-key descriptors: this Core's literal
+`tr(WIF)` public serialization/constant-key lookup loses odd-Y private-key
+availability after reload. The new fixture regression explicitly verifies both
+parities, locked-state denial and encrypted reload; the general descriptor
+reader is outside these corrections. No full product rebuild, daemon
+functional run, fuzz campaign, sanitizer or complete suite was executed. Those
+operator/CI checks remain required in the test runbook.
+
 ## Checkpoint fences, stop exclusion and exact restart
 
 Review follow-up based on `002375aa29993dd387294ce3e7e05e39f2a9f1cc`,

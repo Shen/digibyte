@@ -44,6 +44,26 @@ in both language modes. The MSVC project defaults to C++20; Autotools defaults t
 C++17, where supported compilers also accept existing Core extensions. Passing
 these targeted controls does not establish repository-wide strict C++17 support.
 
+Authorization and serving regressions (after rebuilding the selected tests):
+
+```powershell
+& ./build_msvc/x64/Release/test_digibyte.exe '--run_test=paymaster_provider_tests:paymaster_setup_tests:paymaster_wallet_psbt_tests:paymaster_wallet_store_tests/client_attempt_artifacts_and_authorization_are_append_only_and_atomic,unsigned_client_cleanup*,unsigned_client_cancel_failures_and_lost_reply_preserve_input_ownership:paymaster_wallet_security_tests/provider_pre_signature_firewall_reloads_capacity_pool_and_budget,provider_user_authorization_honors_exact_reserved_safety_binding,deferred_capacity_preserves_request_and_yields_next_turn,quote_prevout_lookup_failure_preserves_local_authority,provider_recovery_pre_signature_firewall_reloads_pool_and_budget:netbase_tests' --report_level=detailed
+```
+
+These cover independent valid/corrupt/future authority before unsigned release,
+accepted unsigned cancellation, authentic negative results, lock-wait deadline
+expiry without changed PSBT bytes, model-specific resources and budgets,
+executable fee caps, timely receipt retries and current recovery deadlines.
+For encrypted restart, include wallet security cases
+`test_signing_keys_survive_encrypted_reload_with_both_parities` and
+`provider_final_commit_spends_budget_atomically`; both compressed-key parities
+must survive reload while locked wallets still deny key access.
+Run Qt `paymasterClientOfferCards:light720` for 100/101/1024/1025 offer-response
+bounds with eligible entries after excluded entries, and
+`paymasterConfigurationConflicts` for the shared executable-fee warnings.
+Use the Qt suite/function environment filters described below. New-signature
+denial does not replace exact saved-transaction replay tests after expiry.
+
 ## Build entry points
 
 Linux/WSL: follow [Unix build instructions](build-unix.md) and the repository's
