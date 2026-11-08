@@ -213,9 +213,15 @@ bool AddTaprootSigningKey(wallet::CWallet& wallet,
                           const CKey& key,
                           std::string& error)
 {
+    // Preserve the full compressed root key when the public descriptor is
+    // serialized/reloaded. A literal tr(WIF) serializes to an x-only constant;
+    // its odd-Y private key is not recovered by this Core's constant-key reader.
+    // An extended-key descriptor keeps the same key and exact BIP86 script.
+    CExtKey extended{};
+    extended.key = key;
     FlatSigningProvider provider;
     std::unique_ptr<Descriptor> descriptor = Parse(
-        "tr(" + EncodeSecret(key) + ")", provider, error,
+        "tr(" + EncodeExtKey(extended) + ")", provider, error,
         /*require_checksum=*/false);
     if (!descriptor) return false;
     WalletDescriptor wallet_descriptor{
@@ -1139,6 +1145,45 @@ AlternativeRecoveryRecord MakeRecoveryReadReplay(const ProviderSecurityEnvironme
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(paymaster_wallet_security_tests, WalletTestingSetup)
+
+BOOST_AUTO_TEST_CASE(test_signing_keys_survive_encrypted_reload_with_both_parities)
+{
+    for (const unsigned char parity : {0x02, 0x03}) {
+        BOOST_TEST_CONTEXT("compressed public-key prefix " << int{parity}) {
+            CKey key;
+            do { key.MakeNewKey(true); } while (key.GetPubKey()[0] != parity);
+            TaprootBuilder builder;
+            builder.Finalize(XOnlyPubKey{key.GetPubKey()});
+            const CScript script = GetScriptForDestination(builder.GetOutput());
+            wallet::CWallet original{m_node.chain.get(), "encrypted-fixture-key", CreateMockableWalletDatabase()};
+            BOOST_REQUIRE(original.LoadWallet() == DBErrors::LOAD_OK);
+            std::string error;
+            BOOST_REQUIRE_MESSAGE(AddTaprootSigningKey(original, key, error), error);
+            const auto has_key = [&](wallet::CWallet& wallet) {
+                LOCK(wallet.cs_wallet);
+                for (auto* manager : wallet.GetScriptPubKeyMans(script)) {
+                    auto* descriptor = dynamic_cast<DescriptorScriptPubKeyMan*>(manager);
+                    if (!descriptor) continue;
+                    auto provider = descriptor->GetSigningProviderWithKeys(script);
+                    CKey restored;
+                    if (provider && provider->GetKeyByXOnly(XOnlyPubKey{key.GetPubKey()}, restored) && restored == key) return true;
+                }
+                return false;
+            };
+            BOOST_REQUIRE(has_key(original));
+            SecureString passphrase{"fixture-parity-reload"};
+            BOOST_REQUIRE(original.EncryptWallet(passphrase));
+            BOOST_CHECK(!has_key(original));
+            wallet::CWallet restored{m_node.chain.get(), "reloaded-fixture-key",
+                                     DuplicateMockDatabase(original.GetDatabase())};
+            BOOST_REQUIRE(restored.LoadWallet() == DBErrors::LOAD_OK);
+            BOOST_CHECK(restored.IsLocked());
+            BOOST_CHECK(!has_key(restored));
+            BOOST_REQUIRE(restored.Unlock(passphrase));
+            BOOST_CHECK(has_key(restored));
+        }
+    }
+}
 
 BOOST_AUTO_TEST_CASE(checkpoint_transaction_atomicity_and_unmarked_rollback)
 {
@@ -5017,6 +5062,12 @@ BOOST_FIXTURE_TEST_CASE(provider_final_commit_spends_budget_atomically,
     // Finish the existing broadcast-status result while keys are available;
     // the three calls below may only reuse that exact durable envelope.
     BOOST_REQUIRE(facade_wallet.Unlock(restart_passphrase));
+    {
+        CKey restored_key;
+        ProviderIdentityRecord restored_identity;
+        BOOST_REQUIRE_MESSAGE(GetPaymasterIdentityKey(facade_wallet, restored_key, restored_identity, error), error);
+        BOOST_CHECK(restored_identity.identity_key == environment.identity.identity_key);
+    }
     const auto normalized_replay = paymaster_app::RecoverProviderCommit(
         facade_wallet, facade_store, commit, std::max(GetTime(), commit.committed_at));
     BOOST_REQUIRE_MESSAGE(normalized_replay.error.empty(), normalized_replay.error);
