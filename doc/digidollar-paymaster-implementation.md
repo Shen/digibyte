@@ -317,6 +317,28 @@ checkpoint operation. The pending marker begins immediately before wallet
 commit/accounting. A rejected stale plan leaves no pending operation; failures
 after a possible commit retain the conservative fence.
 
+Before native commit, the wallet atomically saves `pmnativeexec` version 1 with
+the exact signed legs, fee/history metadata and complete before/after pool and
+maintenance accounting. Its immutable hash is the external pending-checkpoint
+token. Startup and maintenance reconciliation call
+`ResumeProviderMaintenanceTransactions`: validate the journal, identity, absence
+of a restore guard, exact accounting snapshot and independent checkpoint, then
+commit/rebroadcast only those bytes without signing. Pool and budget changes are
+atomic; history and finance use their existing idempotent APIs. A wallet entry
+left in memory by a failed transaction write is persisted again before completion.
+The journal also protects every signed input from ordinary wallet selection.
+
+Only the immediately adjacent interrupted checkpoint commit can be repaired,
+with the same journal hash and an exact accounting snapshot. Completion erases
+the journal and clears the pending marker in one wallet transaction. Stale clones,
+missing/future/corrupt journals, divergent accounting and legacy pending markers
+without exact signed work remain fenced. The checkpoint file layout stays at
+version 2. Known abandoned, conflicted or unrecognized wallet transactions also
+retain the journal and fence; recovery does not change those states to inactive.
+Its OS lock, flush and high-water ordering are unchanged.
+Keep a compatible build while native work is pending: earlier builds do not
+implement this journal's recovery or ordinary fee-input protection.
+
 Policy and pool setters initialize records only after a status-bearing read
 proves `NOT_FOUND`. Read errors and unsupported versions preserve budgets, pool
 reservations and checkpoint state. Finite setup cancellation, selected maintenance

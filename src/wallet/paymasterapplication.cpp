@@ -1107,11 +1107,12 @@ bool ReconcileProviderMaintenance(CWallet& wallet,
                                   size_t& recovered,
                                   std::string& error)
 {
-    LOG_TIME_MILLIS_WITH_CATEGORY("Paymaster reconciliation", BCLog::BENCH);
-    using namespace DigiDollar::Paymaster;
     recovered = 0;
     error.clear();
     LOCK(wallet.cs_wallet);
+    if (!ResumeProviderMaintenanceTransactions(wallet, error)) return false;
+    LOG_TIME_MILLIS_WITH_CATEGORY("Paymaster reconciliation", BCLog::BENCH);
+    using namespace DigiDollar::Paymaster;
     WalletBatch batch{wallet.GetDatabase()};
     ProviderMaintenanceLedger ledger;
     const DatabaseReadStatus ledger_status{
@@ -1799,14 +1800,11 @@ bool ValidateMaintenanceTransferBinding(const CWallet& wallet, const ProviderMai
     return true;
 }
 
-bool AccountMaintenanceTransaction(CWallet& wallet, const ProviderMaintenanceAuthority& authority,
-                                  const ProviderMaintenanceRecord& operation,
-                                  const ProviderMaintenanceTransaction& result, std::string& error)
+bool PrepareMaintenanceAccounting(CWallet& wallet, const ProviderMaintenanceAuthority& authority,
+    const ProviderMaintenanceRecord& operation, const ProviderMaintenanceTransaction& result,
+    std::vector<ProviderPoolEntry>& pool, ProviderMaintenanceLedger& ledger, std::string& error)
 {
     AssertLockHeld(wallet.cs_wallet);
-    WalletBatch batch{wallet.GetDatabase()};
-    std::vector<ProviderPoolEntry> pool;
-    if (!ReadOptionalProviderPool(batch, pool, error)) return false;
     const int64_t now = GetTime();
     if (const auto* retirement = std::get_if<PoolRetirementMaintenanceAuthority>(&authority)) {
         for (const auto& input : result.transaction->vin) {
@@ -1820,11 +1818,8 @@ bool AccountMaintenanceTransaction(CWallet& wallet, const ProviderMaintenanceAut
             current->state = PoolEntryState::SPENT;
             current->updated_at = std::max(current->updated_at, now);
         }
-        if (!batch.WritePaymasterProviderPool(pool)) { error = "PAYMASTER_DATABASE_WRITE"; return false; }
         return true;
     }
-    ProviderMaintenanceLedger ledger;
-    if (!batch.ReadPaymasterMaintenanceLedger(ledger)) { error = "PAYMASTER_INVALID_MAINTENANCE_LEDGER"; return false; }
     const auto saved = std::find_if(ledger.records.begin(), ledger.records.end(), [&](const auto& record) { return record.operation_id == operation.operation_id; });
     if (saved == ledger.records.end() || saved->state != ProviderMaintenanceState::PLANNED ||
         !saved->transaction_id.IsNull() || !SameMaintenanceOperation(*saved, operation)) {
@@ -1869,14 +1864,115 @@ bool AccountMaintenanceTransaction(CWallet& wallet, const ProviderMaintenanceAut
         entry.updated_at = now;
         pool.push_back(std::move(entry));
     }
-    if (!batch.TxnBegin()) { error = "PAYMASTER_DATABASE_BEGIN"; return false; }
-    if (!batch.WritePaymasterMaintenanceLedger(ledger) || !batch.WritePaymasterProviderPool(pool)) {
-        batch.TxnAbort();
-        error = "PAYMASTER_DATABASE_WRITE";
+    return true;
+}
+bool CheckMaintenanceExecutionState(CWallet& wallet,
+    const PaymasterMaintenanceExecution& execution, std::string& error, bool* accounted = nullptr)
+{
+    AssertLockHeld(wallet.cs_wallet);
+    WalletBatch batch{wallet.GetDatabase()};
+    ProviderIdentityRecord identity;
+    std::vector<ProviderPoolEntry> pool;
+    ProviderMaintenanceLedger ledger;
+    const auto status = batch.ReadPaymasterProviderPoolWithStatus(pool);
+    if (!ValidatePaymasterMaintenanceExecution(execution) ||
+        batch.ReadPaymasterIdentityWithStatus(identity) != DatabaseReadStatus::FOUND || identity.provider_id != execution.provider_id ||
+        (status != DatabaseReadStatus::FOUND && status != DatabaseReadStatus::NOT_FOUND) ||
+        (execution.has_ledger && batch.ReadPaymasterMaintenanceLedgerWithStatus(ledger) != DatabaseReadStatus::FOUND)) {
+        error = "PAYMASTER_MAINTENANCE_RECOVERY_REVIEW_REQUIRED";
         return false;
     }
-    if (!batch.TxnCommit()) { error = "PAYMASTER_DATABASE_COMMIT"; return false; }
+    for (const auto& leg : execution.legs) {
+        CMutableTransaction transaction;
+        SpanReader stream{::PROTOCOL_VERSION, leg.transaction};
+        stream >> transaction;
+        const auto known = wallet.mapWallet.find(transaction.GetHash());
+        if (known != wallet.mapWallet.end() && (!known->second.tx || known->second.isAbandoned() ||
+            known->second.isConflicted() || known->second.state<TxStateUnrecognized>() ||
+            paymaster_store::internal::CanonicalBytes(*known->second.tx) != leg.transaction)) {
+            error = "PAYMASTER_MAINTENANCE_RECOVERY_TRANSACTION_CONFLICT";
+            return false;
+        }
+    }
+    const bool before = (status == DatabaseReadStatus::FOUND) == execution.had_pool &&
+        (HashWriter{} << pool).GetHash() == (HashWriter{} << execution.before_pool).GetHash() &&
+        (!execution.has_ledger || (HashWriter{} << ledger).GetHash() == (HashWriter{} << execution.before_ledger).GetHash());
+    const bool after = status == DatabaseReadStatus::FOUND &&
+        (HashWriter{} << pool).GetHash() == (HashWriter{} << execution.after_pool).GetHash() &&
+        (!execution.has_ledger || (HashWriter{} << ledger).GetHash() == (HashWriter{} << execution.after_ledger).GetHash());
+    if (!before && !after) { error = "PAYMASTER_MAINTENANCE_RECOVERY_ACCOUNTING_CONFLICT"; return false; }
+    if (accounted) *accounted = after;
     return true;
+}
+
+bool CommitMaintenanceExecution(CWallet& wallet, const PaymasterMaintenanceExecution& execution,
+    PaymasterCheckpointOperation& checkpoint, std::string& error)
+{
+    AssertLockHeld(wallet.cs_wallet);
+    if (!CheckMaintenanceExecutionState(wallet, execution, error)) return false;
+    std::vector<CTransactionRef> transactions;
+    // Validate every leg before the first commit. Recovery never constructs or
+    // signs a replacement for these checkpoint-bound bytes.
+    for (const auto& leg : execution.legs) {
+        CMutableTransaction transaction;
+        SpanReader stream{::PROTOCOL_VERSION, leg.transaction};
+        stream >> transaction; // Validated by the immutable journal decoder.
+        const auto tx = MakeTransactionRef(std::move(transaction));
+        const auto fee = GetProviderFinanceTransactionFee(wallet, tx);
+        if (!fee || *fee != leg.fee) { error = "PAYMASTER_MAINTENANCE_RECOVERY_FEE_CHANGED"; return false; }
+        transactions.push_back(tx);
+    }
+    for (size_t index{0}; index < execution.legs.size(); ++index) {
+        const auto& leg = execution.legs[index];
+        const auto& tx = transactions[index];
+        const auto existing = wallet.mapWallet.find(tx->GetHash());
+        if (existing == wallet.mapWallet.end()) {
+            if (!wallet.CommitTransaction(tx, leg.metadata, {}, &error)) return false;
+        } else {
+            // AddToWallet can leave its in-memory entry behind when WriteTx
+            // fails. Re-persist it before accounting or removing the journal.
+            auto& saved = existing->second;
+            for (const auto& [key, value] : leg.metadata) {
+                const auto found = saved.mapValue.find(key);
+                if (found != saved.mapValue.end() && found->second != value) {
+                    error = "PAYMASTER_MAINTENANCE_RECOVERY_METADATA_CONFLICT";
+                    return false;
+                }
+                saved.mapValue[key] = value;
+            }
+            if (!WalletBatch{wallet.GetDatabase()}.WriteTx(saved)) {
+                error = "PAYMASTER_MAINTENANCE_RECOVERY_TRANSACTION_WRITE";
+                return false;
+            }
+            if (wallet.GetBroadcastTransactions() && wallet.GetTxDepthInMainChain(saved) == 0 &&
+                !wallet.SubmitTxMemoryPoolAndRelay(saved, error, true)) return false;
+        }
+        if (leg.digidollar) {
+            auto* dd_wallet = wallet.GetDDWallet();
+            const auto comment = leg.metadata.find("comment");
+            if (!dd_wallet || !dd_wallet->ProcessIncomingDDTransaction(tx)) { error = "PAYMASTER_MAINTENANCE_DD_STATE_UPDATE_FAILED"; return false; }
+            if (!dd_wallet->RecordPaymasterSendHistory(tx->GetHash(), leg.history_recipient, leg.history_amount.value,
+                    error, comment == leg.metadata.end() ? std::string{} : comment->second, leg.multiple_recipients)) return false;
+        }
+    }
+    // Pool and budget transitions are one commit, including both retirement
+    // legs. Repeating an already committed transition preserves exact records.
+    bool accounted{false};
+    // Native wallet callbacks can be reentrant under cs_wallet. Never overwrite
+    // an unexpected pool/budget transition observed during a commit callback.
+    if (!CheckMaintenanceExecutionState(wallet, execution, error, &accounted)) return false;
+    WalletBatch batch{wallet.GetDatabase()};
+    if (!accounted) {
+        if (!batch.TxnBegin() || !batch.WritePaymasterProviderPool(execution.after_pool) ||
+            (execution.has_ledger && !batch.WritePaymasterMaintenanceLedger(execution.after_ledger)) || !batch.TxnCommit()) {
+            batch.TxnAbort();
+            error = "PAYMASTER_MAINTENANCE_RECOVERY_ACCOUNTING_WRITE";
+            return false;
+        }
+    }
+    size_t changes{0};
+    if (!ReconcileProviderFinances(wallet, changes, error)) return false;
+    return checkpoint.Complete(error);
 }
 } // namespace
 
@@ -1958,29 +2054,65 @@ bool ExecuteProviderMaintenanceTransactions(
         }
         built.push_back(std::move(result));
     }
-    PaymasterCheckpointOperation checkpoint{wallet};
-    if (!checkpoint.Begin(error)) return false;
+    PaymasterMaintenanceExecution execution;
+    ProviderIdentityRecord identity;
+    WalletBatch records{wallet.GetDatabase()};
+    if (records.ReadPaymasterIdentityWithStatus(identity) != DatabaseReadStatus::FOUND) { error = "PAYMASTER_IDENTITY_NOT_FOUND"; return false; }
+    execution.genesis_hash = Params().GenesisBlock().GetHash();
+    execution.provider_id = identity.provider_id;
+    execution.operation_id = GetRandHash();
+    execution.created_at = GetTime();
+    const auto pool_status = records.ReadPaymasterProviderPoolWithStatus(execution.before_pool);
+    if (pool_status != DatabaseReadStatus::FOUND && pool_status != DatabaseReadStatus::NOT_FOUND) { error = "PAYMASTER_INVALID_PROVIDER_POOL"; return false; }
+    execution.had_pool = pool_status == DatabaseReadStatus::FOUND;
+    execution.after_pool = execution.before_pool;
+    execution.has_ledger = !std::holds_alternative<PoolRetirementMaintenanceAuthority>(authority);
+    if (execution.has_ledger && records.ReadPaymasterMaintenanceLedgerWithStatus(execution.before_ledger) != DatabaseReadStatus::FOUND) { error = "PAYMASTER_INVALID_MAINTENANCE_LEDGER"; return false; }
+    execution.after_ledger = execution.before_ledger;
     for (size_t index{0}; index < built.size(); ++index) {
         const auto& result = built[index];
-        mapValue_t metadata;
-        if (const auto* retirement = std::get_if<PoolRetirementMaintenanceAuthority>(&authority)) metadata[PAYMASTER_RETIREMENT_PROVIDER_KEY] = retirement->provider_id.GetHex();
-        if (const auto* dd = std::get_if<DDMaintenanceTransfer>(&transfers[index])) metadata["comment"] = dd->comment;
-        if (!wallet.CommitTransaction(result.transaction, std::move(metadata), {}, &error)) return false;
+        PaymasterMaintenanceExecutionLeg leg;
+        leg.transaction = paymaster_store::internal::CanonicalBytes(CMutableTransaction{*result.transaction});
+        leg.fee = result.fee;
+        if (const auto* retirement = std::get_if<PoolRetirementMaintenanceAuthority>(&authority)) leg.metadata[PAYMASTER_RETIREMENT_PROVIDER_KEY] = retirement->provider_id.GetHex();
         if (const auto* dd = std::get_if<DDMaintenanceTransfer>(&transfers[index])) {
-            auto* dd_wallet = wallet.GetDDWallet();
-            if (!dd_wallet->ProcessIncomingDDTransaction(result.transaction)) { error = "PAYMASTER_MAINTENANCE_DD_STATE_UPDATE_FAILED"; return false; }
-            if (!dd_wallet->RecordPaymasterSendHistory(result.transaction->GetHash(), dd->history_recipient,
-                    dd->plan.total_amount, error, dd->comment, dd->multiple_recipients)) return false;
+            leg.digidollar = true;
+            leg.metadata["comment"] = dd->comment;
+            leg.history_recipient = dd->history_recipient;
+            leg.history_amount = DDCents{dd->plan.total_amount};
+            leg.multiple_recipients = dd->multiple_recipients;
         }
-        if (!AccountMaintenanceTransaction(wallet, authority, operation, result, error)) return false;
+        execution.legs.push_back(std::move(leg));
+        if (!PrepareMaintenanceAccounting(wallet, authority, operation, result,
+                execution.after_pool, execution.after_ledger, error)) return false;
     }
-    if (std::holds_alternative<PoolRetirementMaintenanceAuthority>(authority)) {
-        size_t changed{0};
-        if (!ReconcileProviderFinances(wallet, changed, error)) return false;
-    }
-    if (!checkpoint.Complete(error)) return false;
+    PaymasterCheckpointOperation checkpoint{wallet};
+    if (!checkpoint.Begin(execution, error)) return false;
+    if (!CommitMaintenanceExecution(wallet, execution, checkpoint, error)) return false;
     transactions = std::move(built);
     return true;
+}
+
+bool ResumeProviderMaintenanceTransactions(CWallet& wallet, std::string& error)
+{
+    LOCK(wallet.cs_wallet);
+    try {
+        PaymasterMaintenanceExecution execution;
+        const auto status = WalletBatch{wallet.GetDatabase()}.ReadPaymasterMaintenanceExecutionWithStatus(execution);
+        if (status == DatabaseReadStatus::NOT_FOUND) return true;
+        if (status != DatabaseReadStatus::FOUND) { error = "PAYMASTER_MAINTENANCE_RECOVERY_REVIEW_REQUIRED"; return false; }
+        if (!CheckMaintenanceExecutionState(wallet, execution, error)) return false;
+        PaymasterCheckpointOperation checkpoint{wallet};
+        if (!checkpoint.Resume(execution, error)) return false;
+        return CommitMaintenanceExecution(wallet, execution, checkpoint, error);
+    } catch (const std::exception& exception) {
+        // CommitTransaction throws after a failed wallet database write.
+        // Startup must remain available for inspection, with the exact journal
+        // and pending fence retained for another recovery attempt.
+        wallet.WalletLogPrintf("Paymaster native transaction recovery failed: %s\n", exception.what());
+        error = "PAYMASTER_MAINTENANCE_RECOVERY_TRANSACTION_COMMIT";
+        return false;
+    }
 }
 
 bool ProviderMaintenanceBroadcastPending(

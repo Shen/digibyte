@@ -72,6 +72,11 @@ constexpr auto PAYMASTER_PROVIDER_SERVICE_INTERVAL{std::chrono::seconds{1}};
 
 void InitializePaymasterWallet(CWallet& wallet)
 {
+    std::string native_error;
+    if (!ResumeProviderMaintenanceTransactions(wallet, native_error)) {
+        wallet.WalletLogPrintf("Paymaster native maintenance recovery deferred: %s\n", native_error);
+        return;
+    }
     // Older Paymaster clients could persist only the wallet-owned DD
     // change row because collaborative sends bypassed the ordinary direct
     // send history path. Rebuild those display rows from successful,

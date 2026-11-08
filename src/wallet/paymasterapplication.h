@@ -78,6 +78,8 @@ bool ExecuteProviderMaintenanceTransactions(
     CWallet& wallet, const ProviderMaintenanceAuthority& authority,
     const std::vector<ProviderMaintenanceTransfer>& transfers,
     std::vector<ProviderMaintenanceTransaction>& transactions, std::string& error);
+/** Complete only exact signed native work; no keys, new plan or new signature. */
+bool ResumeProviderMaintenanceTransactions(CWallet& wallet, std::string& error);
 uint256 PoolPreparationAuthorization(CWallet& wallet);
 DigiDollar::Paymaster::ProviderSetupAuthorization ReadPoolSetupAuthorization(CWallet& wallet);
 

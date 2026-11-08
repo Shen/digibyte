@@ -377,6 +377,13 @@ Acknowledging a reminder does not create a backup. Restoration is guarded before
 autostart; independent checkpoints detect stale wallet copies. Only supported
 matching/quiescent states can be adopted after review. Do not operate cloned
 stores as independent instances of one identity.
+An interrupted native reserve transaction can resume automatically from its exact
+saved signed journal during startup or maintenance reconciliation. This creates
+no replacement signature. Missing/corrupt journals, stale checkpoints and legacy
+pending markers remain blocked for review; do not clear the marker or delete the
+independent checkpoint to restart service. See the
+[recovery contract](digidollar-paymaster-implementation.md#wallet-lifecycle)
+for the implementation constraints.
 Wallet backup and completion bookkeeping serialize with material configuration
 changes. A later change restores the reminder, including changes in the same
 timestamp second. If safety data cannot be read, the DD overview retains known

@@ -4481,7 +4481,8 @@ BOOST_AUTO_TEST_CASE(carrier_refill_fences_only_after_exact_construction)
 {
     ScopedPaymasterMockTime clock{2000};
     SyncWithValidationInterfaceQueue();
-    for (const bool fail_after_commit : {false, true}) {
+    for (const int failure_stage : {0, 1, 2}) {
+        const bool fail_after_commit = failure_stage != 0;
         PaymasterBroadcastChain broadcast_chain{*m_node.chain};
         CWallet wallet{&broadcast_chain, fail_after_commit ? "refill-after-commit" : "refill-before-commit", CreateMockableWalletDatabase()};
         LOCK(wallet.cs_wallet);
@@ -4534,24 +4535,117 @@ BOOST_AUTO_TEST_CASE(carrier_refill_fences_only_after_exact_construction)
             }
         };
         database.m_refuse_write = [&](Span<const std::byte> key) {
-            return fail_after_commit && committed && key.size() == maintenance_key.size() &&
+            if (failure_stage == 2) return key.size() >= transaction_prefix.size() &&
+                std::equal(transaction_prefix.begin(), transaction_prefix.end(), key.begin());
+            return failure_stage == 1 && committed && key.size() == maintenance_key.size() &&
                 std::equal(key.begin(), key.end(), maintenance_key.begin());
         };
         const size_t transactions_before = wallet.mapWallet.size();
-        const bool replenished = paymaster_app::RunAutomaticCarrierReplenishment(wallet, policy, 2, 0, error);
+        bool replenished{false};
+        try {
+            replenished = paymaster_app::RunAutomaticCarrierReplenishment(wallet, policy, 2, 0, error);
+        } catch (const std::runtime_error&) {
+            BOOST_REQUIRE_EQUAL(failure_stage, 2);
+        }
         database.m_on_write = {};
         database.m_refuse_write = {};
-        if (fail_after_commit) BOOST_CHECK_EQUAL(broadcast_chain.submissions.size(), 1U);
+        if (failure_stage == 1) BOOST_CHECK_EQUAL(broadcast_chain.submissions.size(), 1U);
         else BOOST_CHECK(broadcast_chain.submissions.empty());
         BOOST_CHECK(!replenished);
         PaymasterCheckpoint checkpoint;
         BOOST_REQUIRE(database.MakeBatch()->Read(std::string{"pmcheckpoint"}, checkpoint));
         if (fail_after_commit) {
-            BOOST_CHECK(committed);
+            BOOST_CHECK_EQUAL(committed, failure_stage == 1);
             BOOST_CHECK_EQUAL(wallet.mapWallet.size(), transactions_before + 1);
             BOOST_CHECK_EQUAL(checkpoint.pending, 1);
             BOOST_CHECK(!CheckPaymasterProviderRestoreGuard(wallet, error));
             BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_CHECKPOINT_INCOMPLETE_OPERATION");
+            PaymasterMaintenanceExecution pending;
+            BOOST_REQUIRE(WalletBatch{database}.ReadPaymasterMaintenanceExecutionWithStatus(pending) == DatabaseReadStatus::FOUND);
+            BOOST_REQUIRE_EQUAL(pending.legs.size(), 1U);
+            std::set<COutPoint> protected_inputs;
+            BOOST_REQUIRE(GetPaymasterProviderPoolInputs(wallet, protected_inputs) == DatabaseReadStatus::FOUND);
+            BOOST_CHECK(protected_inputs.count(fee_input));
+            BOOST_CHECK(protected_inputs.count(COutPoint{funding.GetHash(), 1}));
+            if (failure_stage == 2) {
+                // The native wallet entry survived a failed WriteTx only in
+                // memory. Same-process recovery must persist it before the
+                // journal can disappear; presence in mapWallet is not proof.
+                CWallet retry{&broadcast_chain, "refill-write-retry", DuplicateMockDatabase(database)};
+                BOOST_REQUIRE(retry.LoadWallet() == DBErrors::LOAD_OK);
+                retry.SetLastBlockProcessed(100, Params().GenesisBlock().GetHash());
+                retry.EnsureDDWallet();
+                retry.SetBroadcastTransactions(true);
+                auto& retry_db = GetMockableDatabase(retry);
+                retry_db.m_refuse_write = [&](Span<const std::byte> key) {
+                    return key.size() >= transaction_prefix.size() &&
+                        std::equal(transaction_prefix.begin(), transaction_prefix.end(), key.begin());
+                };
+                BOOST_CHECK(!paymaster_app::ResumeProviderMaintenanceTransactions(retry, error));
+                BOOST_CHECK_EQUAL(error, "PAYMASTER_MAINTENANCE_RECOVERY_TRANSACTION_COMMIT");
+                BOOST_CHECK(WalletBatch{retry_db}.ReadPaymasterMaintenanceExecutionWithStatus(pending) == DatabaseReadStatus::FOUND);
+                retry_db.m_refuse_write = {};
+                BOOST_REQUIRE_MESSAGE(paymaster_app::ResumeProviderMaintenanceTransactions(retry, error), error);
+                BOOST_CHECK_EQUAL(retry.mapWallet.size(), transactions_before + 1);
+                BOOST_REQUIRE_MESSAGE(CheckPaymasterProviderRestoreGuard(retry, error), error);
+                BOOST_CHECK(WalletBatch{retry_db}.ReadPaymasterMaintenanceExecutionWithStatus(pending) == DatabaseReadStatus::NOT_FOUND);
+                for (const auto& [hash, saved] : retry.mapWallet)
+                    BOOST_CHECK(retry_db.MakeBatch()->Exists(std::make_pair(DBKeys::TX, hash)));
+                continue;
+            }
+            const auto exact_transaction = pending.legs.front().transaction;
+            const auto stale_rows = database.m_records;
+            CWallet reopened{&broadcast_chain, "refill-recovery", DuplicateMockDatabase(database)};
+            BOOST_REQUIRE(reopened.LoadWallet() == DBErrors::LOAD_OK);
+            reopened.SetLastBlockProcessed(100, Params().GenesisBlock().GetHash());
+            reopened.EnsureDDWallet();
+            reopened.SetBroadcastTransactions(true);
+            // Future/corrupt journals and edits to the accounting transition
+            // cannot use the genuine external checkpoint to gain authority.
+            auto changed = pending;
+            changed.legs.front().fee.value++;
+            BOOST_REQUIRE(reopened.GetDatabase().MakeBatch()->Write(std::string{"pmnativeexec"}, changed));
+            const auto tampered = GetMockableDatabase(reopened).m_records;
+            BOOST_CHECK(!paymaster_app::ResumeProviderMaintenanceTransactions(reopened, error));
+            BOOST_CHECK(GetMockableDatabase(reopened).m_records == tampered);
+            BOOST_REQUIRE(reopened.GetDatabase().MakeBatch()->Write(std::string{"pmnativeexec"}, uint16_t{65535}));
+            BOOST_CHECK(!paymaster_app::ResumeProviderMaintenanceTransactions(reopened, error));
+            BOOST_REQUIRE(reopened.GetDatabase().MakeBatch()->Write(std::string{"pmnativeexec"}, pending));
+            {
+                const auto hash = broadcast_chain.submissions.front().tx->GetHash();
+                auto& saved = reopened.mapWallet.at(hash);
+                const auto state = saved.m_state;
+                for (const TxState& failure : {TxState{TxStateInactive{true}}, TxState{TxStateConflicted{uint256::ONE, 1}}}) {
+                    saved.m_state = failure;
+                    const auto before = GetMockableDatabase(reopened).m_records;
+                    BOOST_CHECK(!paymaster_app::ResumeProviderMaintenanceTransactions(reopened, error));
+                    BOOST_CHECK_EQUAL(error, "PAYMASTER_MAINTENANCE_RECOVERY_TRANSACTION_CONFLICT");
+                    BOOST_CHECK(GetMockableDatabase(reopened).m_records == before);
+                }
+                saved.m_state = state;
+            }
+            BOOST_REQUIRE_MESSAGE(paymaster_app::ResumeProviderMaintenanceTransactions(reopened, error), error);
+            BOOST_REQUIRE_MESSAGE(CheckPaymasterProviderRestoreGuard(reopened, error), error);
+            BOOST_CHECK(WalletBatch{reopened.GetDatabase()}.ReadPaymasterMaintenanceExecutionWithStatus(pending) == DatabaseReadStatus::NOT_FOUND);
+            BOOST_CHECK_EQUAL(reopened.mapWallet.size(), transactions_before + 1);
+            ProviderMaintenanceLedger recovered;
+            BOOST_REQUIRE(WalletBatch{reopened.GetDatabase()}.ReadPaymasterMaintenanceLedger(recovered));
+            const auto executed = std::find_if(recovered.records.begin(), recovered.records.end(),
+                [](const auto& record) { return !record.transaction_id.IsNull(); });
+            BOOST_REQUIRE(executed != recovered.records.end());
+            const auto transaction = reopened.mapWallet.at(executed->transaction_id).tx;
+            CDataStream encoded{SER_NETWORK, ::PROTOCOL_VERSION};
+            encoded << *transaction;
+            const auto bytes = MakeUCharSpan(encoded);
+            BOOST_CHECK(std::vector<unsigned char>(bytes.begin(), bytes.end()) == exact_transaction);
+            BOOST_CHECK(executed->state == ProviderMaintenanceState::BROADCAST);
+            const auto complete = GetMockableDatabase(reopened).m_records;
+            BOOST_REQUIRE(paymaster_app::ResumeProviderMaintenanceTransactions(reopened, error));
+            BOOST_CHECK(GetMockableDatabase(reopened).m_records == complete);
+            CWallet stale{&broadcast_chain, "refill-stale-clone", CreateMockableWalletDatabase(stale_rows)};
+            const auto stale_before = GetMockableDatabase(stale).m_records;
+            BOOST_CHECK(!paymaster_app::ResumeProviderMaintenanceTransactions(stale, error));
+            BOOST_CHECK(GetMockableDatabase(stale).m_records == stale_before);
         } else {
             BOOST_CHECK(invalidated);
             BOOST_CHECK(!committed);
