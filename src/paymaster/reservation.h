@@ -72,7 +72,7 @@ enum class ReservationRole : uint8_t {
  * It permits an exact replay after restart, never acceptance or signing.
  * Missing legacy records must not be reconstructed from frontend defaults. */
 struct ClientPaymentOrder {
-    static constexpr uint16_t CURRENT_VERSION{1};
+    static constexpr uint16_t CURRENT_VERSION{2};
 
     uint16_t version{CURRENT_VERSION};
     uint256 genesis_hash;
@@ -89,6 +89,8 @@ struct ClientPaymentOrder {
     uint8_t maximum_attempts{3};
     bool subtract_fee{false};
     bool send_all{false};
+    uint256 preferred_provider;
+    uint256 preferred_offer;
 
     SERIALIZE_METHODS(ClientPaymentOrder, obj)
     {
@@ -99,6 +101,7 @@ struct ClientPaymentOrder {
                   Using<EnumByteFormatter<static_cast<uint8_t>(PrivacyProfile::HIGH)>>(obj.privacy),
                   Using<EnumByteFormatter<static_cast<uint8_t>(SelectionMode::PRIVACY_WEIGHTED)>>(obj.selection),
                   obj.maximum_attempts, obj.subtract_fee, obj.send_all);
+        if (obj.version >= 2) READWRITE(obj.preferred_provider, obj.preferred_offer);
     }
 };
 

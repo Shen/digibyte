@@ -4567,6 +4567,8 @@ void PaymasterWidgetTests::paymasterClientRestoresOriginalOrderFromNativeStatus(
     original.maximum_attempts = 1;
     original.selection = SelectionMode::PRIVACY_WEIGHTED;
     original.mode = FeeMode::AUTO;
+    original.preferred_provider = uint256S("81");
+    original.preferred_offer = uint256S("82");
     const std::vector<COutPoint> inputs{{uint256::ONE, 2}, {uint256S("02"), 9}};
     auto order = BuildClientPaymentOrder(original, DDCents{325}, inputs);
     QVERIFY(order.has_value());
@@ -4596,6 +4598,8 @@ void PaymasterWidgetTests::paymasterClientRestoresOriginalOrderFromNativeStatus(
     QCOMPARE(options.find_value("maximum_provider_attempts").getInt<int>(), 1);
     QCOMPARE(options.find_value("selection").get_str(), std::string{"privacy_weighted"});
     QCOMPARE(options.find_value("fee_mode").get_str(), std::string{"auto"});
+    QCOMPARE(options.find_value("preferred_provider_id").get_str(), original.preferred_provider->GetHex());
+    QCOMPARE(options.find_value("preferred_offer_id").get_str(), original.preferred_offer->GetHex());
     QVERIFY(options.find_value("prepare_only").isTrue());
     QVERIFY(options.find_value("authorization_commitment").isNull());
     QCOMPARE(replay[4][0].find_value("vout").getInt<int>(), 2);

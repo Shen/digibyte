@@ -23,6 +23,8 @@ struct ClientPaymentOptions {
     std::optional<std::vector<unsigned char>> identity_key;
     std::optional<std::vector<unsigned char>> descriptor;
     std::optional<std::vector<unsigned char>> capability;
+    std::optional<DigiDollar::Paymaster::PaymasterId> preferred_provider;
+    std::optional<uint256> preferred_offer;
 };
 struct QuoteParameters : ClientPaymentOptions {
     DigiDollar::Paymaster::PaymasterId provider_id;
@@ -35,8 +37,6 @@ struct AutomaticPaymentParameters : ClientPaymentOptions {
     int64_t amount{0};
     bool prepare_only{false};
     std::optional<uint256> authorization_commitment;
-    std::optional<DigiDollar::Paymaster::PaymasterId> preferred_provider;
-    std::optional<uint256> preferred_offer;
 };
 /** Build replay metadata for supported public orders; Restricted historical
  * callers retain their existing exact-argument replay and recovery paths. */

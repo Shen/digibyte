@@ -57,30 +57,32 @@ CreatePaymasterSessionResult PaymasterStore::CreateOrJoinSession(
 
     LOCK(m_wallet.cs_wallet);
     WalletBatch batch{m_wallet.GetDatabase()};
-    if (batch.ReadPaymasterSession(request_id, session)) {
+    const auto session_status = batch.ReadPaymasterSessionWithStatus(request_id, session);
+    if (session_status == DatabaseReadStatus::FOUND) {
         if (session.canonical_request_hash != canonical_request_hash || session.fee_mode_requested != requested_mode) {
             error = "PAYMASTER_REQUEST_ID_CONFLICT";
             return CreatePaymasterSessionResult::CONFLICT;
         }
-        // Legacy exact-argument callers can add replay metadata only after the
-        // original request hash and amount binding have both been established.
-        // Never replace corrupt or unknown metadata, and never depend on it for
-        // observing or replaying an already authorized financial artifact.
+        // Never invent a selection constraint for an existing legacy order.
+        // Missing metadata remains unknown; exact signed replay is independent
+        // of it, while choosing a new provider requires a current saved order.
         if (order && session.requested_amount.value > 0 && !IsTerminal(session.state)) {
             ClientPaymentOrder bound = *order;
             bound.session_id = session.session_id;
             if (!ValidateClientPaymentOrder(bound, session, nullptr, Params().GenesisBlock().GetHash(), error))
                 return CreatePaymasterSessionResult::CONFLICT;
             ClientPaymentOrder saved;
-            if (batch.ReadPaymasterClientOrderWithStatus(request_id, saved) == DatabaseReadStatus::NOT_FOUND &&
-                !batch.WritePaymasterClientOrder(bound)) {
-                error = "PAYMASTER_CLIENT_ORDER_DATABASE_WRITE";
-                return CreatePaymasterSessionResult::DATABASE_ERROR;
+            const auto order_status = batch.ReadPaymasterClientOrderWithStatus(request_id, saved);
+            if ((order_status != DatabaseReadStatus::FOUND && order_status != DatabaseReadStatus::NOT_FOUND) ||
+                (order_status == DatabaseReadStatus::FOUND && saved.version >= 2 &&
+                 (saved.preferred_provider != bound.preferred_provider || saved.preferred_offer != bound.preferred_offer))) {
+                error = "PAYMASTER_REQUEST_ID_CONFLICT";
+                return CreatePaymasterSessionResult::CONFLICT;
             }
         }
         return CreatePaymasterSessionResult::JOINED;
     }
-    if (batch.HasPaymasterSession(request_id)) {
+    if (session_status != DatabaseReadStatus::NOT_FOUND) {
         error = PersistedVersionError(
             "PaymentSession", session.version,
             PaymentSession::CURRENT_VERSION,
@@ -89,7 +91,8 @@ CreatePaymasterSessionResult PaymasterStore::CreateOrJoinSession(
     }
 
     IdempotencyTombstone tombstone;
-    if (batch.ReadPaymasterTombstone(request_id, tombstone)) {
+    const auto tombstone_status = batch.ReadPaymasterTombstoneWithStatus(request_id, tombstone);
+    if (tombstone_status == DatabaseReadStatus::FOUND) {
         if (tombstone.canonical_request_hash != canonical_request_hash) {
             error = "PAYMASTER_REQUEST_ID_CONFLICT";
             return CreatePaymasterSessionResult::CONFLICT;
@@ -111,7 +114,7 @@ CreatePaymasterSessionResult PaymasterStore::CreateOrJoinSession(
         }
         return CreatePaymasterSessionResult::FINAL_TOMBSTONE;
     }
-    if (batch.HasPaymasterTombstone(request_id)) {
+    if (tombstone_status != DatabaseReadStatus::NOT_FOUND) {
         error = PersistedVersionError(
             "IdempotencyTombstone", tombstone.version,
             IdempotencyTombstone::CURRENT_VERSION,

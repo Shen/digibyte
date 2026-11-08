@@ -57,7 +57,8 @@ bool ValidateClientPaymentOrder(const ClientPaymentOrder& order,
     const uint256& expected_genesis, std::string& error)
 {
     error.clear();
-    if (order.version != ClientPaymentOrder::CURRENT_VERSION || session.provider_side ||
+    if ((order.version != 1 && order.version != ClientPaymentOrder::CURRENT_VERSION) || session.provider_side ||
+        order.preferred_provider.IsNull() != order.preferred_offer.IsNull() ||
         order.genesis_hash != expected_genesis ||
         order.request_id != session.request_id || !IsCanonicalRequestId(order.request_id) ||
         order.session_id.IsNull() || order.session_id != session.session_id ||
@@ -94,7 +95,9 @@ bool ValidateClientPaymentOrder(const ClientPaymentOrder& order,
             intent->recipient_script != order.recipient_script ||
             intent->user_dd_inputs != order.user_inputs ||
             intent->requested_fee_mode != order.fee_mode ||
-            intent->privacy_profile != order.privacy || intent->selection_mode != order.selection))) {
+            intent->privacy_profile != order.privacy || intent->selection_mode != order.selection ||
+            (!order.preferred_provider.IsNull() && (intent->provider_id != order.preferred_provider ||
+                intent->offer_id != order.preferred_offer))))) {
         error = "PAYMASTER_CLIENT_ORDER_BINDING_MISMATCH";
         return false;
     }

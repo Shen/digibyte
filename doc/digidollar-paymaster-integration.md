@@ -168,7 +168,11 @@ An unavailable legacy, unknown-version or damaged record is returned as null
 with `resume_order_error`; payment observations and signed retry/recovery remain
 available. Qt disables preparation resumption when neither these parameters nor
 its still-live immutable request are available. Integrations retaining their
-original exact arguments can continue to use the existing send RPC.
+original exact arguments can replay already accepted or signed artifacts through
+the existing send RPC. New provider selection requires a version-2 order with
+known selection constraints; legacy or missing metadata returns
+`PAYMASTER_CLIENT_SELECTION_REVIEW_REQUIRED`. Inspect and safely close unsigned
+work before creating a new request.
 
 Recovery approval uses its own `recovery_authorization_commitment` and exact
 recovery terms. A payment commitment cannot authorize self-recovery, and a
@@ -240,7 +244,11 @@ This diagnostic does not bypass amount, privacy or announcement-validity checks.
 `preferred_provider_id` and `preferred_offer_id` bind a public offer as a pair.
 An unavailable selection fails with `PAYMASTER_SELECTED_OFFER_UNAVAILABLE`;
 it is not silently replaced by different terms. Preparation/signing recheck
-current policy and capacity.
+current policy and capacity. Version-2 replay metadata retains the pair, including
+an explicit unconstrained selection when both fields are absent. Repeated or
+concurrent calls cannot omit or change a saved pair; expiry and restart do not
+authorize a different provider or offer. Existing signed retries retain their
+original artifact.
 
 `recommendation_deprioritized` reflects wallet-local failure without known
 success; eligible alternatives rank ahead, and cooldowns still apply. Local

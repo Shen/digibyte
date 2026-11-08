@@ -77,6 +77,16 @@ UniValue DecodeResumeOrder(const UniValue& session)
     options.pushKV("request_id", text(order, "request_id"));
     for (const char* key : {"fee_mode", "maximum_paymaster_fee_cents", "maximum_provider_attempts", "privacy", "selection",
                             "subtract_paymaster_fee_from_amount", "send_all_spendable_dd"}) options.pushKV(key, order.find_value(key));
+    const auto& provider = order.find_value("preferred_provider_id");
+    const auto& offer = order.find_value("preferred_offer_id");
+    if (provider.isNull() != offer.isNull()) return {};
+    if (!provider.isNull()) {
+        if (!provider.isStr() || !offer.isStr() ||
+            !IsCanonicalNonNullPaymasterHash(QString::fromStdString(provider.get_str())) ||
+            !IsCanonicalNonNullPaymasterHash(QString::fromStdString(offer.get_str()))) return {};
+        options.pushKV("preferred_provider_id", provider);
+        options.pushKV("preferred_offer_id", offer);
+    }
     UniValue params{UniValue::VARR};
     params.push_back(recipient);
     params.push_back(amount);

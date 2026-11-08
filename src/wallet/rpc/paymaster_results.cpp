@@ -586,6 +586,11 @@ UniValue ToJSON(const ClientPaymentOrder& order)
     result.pushKV("selection", order.selection == SelectionMode::PRIVACY_WEIGHTED ? "privacy_weighted" : "lowest_total_cost");
     result.pushKV("subtract_paymaster_fee_from_amount", order.subtract_fee);
     result.pushKV("send_all_spendable_dd", order.send_all);
+    result.pushKV("selection_constraint_known", order.version >= 2);
+    if (!order.preferred_provider.IsNull()) {
+        result.pushKV("preferred_provider_id", order.preferred_provider.GetHex());
+        result.pushKV("preferred_offer_id", order.preferred_offer.GetHex());
+    }
     UniValue inputs{UniValue::VARR};
     for (const auto& input : order.user_inputs) {
         UniValue entry{UniValue::VOBJ};

@@ -90,6 +90,9 @@ RPCResult ClientSessionResult(std::string key, bool include_observed_at)
             {RPCResult::Type::STR, "selection", "Original selection policy"},
             {RPCResult::Type::BOOL, "subtract_paymaster_fee_from_amount", "Original amount semantics"},
             {RPCResult::Type::BOOL, "send_all_spendable_dd", "Original sweep selection"},
+            {RPCResult::Type::BOOL, "selection_constraint_known", "Whether original provider-selection constraints were retained"},
+            {RPCResult::Type::STR_HEX, "preferred_provider_id", true, "Fixed original provider, when selected"},
+            {RPCResult::Type::STR_HEX, "preferred_offer_id", true, "Fixed original offer, when selected"},
             {RPCResult::Type::ARR, "selected_inputs", "Original ordered DD inputs; omit explicit send inputs when resuming a sweep", {{RPCResult::Type::OBJ, "", "Original input", {
                 {RPCResult::Type::STR_HEX, "txid", "Creating transaction"},
                 {RPCResult::Type::NUM, "vout", "Output index"},

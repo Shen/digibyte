@@ -26,6 +26,7 @@
 #include <cstdint>
 #include <memory>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -106,6 +107,16 @@ void ExerciseRecordDecoder(const Key& key,
     // Every accepted record must also pass the corresponding writer and be a
     // stable decode/encode fixed point in a clean database.
     MockableDatabase canonical_database;
+    if constexpr (std::is_same_v<Value, ClientPaymentOrder>) {
+        // V1 client orders do not reveal the original selection constraint.
+        // Read them for exact history; never invent a current writable order.
+        if (decoded.version == 1) {
+            WalletBatch batch{canonical_database};
+            assert(!writer(batch, decoded));
+            assert(canonical_database.m_records.empty());
+            return;
+        }
+    }
     {
         WalletBatch batch{canonical_database};
         assert(writer(batch, decoded));

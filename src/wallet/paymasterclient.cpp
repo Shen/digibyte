@@ -111,6 +111,8 @@ std::optional<ClientPaymentOrder> BuildClientPaymentOrder(
     order.maximum_attempts = input.maximum_attempts;
     order.subtract_fee = input.subtract_fee;
     order.send_all = input.send_all;
+    order.preferred_provider = input.preferred_provider.value_or(uint256{});
+    order.preferred_offer = input.preferred_offer.value_or(uint256{});
     return order;
 }
 
@@ -125,6 +127,15 @@ std::optional<ClientPaymentReplay> LoadClientPaymentReplay(
     if (session.provider_side) {
         throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_CLIENT_SESSION_REQUIRED");
     }
+    ClientPaymentOrder selection_order;
+    const auto selection_status = store.GetClientPaymentOrderWithStatus(input.request_id, selection_order);
+    // Optional metadata cannot hide an exact accepted/signed retry when the
+    // caller still has the original arguments. Any new selection below requires
+    // a fully validated current order; unreadable metadata never grants it.
+    if (selection_status == DatabaseReadStatus::FOUND && selection_order.version >= 2 &&
+        (selection_order.preferred_provider != input.preferred_provider.value_or(uint256{}) ||
+         selection_order.preferred_offer != input.preferred_offer.value_or(uint256{})))
+        throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_REQUEST_ID_CONFLICT");
     if (requested_inputs) {
         replay.original_inputs = *requested_inputs;
     } else if (!session.user_inputs.empty()) {
@@ -279,6 +290,9 @@ void ValidatePreferredClientOffer(
 
 void ValidateClientPaymentOptions(const ClientPaymentOptions& input)
 {
+    if (input.preferred_provider.has_value() != input.preferred_offer.has_value() ||
+        (input.preferred_provider && (input.preferred_provider->IsNull() || input.preferred_offer->IsNull())))
+        throw ApplicationError(ErrorKind::INVALID_INPUT, "preferred_provider_id and preferred_offer_id must be a non-null pair");
     if (!CDigiDollarAddress{input.address}.IsValidForCurrentNetwork())
         throw ApplicationError(ErrorKind::INVALID_ADDRESS, "Invalid DigiDollar address for this network");
     if (!IsCanonicalRequestId(input.request_id))
@@ -1864,6 +1878,15 @@ void SelectAutomaticPaymentOffer(AutomaticPaymentOperation& operation)
     auto& persisted_session = operation.persisted_session;
     auto& have_persisted_session = operation.have_persisted_session;
     auto& selected = operation.selected;
+    if (have_persisted_session) {
+        std::string order_error;
+        const auto order = LoadClientPaymentOrder(store, persisted_session, order_error);
+        // V1 did not retain whether a preference was supplied. Exact accepted
+        // or signed work already resumed above; never infer permission to
+        // contact another provider from missing historical selection metadata.
+        if (!order || order->version < 2)
+            throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_CLIENT_SELECTION_REVIEW_REQUIRED");
+    }
     std::vector<PaymasterReliabilityRecord> records;
     if (!store.ListProviderReliability(records)) {
         throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_REPUTATION_DATABASE_READ");
@@ -1909,7 +1932,7 @@ void SelectAutomaticPaymentOffer(AutomaticPaymentOperation& operation)
                                             Params().GetChainType() == ChainType::REGTEST);
                                     }),
                      candidates.end());
-    if (preferred_provider && persisted_session.attempt_ids.empty()) {
+    if (preferred_provider) {
         candidates.erase(std::remove_if(candidates.begin(), candidates.end(),
             [&](const OfferCandidate& candidate) {
                 return candidate.provider_id != *preferred_provider || candidate.terms.offer_id != *preferred_offer;

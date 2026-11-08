@@ -228,6 +228,69 @@ BOOST_FIXTURE_TEST_CASE(client_order_replay_uses_persisted_terms_and_existing_ha
     BOOST_CHECK(!store.GetSessionByRequestId(invented.request_id, restored_session));
 }
 
+BOOST_FIXTURE_TEST_CASE(client_selection_pair_survives_replay_and_rejects_changed_callers, WalletTestingSetup)
+{
+    {
+        LOCK(m_wallet.cs_wallet);
+        const auto* tip = WITH_LOCK(::cs_main, return m_node.chainman->ActiveChain().Tip());
+        BOOST_REQUIRE(tip);
+        m_wallet.SetLastBlockProcessed(tip->nHeight, tip->GetBlockHash());
+    }
+    CKey key;
+    key.MakeNewKey(true);
+    ClientPaymentOptions options;
+    options.request_id = "550e8400-e29b-41d4-a716-446655440024";
+    options.address = EncodeDigiDollarAddress(WitnessV1Taproot{XOnlyPubKey{key.GetPubKey()}});
+    options.preferred_provider = uint256S("11");
+    options.preferred_offer = uint256S("12");
+    const std::vector<COutPoint> inputs{{uint256S("13"), 0}};
+    auto order = BuildClientPaymentOrder(options, DDCents{325}, inputs);
+    BOOST_REQUIRE(order);
+    PaymasterStore store{m_wallet};
+    PaymentSession session;
+    std::string error;
+    BOOST_REQUIRE(store.CreateOrJoinSession(options.request_id, order->canonical_request_hash,
+        options.mode, GetTime(), session, error, &*order) == CreatePaymasterSessionResult::CREATED);
+    const auto rows = GetMockableDatabase(m_wallet).m_records;
+    auto snapshot = CaptureSessionSnapshot(session, &store);
+    BOOST_REQUIRE(snapshot.resume_order);
+    BOOST_CHECK(snapshot.resume_order->preferred_provider == *options.preferred_provider);
+    BOOST_CHECK(snapshot.resume_order->preferred_offer == *options.preferred_offer);
+    const auto json = SessionToJSON(session, &store).find_value("resume_order");
+    BOOST_CHECK(json.find_value("selection_constraint_known").isTrue());
+    BOOST_CHECK_EQUAL(json.find_value("preferred_provider_id").get_str(), options.preferred_provider->GetHex());
+    BOOST_REQUIRE(LoadClientPaymentReplay(m_wallet, store, options, DDCents{325}, &inputs));
+    for (int field{0}; field < 3; ++field) {
+        auto changed = options;
+        if (field == 0) changed.preferred_provider = uint256S("21");
+        if (field == 1) changed.preferred_offer = uint256S("22");
+        if (field == 2) { changed.preferred_provider.reset(); changed.preferred_offer.reset(); }
+        BOOST_CHECK_EXCEPTION(LoadClientPaymentReplay(m_wallet, store, changed, DDCents{325}, &inputs),
+            ApplicationError, [](const auto& e) { return e.code == "PAYMASTER_REQUEST_ID_CONFLICT"; });
+        auto other = BuildClientPaymentOrder(changed, DDCents{325}, inputs);
+        BOOST_REQUIRE(other);
+        BOOST_CHECK(store.CreateOrJoinSession(options.request_id, other->canonical_request_hash,
+            options.mode, GetTime(), session, error, &*other) == CreatePaymasterSessionResult::CONFLICT);
+        BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == rows);
+    }
+    auto legacy = *snapshot.resume_order;
+    legacy.version = 1;
+    const auto record_key = std::make_pair(DBKeys::PAYMASTER_CLIENT_ORDER, options.request_id);
+    BOOST_REQUIRE(m_wallet.GetDatabase().MakeBatch()->Write(record_key, legacy));
+    ClientPaymentOrder decoded;
+    BOOST_REQUIRE(store.GetClientPaymentOrderWithStatus(options.request_id, decoded) == DatabaseReadStatus::FOUND);
+    BOOST_CHECK_EQUAL(decoded.version, 1);
+    BOOST_CHECK(decoded.preferred_provider.IsNull() && decoded.preferred_offer.IsNull());
+    const auto legacy_rows = GetMockableDatabase(m_wallet).m_records;
+    BOOST_CHECK(store.CreateOrJoinSession(options.request_id, order->canonical_request_hash,
+        options.mode, GetTime(), session, error, &*order) == CreatePaymasterSessionResult::JOINED);
+    BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == legacy_rows);
+    BOOST_REQUIRE(m_wallet.GetDatabase().MakeBatch()->Erase(record_key));
+    BOOST_CHECK(store.CreateOrJoinSession(options.request_id, order->canonical_request_hash,
+        options.mode, GetTime(), session, error, &*order) == CreatePaymasterSessionResult::JOINED);
+    BOOST_CHECK(store.GetClientPaymentOrderWithStatus(options.request_id, decoded) == DatabaseReadStatus::NOT_FOUND);
+}
+
 BOOST_FIXTURE_TEST_CASE(created_payment_resume_selects_original_unreserved_wallet_inputs, WalletTestingSetup)
 {
     DigiDollarWallet dd_wallet{&m_wallet};

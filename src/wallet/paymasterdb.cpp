@@ -299,11 +299,14 @@ DatabaseReadStatus WalletBatch::ReadPaymasterClientOrderWithStatus(
 {
     using namespace DigiDollar::Paymaster;
     if (!IsCanonicalRequestId(request_id)) return DatabaseReadStatus::READ_ERROR;
-    const auto status = ReadPaymasterVersionedRecord(
-        std::make_pair(DBKeys::PAYMASTER_CLIENT_ORDER, request_id), order);
+    order = {};
+    const auto status = m_batch->ReadWithStatus(std::make_pair(DBKeys::PAYMASTER_CLIENT_ORDER, request_id), order);
+    if ((status == DatabaseReadStatus::FOUND || status == DatabaseReadStatus::READ_ERROR) &&
+        order.version != 1 && order.version != ClientPaymentOrder::CURRENT_VERSION) return DatabaseReadStatus::UNSUPPORTED_VERSION;
     if (status != DatabaseReadStatus::FOUND) return status;
     if (order.request_id != request_id || order.session_id.IsNull() ||
-        order.genesis_hash.IsNull() || order.canonical_request_hash.IsNull()) return DatabaseReadStatus::READ_ERROR;
+        order.genesis_hash.IsNull() || order.canonical_request_hash.IsNull() ||
+        order.preferred_provider.IsNull() != order.preferred_offer.IsNull()) return DatabaseReadStatus::READ_ERROR;
     return DatabaseReadStatus::FOUND;
 }
 
