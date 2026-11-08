@@ -43,6 +43,36 @@ using namespace paymaster_rpc::internal;
 
 BOOST_FIXTURE_TEST_SUITE(paymaster_application_tests, BasicTestingSetup)
 
+BOOST_AUTO_TEST_CASE(provider_pending_setup_continues_admitted_work_only)
+{
+    const std::vector<ProviderServiceStatus> waiting{
+        {ProviderServiceState::WAITING_FOR_READINESS, "PAYMASTER_POOL_PREPARATION_PENDING"},
+        {ProviderServiceState::WAITING_FOR_READINESS, "PAYMASTER_AUTOMATIC_REPLENISHMENT_DISABLED"},
+        {ProviderServiceState::WAITING_FOR_LIQUIDITY_CONFIRMATION, "PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING"},
+        {ProviderServiceState::WAITING_FOR_MAINTENANCE_APPROVAL, "PAYMASTER_MAINTENANCE_APPROVAL_REQUIRED"},
+    };
+    for (const auto& status : waiting) {
+        const auto work = PlanProviderWork(status, false, true);
+        BOOST_CHECK(!work.new_capacity);
+        BOOST_CHECK(work.request_continuations);
+        BOOST_CHECK(work.submits);
+        const auto syncing = PlanProviderWork(status, true, false);
+        BOOST_CHECK(!syncing.new_capacity && !syncing.request_continuations && !syncing.submits);
+    }
+    for (const auto& status : std::vector<ProviderServiceStatus>{
+            {ProviderServiceState::WAITING_FOR_READINESS, "PAYMASTER_RESTORE_GUARD"},
+            {ProviderServiceState::WAITING_FOR_READINESS, "PAYMASTER_UNKNOWN_FAILURE"},
+            {ProviderServiceState::WAITING_FOR_UNLOCK, {}},
+            {ProviderServiceState::FAULT, {}}, {ProviderServiceState::STOPPED, {}}}) {
+        const auto work = PlanProviderWork(status, true, true);
+        BOOST_CHECK(!work.new_capacity && !work.request_continuations && !work.submits);
+    }
+    const auto active = PlanProviderWork({ProviderServiceState::ACTIVE, {}}, true, true);
+    BOOST_CHECK(active.new_capacity && active.request_continuations && active.submits);
+    const auto drain = PlanProviderWork({ProviderServiceState::DRAIN_ONLY, {}}, true, true);
+    BOOST_CHECK(!drain.new_capacity && !drain.request_continuations && drain.submits);
+}
+
 BOOST_FIXTURE_TEST_CASE(provider_lifecycle_observation_matches_runtime_intent_without_authorizing_work, WalletTestingSetup)
 {
     CWallet observed_wallet{m_node.chain.get(), "lifecycle-observation", CreateMockableWalletDatabase()};

@@ -16,6 +16,7 @@ bool RunPaymasterBackgroundWork(WalletContext& context, CWallet& wallet,
 void RunPaymasterProviderServiceCycle(WalletContext& context, CWallet& wallet);
 namespace paymaster_app {
 enum class ExecutionMode { MANUAL, AUTOMATIC };
+enum class ProviderRequestScope { NEW_AND_CONTINUING, CONTINUING_ONLY };
 ProviderStartResult StartPaymaster(WalletContext& context, CWallet& wallet, bool wait_for_readiness, ExecutionMode mode);
 ProviderStopResult StopPaymaster(WalletContext& context, CWallet& wallet, bool persistent, bool pause_setup);
 /** Serialize direct submission with provider stop, policy and maintenance work.
@@ -23,6 +24,7 @@ ProviderStopResult StopPaymaster(WalletContext& context, CWallet& wallet, bool p
 PaymentResult SubmitPaymasterTransaction(WalletContext& context, CWallet& wallet, PartiallySignedTransaction psbt, ExecutionMode mode);
 ProviderProcessingResult ProcessPaymasterSubmits(WalletContext& context, CWallet& wallet, ExecutionMode mode);
 ProviderProcessingResult ProcessPaymasterRequests(WalletContext& context, CWallet& wallet, ExecutionMode mode);
+ProviderProcessingResult ProcessPaymasterRequests(WalletContext& context, CWallet& wallet, ExecutionMode mode, ProviderRequestScope scope);
 PaymentResult ProcessPaymasterResult(WalletContext& context, CWallet& wallet, const std::string& request_id);
 PaymentResult AuthorizePaymasterPSBT(WalletContext& context, CWallet& wallet, PartiallySignedTransaction candidate,
                               const std::optional<uint256>& authorization_commitment);

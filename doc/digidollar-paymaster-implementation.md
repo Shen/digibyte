@@ -469,6 +469,11 @@ continuations. A throttled capacity request remains queued and returns its
 deferral; the next call can advance a different type. Dispatch and acknowledgement
 never change reservations or authorize a payment.
 
+Service scheduling distinguishes new capacity, admitted request continuations
+and submissions. Pending finite pool preparation suppresses new capacity while
+allowing admitted work to reach its ordinary execution checks. Synchronization,
+unlock, restore and exact signing authority are still checked at execution.
+
 `GetAlternativeRecoveryByIdWithStatus` preserves the database read status;
 stored recovery shape is validated before interpreting nested bindings.
 Recovery requests pass separate replay, preflight and commit phases. Permanent

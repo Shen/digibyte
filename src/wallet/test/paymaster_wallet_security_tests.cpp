@@ -932,7 +932,7 @@ struct QuoteRequestProcessingSetup : TestChain100Setup {
         }
     } services_cleanup{*m_node.connman};
 
-    explicit QuoteRequestProcessingSetup(int outbound_connections = 0)
+    explicit QuoteRequestProcessingSetup(int outbound_connections = 0, DGBSatoshis network_fee = DGBSatoshis{500})
     {
         BOOST_REQUIRE(wallet.LoadWallet() == DBErrors::LOAD_OK);
         environment.policy.maximum_network_fee = DGBSatoshis{COIN / 10};
@@ -970,7 +970,7 @@ struct QuoteRequestProcessingSetup : TestChain100Setup {
         // while the original, byte-identical intent envelope is still valid.
         BOOST_REQUIRE_MESSAGE(BuildProviderQuoteFixture(environment,
             "550e8400-e29b-41d4-a716-446655441098", seed, now, fixture, error,
-            nullptr, {}, DGBSatoshis{500}, 5500, Params().GenesisBlock().GetHash(),
+            nullptr, {}, network_fee, 5500, Params().GenesisBlock().GetHash(),
             /*intent_ttl=*/60, /*quote_ttl=*/20), error);
         fixture.pool_entry.confirmation_height = 0;
         pool.push_back(fixture.pool_entry);
@@ -7469,6 +7469,81 @@ BOOST_FIXTURE_TEST_CASE(automatic_recovery_rejection_allows_following_quote_and_
     BOOST_CHECK(SerializePaymasterSecurityObject(*quote) == fixture.attempt.signed_quote);
     BOOST_CHECK(GetMockableDatabase(wallet).m_records == before);
     BOOST_CHECK(CheckpointBytes() == checkpoint_before);
+}
+
+struct SignedPaymentProcessingSetup : QuoteRequestProcessingSetup {
+    // The valid-final path must meet DigiByte's relay fee, unlike classifier fixtures.
+    SignedPaymentProcessingSetup() : QuoteRequestProcessingSetup(0, DGBSatoshis{20000}) {}
+};
+
+BOOST_FIXTURE_TEST_CASE(automatic_pending_setup_processes_valid_signed_payment, SignedPaymentProcessingSetup)
+{
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(AddTaprootSigningKey(wallet, fixture.user_key, error), error);
+    {
+        LOCK(wallet.cs_wallet);
+        BOOST_REQUIRE(wallet.AddToWallet(MakeTransactionRef(CMutableTransaction{
+            fixture.response.quote.reserved_dgb_inputs.front().creating_tx}), TxStateInMempool{}));
+    }
+    CollaborativePSBTTemplate trusted;
+    BOOST_REQUIRE(DecodeRawPSBT(trusted.psbt, MakeByteSpan(fixture.attempt.unsigned_psbt), error));
+    trusted.input_roles = {InputRole::USER_DD, InputRole::PROVIDER_DGB};
+    PartiallySignedTransaction user_psbt{trusted.psbt};
+    BOOST_REQUIRE_MESSAGE(SignCollaborativePSBTForParty(wallet, user_psbt, trusted, SigningParty::USER, error), error);
+    BOOST_REQUIRE_MESSAGE(ValidateCollaborativePSBT(user_psbt, trusted, CollaborativeSignatureStage::USER_SIGNED, error), error);
+    {
+        LOCK(cs_main);
+        auto& coins = m_node.chainman->ActiveChainstate().CoinsTip();
+        for (size_t i{0}; i < trusted.psbt.inputs.size(); ++i) {
+            CTxOut prevout;
+            BOOST_REQUIRE(trusted.psbt.GetInputUTXO(prevout, i));
+            coins.AddCoin(fixture.transaction.vin[i].prevout, Coin{std::move(prevout), 0, false}, false);
+        }
+    }
+    environment.settings.operation_mode = ProviderOperationMode::AUTOMATIC;
+    WalletBatch batch{wallet.GetDatabase()};
+    BOOST_REQUIRE(batch.WritePaymasterSettings(environment.settings));
+    ProviderMaintenanceRecord preparation;
+    preparation.kind = ProviderMaintenanceKind::PREPARE_DGB;
+    preparation.operation_id = SecurityTestId(seed, 190);
+    preparation.plan_id = SecurityTestId(seed, 191);
+    preparation.preparation_authorization = SecurityTestId(seed, 192);
+    preparation.preparation_request = SecurityTestId(seed, 193);
+    preparation.maximum_fee = DGBSatoshis{2000};
+    preparation.created_at = preparation.updated_at = GetTime();
+    ProviderMaintenanceOutput output;
+    output.script_pub_key = environment.identity.identity_script;
+    output.dgb_value = DGBSatoshis{10000};
+    preparation.outputs = {output};
+    ProviderMaintenanceLedger maintenance;
+    maintenance.records = {preparation};
+    BOOST_REQUIRE_MESSAGE(ValidateProviderMaintenanceLedger(maintenance, error), error);
+    BOOST_REQUIRE(batch.WritePaymasterMaintenanceLedger(maintenance));
+    PaymasterSubmit submit;
+    submit.genesis_hash = Params().GenesisBlock().GetHash();
+    submit.request_id = fixture.request.intent.request_id;
+    submit.session_id = fixture.attempt.session_id;
+    submit.provider_id = fixture.attempt.provider_id;
+    submit.quote_id = fixture.attempt.quote_id;
+    submit.commit_key = fixture.attempt.commit_key;
+    submit.template_commitment = fixture.attempt.template_commitment;
+    submit.user_psbt = SerializePaymasterSecurityObject(user_psbt);
+    BOOST_REQUIRE_MESSAGE(ValidateSubmitEnvelope(submit, submit.genesis_hash, error), error);
+    const auto bytes = SerializePaymasterSecurityObject(submit);
+    BOOST_REQUIRE(manager.EnqueueNetworkDirectMessage(45, Hash(bytes), bytes.size(), DirectPayload{submit},
+        GetTime(), 45, {1, 9, 9}, DirectAdmissionClass::REQUEST) == DirectEnqueueResult::ACCEPTED);
+    RunPaymasterProviderServiceCycle(context, wallet);
+    const auto status = manager.GetProviderServiceStatus(wallet.GetName());
+    BOOST_CHECK_MESSAGE(status.state == ProviderServiceState::WAITING_FOR_READINESS, status.last_error);
+    BOOST_CHECK_EQUAL(status.last_error, "PAYMASTER_POOL_PREPARATION_PENDING");
+    ProviderCommitRecord committed;
+    BOOST_REQUIRE_MESSAGE(batch.ReadPaymasterProviderCommit(submit.commit_key, committed), status.last_error);
+    BOOST_CHECK_EQUAL(committed.final_txid, fixture.transaction.GetHash());
+    BOOST_CHECK_EQUAL(manager.DirectMessageCount(), 0U);
+    const auto committed_bytes = SerializePaymasterSecurityObject(committed);
+    RunPaymasterProviderServiceCycle(context, wallet);
+    BOOST_REQUIRE(batch.ReadPaymasterProviderCommit(submit.commit_key, committed));
+    BOOST_CHECK(SerializePaymasterSecurityObject(committed) == committed_bytes);
 }
 
 static void AddPendingOperationalTarget(QuoteRequestProcessingSetup& setup)

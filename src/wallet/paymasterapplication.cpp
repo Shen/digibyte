@@ -2588,6 +2588,32 @@ bool ProviderCanServeDuringRefill(
     }
 }
 
+ProviderWorkPlan PlanProviderWork(const DigiDollar::Paymaster::ProviderServiceStatus& status,
+                                  bool accept_new_requests, bool synchronized)
+{
+    using namespace DigiDollar::Paymaster;
+    if (!synchronized) return {};
+    switch (status.state) {
+    case ProviderServiceState::ACTIVE:
+        return {accept_new_requests, true, true};
+    case ProviderServiceState::DRAIN_ONLY:
+        return {false, false, true};
+    case ProviderServiceState::WAITING_FOR_MAINTENANCE_APPROVAL:
+    case ProviderServiceState::REPLENISHING_LIQUIDITY:
+    case ProviderServiceState::WAITING_FOR_LIQUIDITY_CONFIRMATION:
+        return {false, true, true};
+    case ProviderServiceState::WAITING_FOR_READINESS:
+        if (status.last_error == "PAYMASTER_POOL_PREPARATION_PENDING" ||
+            status.last_error == "PAYMASTER_AUTOMATIC_REPLENISHMENT_DISABLED" ||
+            status.last_error == "PAYMASTER_MAINTENANCE_BROADCAST_PENDING" ||
+            status.last_error == "PAYMASTER_WALLET_BROADCAST_DISABLED" ||
+            status.last_error == "PAYMASTER_LIQUIDITY_TARGETS_INCOMPLETE") return {false, true, true};
+        return {};
+    default:
+        return {};
+    }
+}
+
 ProviderActivitySnapshot CaptureProviderActivity(const ProviderReadiness& readiness, int64_t now)
 {
     using namespace DigiDollar::Paymaster;

@@ -2393,6 +2393,11 @@ ProviderProcessingResult ProcessProviderQuoteRequest(
 
 ProviderProcessingResult ProcessPaymasterRequests(WalletContext& context, CWallet& target, ExecutionMode mode)
 {
+    return ProcessPaymasterRequests(context, target, mode, ProviderRequestScope::NEW_AND_CONTINUING);
+}
+
+ProviderProcessingResult ProcessPaymasterRequests(WalletContext& context, CWallet& target, ExecutionMode mode, ProviderRequestScope scope)
+{
     CWallet* const wallet = &target;
     using namespace DigiDollar::Paymaster;
     const bool automatic_service = mode == ExecutionMode::AUTOMATIC;
@@ -2446,7 +2451,7 @@ ProviderProcessingResult ProcessPaymasterRequests(WalletContext& context, CWalle
     // call; a deferred capacity request stays queued, but its lease advances
     // the cursor so the next call gives another eligible type its turn.
     const auto request_lease = context.paymaster->LeaseProviderRequest(
-        readiness.identity.provider_id, !automatic_service || readiness.ready);
+        readiness.identity.provider_id, scope == ProviderRequestScope::NEW_AND_CONTINUING && (!automatic_service || readiness.ready));
     const auto& messages = request_lease.Messages();
     result.disposition = messages.empty() ? ProviderProcessingDisposition::NO_MESSAGE : ProviderProcessingDisposition::PROCESSED;
     if (messages.empty()) return result;

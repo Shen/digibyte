@@ -663,17 +663,13 @@ void RunPaymasterProviderServiceCycleImpl(WalletContext& context, CWallet& walle
     // A refill wait must not strand quote/recovery continuations. Fresh capacity
     // requests always require full current readiness in the request handler.
     // Drain-only providers still finish only already-authorized submissions.
-    const bool process_request_continuations =
-        state == ProviderServiceState::WAITING_FOR_MAINTENANCE_APPROVAL ||
-        state == ProviderServiceState::REPLENISHING_LIQUIDITY ||
-        state == ProviderServiceState::WAITING_FOR_LIQUIDITY_CONFIRMATION;
-    if (accept_new_requests || process_request_continuations) {
-        ProcessPaymasterRequests(context, wallet, ExecutionMode::AUTOMATIC);
+    const auto work = PlanProviderWork({state, first_error}, accept_new_requests,
+                                       AutomaticProviderStateIsSynchronized(wallet));
+    if (work.request_continuations) {
+        ProcessPaymasterRequests(context, wallet, ExecutionMode::AUTOMATIC,
+            work.new_capacity ? ProviderRequestScope::NEW_AND_CONTINUING : ProviderRequestScope::CONTINUING_ONLY);
     }
-    if (state != ProviderServiceState::WAITING_FOR_UNLOCK &&
-        state != ProviderServiceState::WAITING_FOR_READINESS &&
-        state != ProviderServiceState::FAULT &&
-        state != ProviderServiceState::STOPPED) {
+    if (work.submits) {
         ProcessPaymasterSubmits(context, wallet, ExecutionMode::AUTOMATIC);
     }
     if (!first_error.empty() &&

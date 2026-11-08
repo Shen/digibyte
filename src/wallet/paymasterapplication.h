@@ -289,6 +289,15 @@ std::optional<uint32_t> FindExactDigiDollarOutputIndex(
     DigiDollar::Paymaster::DDCents amount);
 void EnsureProviderRestoreSafe(const CWallet& wallet);
 bool ProviderCanServeDuringRefill(const DigiDollar::Paymaster::ProviderServiceStatus& status, const ProviderReadiness& readiness, bool synchronized);
+/** Scheduling only: each operation still reloads and validates its authority.
+ * A liquidity/setup wait must not strand an already admitted payment. */
+struct ProviderWorkPlan {
+    bool new_capacity{false};
+    bool request_continuations{false};
+    bool submits{false};
+};
+ProviderWorkPlan PlanProviderWork(const DigiDollar::Paymaster::ProviderServiceStatus& status,
+                                  bool accept_new_requests, bool synchronized);
 } // namespace paymaster_app
 } // namespace wallet
 #endif // DIGIBYTE_WALLET_PAYMASTERAPPLICATION_H
