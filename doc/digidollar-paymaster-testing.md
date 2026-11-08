@@ -546,6 +546,34 @@ git diff -w $paymasterBases.official_baseline HEAD
 
 ## Review follow-up regressions
 
+For the maintenance-release, missing recovery-result, pruning-cache, archive
+and provider completion fixes, run these focused regressions after compiling
+the changed production and test sources:
+
+```powershell
+& ./build_msvc/x64/Release/test_digibyte.exe '--run_test=paymaster_application_tests/withdrawal_preview_replacement_preserves_independent_signed_evidence:paymaster_wallet_security_tests/client_recovery_confirmed_before_first_result_survives_expiry_and_reload,client_recovery_mempool_final_without_result_retries_exact_authorization:paymaster_wallet_finance_tests/transfer_finance_authenticates_expired_and_conflicted_history,provider_commit_candidates_and_successor_work_stay_bounded_after_archive_growth' --report_level=detailed
+if ($LASTEXITCODE -ne 0) { throw 'Paymaster release/retry/cache regression failed' }
+$env:DIGIBYTE_QT_TEST_SUITE = 'PaymasterWidgetTests'
+$env:DIGIBYTE_QT_TEST_FUNCTION = 'paymasterProviderCommandLocksPages'
+& ./build_msvc/x64/Release/test_digibyte-qt.exe
+if ($LASTEXITCODE -ne 0) { throw 'Paymaster completion cleanup regression failed' }
+Remove-Item Env:DIGIBYTE_QT_TEST_FUNCTION, Env:DIGIBYTE_QT_TEST_SUITE
+```
+
+Require unchanged database rows on denied release and failed writes, complete
+wallet evidence beyond a history page, exact recovery retry after expiry or
+mempool admission, and rejection of changed final witnesses. Local observation
+alone must not fabricate a provider result or spend the client fee reservation.
+Pruning must preserve immutable finance totals and pending work in a warm cache,
+with aborted deletion and cold reconstruction checked separately. Archive
+coverage requires one cold commit lookup followed by repeated warm point reads,
+commit/abort/erase consistency, read-failure rejection and bounded live-session
+successor repair. Qt coverage throws from both result and error handlers after
+queuing a continuation, and during wallet change and widget destruction; require
+restored controls, discarded continuations and a successful explicit fresh read.
+Also run the neighboring finance, maintenance-cancellation, successor, recovery
+archival/reorg, manual-lock, ordinary database and DD spendability selections.
+
 For service scheduling, shared client budget observation, dialog lifetime,
 compact finance integrity and bounded background scans (AP1–AP5), run on a
 freshly built executable from the repository root:

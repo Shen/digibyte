@@ -4,6 +4,36 @@ There is **no complete current-revision release certification** in this record.
 The candidate below and historical checkpoints identify actual verification;
 implemented behavior alone does not establish release acceptance.
 
+## Maintenance release, missing recovery results and archive work
+
+Packages 1–5 based on `81ea7a772dcf0287df00980aaaa28886e66201ec`,
+verified on 2026-11-09. The committed code at
+`fcfb959a8770b4d96c27c17f4353cffde081f2c3` matches the tested source content.
+Contracts are in the [implementation guide](digidollar-paymaster-implementation.md);
+commands and operator checks are in the
+[focused selection](digidollar-paymaster-testing.md#review-follow-up-regressions).
+No consensus, wire or persisted record version changed.
+
+| Executed check | Result and scope |
+|---|---|
+| Combined native retest | Exit 0: **91 cases / 52,727 assertions**, no selected failures/skips. Includes complete withdrawal absence proofs beyond a history page; missing-result recovery in mempool and after confirmation/expiry; changed-witness rejection; warm finance pruning/abort/cold rebuild; 1,000-commit candidate lookup and bounded 150-session repair; neighboring maintenance, successor, recovery archive/reorg, manual-lock, ordinary database and DD spendability cases. |
+| Qt | **Four functions / eight feature rows**, zero failures/skips, Windows/Fusion. Handler exceptions discard queued continuations and invalidate previews; wallet change/destruction, fresh refresh, preparation continuation, privacy and finance wallet binding pass. |
+| Compilation | All **13 changed C++ units** freshly compiled and linked with MSVC toolset 14.43.34808, `/W3 /WX /Od /MT /std:c++20`. All nine changed production units pass C++17 `/Zs`. Source/object hashes and committed source content were checked. |
+| Local controls | Dependency/cycle lint, six boundary fixtures, each code-commit prefix against the unchanged baseline policy, JSON and whitespace checks pass. No policy or financial-validation exception. |
+
+Native SHA256: `d5ef6ccb03c055d0f2193a77f96de6e54aeef37cdc6d680a2dae7f91df3221eb`.
+Qt SHA256: `7df710c07b6c7408a455c7373e667460cd33cc2f2477a545c652ec69f7f2b56f`.
+Full commands, logs, source/object hashes and commit partitions are retained under
+`.ai/implement-packages-81ea7a7/`, including `verification.json` and `runs.jsonl`.
+Initial new fixtures failed on synthetic wallet/spend cleanup, an unset processed
+height and a missing overwrite flag; corrected fixtures passed the final retest.
+Their failed compile/test statuses remain in the logs.
+
+These are isolated partial links with retained dependencies, without complete
+transitive-header provenance. Clean product builds, complete functional/native/Qt
+suites, cross-platform builds, sanitizers, the repository Tidy plugin and long
+fuzz/live-network campaigns were not run and remain operator/release checks.
+
 ## Service, client budgets and bounded background work
 
 AP1–AP5 on `bb7df87700fc9a439e15ab47dbea8baf31fdc1b8`, verified in the
