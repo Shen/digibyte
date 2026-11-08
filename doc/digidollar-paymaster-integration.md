@@ -197,6 +197,9 @@ authority and does not extend signed deadlines.
 
 Ordinary provider fallback is allowed only before a user PSBT exists. Signed
 work retains the original inputs; exact retry cannot create another attempt.
+Retained acceptance markers on rejected or expired unsigned attempts remain
+audit history. Core checks independent authorization/recovery evidence and fee
+release before excluding that attempt from live payment authority.
 
 Unsigned preparation can be abandoned only after Core confirms it is safe.
 Qt waits for durable read-back; late quotes cannot revive approval. Lost replies,

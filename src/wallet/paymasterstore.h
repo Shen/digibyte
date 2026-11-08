@@ -121,6 +121,8 @@ struct PaymasterSessionObservation {
     std::string_view Status(DigiDollar::Paymaster::SessionState state) const;
 };
 
+enum class ClientAuthorizationState { NONE, ACCEPTED_UNSIGNED, CLOSED_UNSIGNED, SIGNED, FINAL };
+
 class PaymasterStore
 {
 public:
@@ -180,6 +182,14 @@ public:
      * the same wallet lock as the release. Unknown authority fails closed. */
     bool ValidateUnsignedClientSession(
         const DigiDollar::Paymaster::PaymentSession& session, std::string& error) const;
+
+    /** Classify current authority, preserving accepted unsigned history without
+     * treating it as a live signing request. Closed work must prove the whole
+     * session unsigned; corruption and unknown independent authority fail. */
+    bool GetClientAuthorizationState(
+        const DigiDollar::Paymaster::PaymentSession& session,
+        const DigiDollar::Paymaster::ProviderAttempt& attempt, int64_t now,
+        ClientAuthorizationState& state, std::string& error) const;
 
     /** Validate durable artifacts and read the current wallet chain snapshot.
      * Does not reconcile, reserve, sign, broadcast, or contact providers. */

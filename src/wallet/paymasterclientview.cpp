@@ -404,8 +404,12 @@ bool LoadClientSessionView(PaymasterStore& store,
     // An empty draft can resume preparation without granting payment authority.
     // Bound unsigned work must pass the same firewall as signing and release.
     if (view.artifact == "none" && early_session && !view.recovery &&
-        (!session.attempt_ids.empty() || !session.user_inputs.empty()) &&
-        !store.ValidateUnsignedClientSession(session, error)) return false;
+        (!session.attempt_ids.empty() || !session.user_inputs.empty())) {
+        if (view.attempt) {
+            ClientAuthorizationState authorization;
+            if (!store.GetClientAuthorizationState(session, *view.attempt, now, authorization, error)) return false;
+        } else if (!store.ValidateUnsignedClientSession(session, error)) return false;
+    }
     view.allowed_actions.push_back("refresh");
     if (!IsTerminal(session.state) && !view.recovery) {
         if (view.artifact == "none" && early_session) {

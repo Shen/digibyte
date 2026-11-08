@@ -316,6 +316,78 @@ bool PaymasterStore::ValidateUnsignedClientSession(
     return RequireNoClientAuthorizationEvidence(batch, current, error);
 }
 
+bool PaymasterStore::GetClientAuthorizationState(
+    const PaymentSession& session, const ProviderAttempt& attempt, int64_t now,
+    ClientAuthorizationState& state, std::string& error) const
+{
+    LOCK(m_wallet.cs_wallet);
+    error.clear();
+    state = ClientAuthorizationState::NONE;
+    WalletBatch batch{m_wallet.GetDatabase()};
+    PaymentSession current;
+    ProviderAttempt saved;
+    if (session.provider_side ||
+        batch.ReadPaymasterSessionWithStatus(session.request_id, current) != DatabaseReadStatus::FOUND ||
+        CanonicalBytes(current) != CanonicalBytes(session) ||
+        batch.ReadPaymasterAttemptWithStatus(attempt.attempt_id, saved) != DatabaseReadStatus::FOUND ||
+        CanonicalBytes(saved) != CanonicalBytes(attempt) || attempt.session_id != session.session_id ||
+        std::find(session.attempt_ids.begin(), session.attempt_ids.end(), attempt.attempt_id) == session.attempt_ids.end()) {
+        error = "PAYMASTER_ATTEMPT_SESSION_CONFLICT";
+        return false;
+    }
+    const bool accepted = !attempt.accepted_client_manifest_id.IsNull() || attempt.client_manifest_accepted_at != 0;
+    const bool signed_artifact = !attempt.user_signed_psbt.empty() || !attempt.final_transaction.empty() ||
+        !attempt.final_txid.IsNull() || attempt.provider_signed_at != 0 || !attempt.provider_signed_result.empty() ||
+        (attempt.state >= AttemptState::USER_SIGNED && attempt.state <= AttemptState::MEMPOOL) ||
+        attempt.state == AttemptState::AMBIGUOUS || attempt.state == AttemptState::CONFLICTED;
+    if (accepted || signed_artifact) {
+        PaymasterQuoteRequest request;
+        PaymasterQuoteResponse response;
+        CollaborativePSBTTemplate trusted;
+        if (!HasAcceptedClientManifest(attempt, now) || attempt.client_manifest_accepted_at > session.updated_at ||
+            !DecodePaymasterAuthorizationArtifacts(attempt, request, response, trusted, error) ||
+            !ValidateClientAuthorizationManifest(attempt.client_manifest, request.intent, response.quote,
+                attempt.capacity_snapshot, trusted, error)) {
+            if (error.empty()) error = "PAYMASTER_CLIENT_AUTHORIZATION_NOT_ACCEPTED";
+            return false;
+        }
+    }
+    if (signed_artifact) {
+        state = !attempt.final_transaction.empty() ? ClientAuthorizationState::FINAL : ClientAuthorizationState::SIGNED;
+        return true;
+    }
+    // State labels and accepted terms cannot hide independent user/recovery
+    // authority. Every unsigned classification uses the same complete proof.
+    if (!RequireNoClientAuthorizationEvidence(batch, current, error)) return false;
+    const bool expired_unsigned = accepted && attempt.state == AttemptState::QUOTED &&
+        now > attempt.client_manifest.expires_at;
+    if (attempt.state == AttemptState::REJECTED || attempt.state == AttemptState::QUOTE_EXPIRED || expired_unsigned) {
+        if (accepted) {
+            ClientFeeLedger fees;
+            const auto status = batch.ReadPaymasterClientFeeLedgerWithStatus(fees);
+            const auto fee = std::find_if(fees.reservations.begin(), fees.reservations.end(),
+                [&](const auto& entry) { return entry.commit_key == attempt.commit_key; });
+            if ((status != DatabaseReadStatus::FOUND && status != DatabaseReadStatus::NOT_FOUND) ||
+                (status == DatabaseReadStatus::FOUND &&
+                 (fee == fees.reservations.end() || fee->service_fee != attempt.client_manifest.service_fee ||
+                  (fee->state != BudgetReservationState::RELEASED &&
+                   !((attempt.state == AttemptState::QUOTE_EXPIRED || expired_unsigned) && fee->state == BudgetReservationState::RESERVED)))) ||
+                (status == DatabaseReadStatus::NOT_FOUND && attempt.client_manifest.service_fee.value != 0)) {
+                error = "PAYMASTER_CLIENT_FEE_PREAUTHORIZATION_MISSING";
+                return false;
+            }
+        }
+        state = ClientAuthorizationState::CLOSED_UNSIGNED;
+        return true;
+    }
+    if (attempt.state != AttemptState::CANDIDATE && attempt.state != AttemptState::QUOTED) {
+        error = "PAYMASTER_CLIENT_AUTHORIZATION_NOT_ACCEPTED";
+        return false;
+    }
+    if (accepted) state = ClientAuthorizationState::ACCEPTED_UNSIGNED;
+    return true;
+}
+
 bool PaymasterStore::ClientSessionHasLiveReservations(
     const PaymentSession& session,
     bool& has_live_reservations,

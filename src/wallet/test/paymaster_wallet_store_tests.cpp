@@ -2811,6 +2811,49 @@ BOOST_AUTO_TEST_CASE(client_attempt_artifacts_and_authorization_are_append_only_
                                                        fallback_session));
     BOOST_CHECK(fallback_attempt.state == AttemptState::REJECTED);
     BOOST_CHECK(fallback_session.state == SessionState::INPUTS_RESERVED);
+    BOOST_CHECK(fallback_attempt.accepted_client_manifest_id == accepted_quote.accepted_client_manifest_id);
+    BOOST_CHECK_EQUAL(fallback_attempt.client_manifest_accepted_at, accepted_quote.client_manifest_accepted_at);
+    {
+        wallet::CWallet expired{m_node.chain.get(), "accepted-unsigned-expired-replay",
+                                DuplicateMockDatabase(m_wallet.GetDatabase())};
+        PaymasterStore reopened{expired};
+        PaymentSession restored;
+        BOOST_REQUIRE(reopened.GetSessionByRequestId(request_id, restored));
+        ProviderAttempt active;
+        PaymentIntent active_intent;
+        PaymasterQuote active_quote;
+        LOCK(expired.cs_wallet);
+        BOOST_CHECK(!wallet::paymaster_app::FindDurableClientAuthorizationAttempt(expired, reopened,
+            restored, accepted_quote.client_manifest.expires_at + 1, active, active_intent, active_quote, error));
+        BOOST_CHECK(error.empty());
+        BOOST_REQUIRE(reopened.GetAttempt(quoted.attempt_id, active));
+        BOOST_CHECK(active.state == AttemptState::REJECTED);
+        BOOST_CHECK(active.accepted_client_manifest_id == accepted_quote.accepted_client_manifest_id);
+        ClientFeeLedger fees;
+        BOOST_REQUIRE(WalletBatch{expired.GetDatabase()}.ReadPaymasterClientFeeLedger(fees));
+        const auto released = std::find_if(fees.reservations.begin(), fees.reservations.end(),
+            [&](const auto& fee) { return fee.commit_key == active.commit_key; });
+        BOOST_REQUIRE(released != fees.reservations.end());
+        BOOST_CHECK(released->state == BudgetReservationState::RELEASED);
+        BOOST_CHECK(IsPaymasterInputReserved(expired, user_input));
+    }
+    {
+        wallet::ClientAuthorizationState state;
+        BOOST_REQUIRE_MESSAGE(fallback_store.GetClientAuthorizationState(fallback_session, fallback_attempt, 108, state, error), error);
+        BOOST_CHECK(state == wallet::ClientAuthorizationState::CLOSED_UNSIGNED);
+        ProviderAttempt active;
+        PaymentIntent active_intent;
+        PaymasterQuote active_quote;
+        LOCK(fallback_wallet.cs_wallet);
+        BOOST_CHECK(!wallet::paymaster_app::FindDurableClientAuthorizationAttempt(fallback_wallet,
+            fallback_store, fallback_session, 108, active, active_intent, active_quote, error));
+        BOOST_CHECK(error.empty());
+        auto altered = fallback_attempt;
+        altered.accepted_client_manifest_id = GetRandHash();
+        BOOST_REQUIRE(WalletBatch{fallback_wallet.GetDatabase()}.WritePaymasterAttempt(altered));
+        BOOST_CHECK(!fallback_store.GetClientAuthorizationState(fallback_session, altered, 108, state, error));
+        BOOST_REQUIRE(WalletBatch{fallback_wallet.GetDatabase()}.WritePaymasterAttempt(fallback_attempt));
+    }
     {
         wallet::CWallet repeated{m_node.chain.get(), "fallback-repeat-independent-authority",
                                  DuplicateMockDatabase(fallback_wallet.GetDatabase())};
@@ -8256,6 +8299,13 @@ BOOST_AUTO_TEST_CASE(client_view_unsigned_authority_failure_returns_no_actions)
     BOOST_REQUIRE(m_wallet.GetDatabase().MakeBatch()->Write(
         std::make_pair(DBKeys::PAYMASTER_USER_AUTH, attempt.commit_key), unknown));
     CheckUnreadableClientArtifact(*this, session, "PAYMASTER_SUBMIT_AUTHORIZATION_DATABASE_READ");
+    ProviderAttempt selected;
+    PaymentIntent intent;
+    PaymasterQuote quote;
+    LOCK(m_wallet.cs_wallet);
+    BOOST_CHECK(!paymaster_app::FindDurableClientAuthorizationAttempt(m_wallet, store, session, 110,
+        selected, intent, quote, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_SUBMIT_AUTHORIZATION_DATABASE_READ");
 }
 
 BOOST_AUTO_TEST_CASE(client_view_result_read_failures_and_bindings_block_rpc_actions)

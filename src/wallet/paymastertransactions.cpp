@@ -1389,12 +1389,21 @@ bool FindDurableClientAuthorizationAttempt(
 {
     using namespace DigiDollar::Paymaster;
     if (session.provider_side) return false;
+    PaymentSession current = session;
     for (auto it = session.attempt_ids.rbegin();
          it != session.attempt_ids.rend(); ++it) {
         ProviderAttempt candidate;
         if (!store.GetAttempt(*it, candidate)) {
             error = "PAYMASTER_ATTEMPT_NOT_FOUND";
             return false;
+        }
+        ClientAuthorizationState authorization;
+        if (!store.GetClientAuthorizationState(current, candidate, observation_time, authorization, error)) return false;
+        if (authorization == ClientAuthorizationState::CLOSED_UNSIGNED) {
+            if (candidate.state != AttemptState::REJECTED && *it == session.attempt_ids.back() &&
+                (!store.AbandonClientAttemptForFallback(session.request_id, candidate.attempt_id, observation_time, error) ||
+                 !store.GetSessionByRequestId(session.request_id, current))) return false;
+            continue;
         }
         if (!HasDurableClientAuthorization(candidate, observation_time) ||
             candidate.client_manifest_accepted_at > session.updated_at) {
