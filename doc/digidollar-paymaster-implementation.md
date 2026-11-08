@@ -136,6 +136,9 @@ accepted payment after the short capacity TTL. Alternative recovery has no
 equivalent durable provider receipt/retry window and still requires a current
 response and capacity admission for every new provider signature.
 
+Private Direct connections carry the existing destination-redaction policy
+through TCP connection errors as well as SOCKS5 errors. Ordinary connection
+logging retains its destination and unchanged socket behavior.
 
 Normal and alternative-recovery client results use scoped inbox leases. Local
 read, preflight or database failures retain the received artifact; acknowledgement

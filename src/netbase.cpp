@@ -551,11 +551,18 @@ static void LogConnectFailure(bool manual_connection, const char* fmt, const Arg
 
 bool ConnectSocketDirectly(const CService &addrConnect, const Sock& sock, int nTimeout, bool manual_connection)
 {
+    return ConnectSocketDirectly(addrConnect, sock, nTimeout, manual_connection, ProxyLogPolicy::NORMAL);
+}
+
+bool ConnectSocketDirectly(const CService &addrConnect, const Sock& sock, int nTimeout, bool manual_connection, ProxyLogPolicy log_policy)
+{
+    const std::string destination = log_policy == ProxyLogPolicy::REDACT_DESTINATION
+        ? "private destination" : addrConnect.ToStringAddrPort();
     // Create a sockaddr from the specified service.
     struct sockaddr_storage sockaddr;
     socklen_t len = sizeof(sockaddr);
     if (!addrConnect.GetSockAddr((struct sockaddr*)&sockaddr, &len)) {
-        LogPrintf("Cannot connect to %s: unsupported network\n", addrConnect.ToStringAddrPort());
+        LogPrintf("Cannot connect to %s: unsupported network\n", destination);
         return false;
     }
 
@@ -572,11 +579,11 @@ bool ConnectSocketDirectly(const CService &addrConnect, const Sock& sock, int nT
             Sock::Event occurred;
             if (!sock.Wait(std::chrono::milliseconds{nTimeout}, requested, &occurred)) {
                 LogPrintf("wait for connect to %s failed: %s\n",
-                          addrConnect.ToStringAddrPort(),
+                          destination,
                           NetworkErrorString(WSAGetLastError()));
                 return false;
             } else if (occurred == 0) {
-                LogPrint(BCLog::NET, "connection attempt to %s timed out\n", addrConnect.ToStringAddrPort());
+                LogPrint(BCLog::NET, "connection attempt to %s timed out\n", destination);
                 return false;
             }
 
@@ -588,13 +595,13 @@ bool ConnectSocketDirectly(const CService &addrConnect, const Sock& sock, int nT
             socklen_t sockerr_len = sizeof(sockerr);
             if (sock.GetSockOpt(SOL_SOCKET, SO_ERROR, (sockopt_arg_type)&sockerr, &sockerr_len) ==
                 SOCKET_ERROR) {
-                LogPrintf("getsockopt() for %s failed: %s\n", addrConnect.ToStringAddrPort(), NetworkErrorString(WSAGetLastError()));
+                LogPrintf("getsockopt() for %s failed: %s\n", destination, NetworkErrorString(WSAGetLastError()));
                 return false;
             }
             if (sockerr != 0) {
                 LogConnectFailure(manual_connection,
                                   "connect() to %s failed after wait: %s",
-                                  addrConnect.ToStringAddrPort(),
+                                  destination,
                                   NetworkErrorString(sockerr));
                 return false;
             }
@@ -605,7 +612,7 @@ bool ConnectSocketDirectly(const CService &addrConnect, const Sock& sock, int nT
         else
 #endif
         {
-            LogConnectFailure(manual_connection, "connect() to %s failed: %s", addrConnect.ToStringAddrPort(), NetworkErrorString(WSAGetLastError()));
+            LogConnectFailure(manual_connection, "connect() to %s failed: %s", destination, NetworkErrorString(WSAGetLastError()));
             return false;
         }
     }

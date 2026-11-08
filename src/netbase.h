@@ -272,6 +272,10 @@ extern std::function<std::unique_ptr<Sock>(const CService&)> CreateSock;
  * @returns Whether or not a connection was successfully made.
  */
 bool ConnectSocketDirectly(const CService &addrConnect, const Sock& sock, int nTimeout, bool manual_connection);
+/** Preserve connection behavior while applying destination privacy to every
+ * direct TCP error log. Ordinary callers use the NORMAL wrapper above. */
+bool ConnectSocketDirectly(const CService &addrConnect, const Sock& sock, int nTimeout, bool manual_connection,
+                          ProxyLogPolicy log_policy);
 
 /**
  * Connect to a specified destination service through a SOCKS5 proxy by first

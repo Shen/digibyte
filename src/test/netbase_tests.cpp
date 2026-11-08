@@ -55,6 +55,40 @@ public:
     mutable std::vector<std::string> writes;
 };
 
+class FailingConnectSock : public StaticContentsSock
+{
+public:
+    enum class Failure { IMMEDIATE, WAIT, TIMEOUT, GET_OPTION, ASYNC };
+    explicit FailingConnectSock(Failure failure) : StaticContentsSock{""}, m_failure{failure} {}
+    int Connect(const sockaddr*, socklen_t) const override
+    {
+        SetError(m_failure == Failure::IMMEDIATE ? WSAENOTSOCK : WSAEWOULDBLOCK);
+        return SOCKET_ERROR;
+    }
+    bool Wait(std::chrono::milliseconds, Event requested, Event* occurred) const override
+    {
+        SetError(WSAENOTSOCK);
+        *occurred = m_failure == Failure::TIMEOUT ? 0 : requested;
+        return m_failure != Failure::WAIT;
+    }
+    int GetSockOpt(int, int, void* value, socklen_t*) const override
+    {
+        SetError(WSAENOTSOCK);
+        *static_cast<int*>(value) = WSAENOTSOCK;
+        return m_failure == Failure::GET_OPTION ? SOCKET_ERROR : 0;
+    }
+private:
+    static void SetError(int error)
+    {
+#ifdef WIN32
+        WSASetLastError(error);
+#else
+        errno = error;
+#endif
+    }
+    const Failure m_failure;
+};
+
 std::string Socks5Response(bool authenticate, uint8_t reply = 0x00)
 {
     std::string response;
@@ -102,6 +136,40 @@ std::pair<bool, std::string> RunSocks5AndCaptureLog(
 static CNetAddr ResolveIP(const std::string& ip)
 {
     return LookupHost(ip, false).value_or(CNetAddr{});
+}
+
+BOOST_AUTO_TEST_CASE(direct_private_logging_redacts_all_connection_failures)
+{
+    const bool net_enabled = LogInstance().WillLogCategory(BCLog::NET);
+    LogInstance().EnableCategory(BCLog::NET);
+    for (const CService& destination : {
+             CService{ResolveIP("198.51.100.45"), 18445},
+             CService{ResolveIP("pg6mmjiyjmcrsslvykfwnntlaru7p5svn6y2ymmju6nubxndf4pscryd.onion"), 18445}}) {
+        for (const auto failure : {FailingConnectSock::Failure::IMMEDIATE, FailingConnectSock::Failure::WAIT,
+                                   FailingConnectSock::Failure::TIMEOUT, FailingConnectSock::Failure::GET_OPTION,
+                                   FailingConnectSock::Failure::ASYNC}) {
+            // Tor cannot produce a sockaddr; it exercises the sixth error logger.
+            if (destination.IsTor() && failure != FailingConnectSock::Failure::IMMEDIATE) continue;
+            for (const bool redact : {false, true}) {
+                std::string log;
+                auto callback = LogInstance().PushBackCallback([&log](const std::string& line) { log += line; });
+                FailingConnectSock sock{failure};
+                const bool connected = redact
+                    ? ConnectSocketDirectly(destination, sock, 1, true, ProxyLogPolicy::REDACT_DESTINATION)
+                    : ConnectSocketDirectly(destination, sock, 1, true);
+                LogInstance().DeleteCallback(callback);
+                BOOST_CHECK(!connected);
+                BOOST_CHECK(!log.empty());
+                BOOST_CHECK_EQUAL(log.find(destination.ToStringAddrPort()) == std::string::npos, redact);
+                if (redact) {
+                    BOOST_CHECK(log.find(destination.ToStringAddr()) == std::string::npos);
+                    BOOST_CHECK(log.find("18445") == std::string::npos);
+                    BOOST_CHECK(log.find("private destination") != std::string::npos);
+                }
+            }
+        }
+    }
+    if (!net_enabled) LogInstance().DisableCategory(BCLog::NET);
 }
 
 BOOST_AUTO_TEST_CASE(socks5_private_logging_redacts_destination_and_credentials)

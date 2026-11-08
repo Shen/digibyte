@@ -509,7 +509,7 @@ CNode* CConnman::ConnectNode(CAddress addrConnect, const char* pszDest, bool fCo
                 return nullptr;
             }
             connected = ConnectSocketDirectly(addrConnect, *sock, connect_timeout,
-                                              conn_type == ConnectionType::MANUAL);
+                                              conn_type == ConnectionType::MANUAL, proxy_log_policy);
         }
         if (!proxyConnectionFailed && conn_type != ConnectionType::PAYMASTER) {
             // If a connection to the node was attempted, and failure (if any) is not caused by a problem connecting to
