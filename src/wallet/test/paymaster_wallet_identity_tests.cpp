@@ -56,6 +56,43 @@ namespace wallet {
 using namespace DigiDollar::Paymaster;
 
 namespace {
+// SQLite can report both a failed read and a false Exists result for the same
+// row. Writes remain available, so treating this as absence would erase money
+// accounting rather than merely failing a database operation.
+class UnreadablePaymasterDatabase : public MockableDatabase
+{
+    class Batch : public MockableBatch {
+        UnreadablePaymasterDatabase& m_db;
+        bool Fails(const DataStream& key) const
+        {
+            DataStream expected;
+            expected << m_db.unreadable;
+            return !m_db.unreadable.empty() && key.size() == expected.size() &&
+                std::equal(key.begin(), key.end(), expected.begin());
+        }
+        DatabaseReadStatus ReadKey(DataStream&& key, DataStream& value) override
+        {
+            if (Fails(key)) { ++m_db.failed_reads; return DatabaseReadStatus::READ_ERROR; }
+            const auto row = m_db.m_records.find(SerializeData{key.begin(), key.end()});
+            if (row == m_db.m_records.end()) return DatabaseReadStatus::NOT_FOUND;
+            value.clear();
+            value.write(row->second);
+            return DatabaseReadStatus::FOUND;
+        }
+        bool HasKey(DataStream&& key) override
+        {
+            if (Fails(key)) return false;
+            return m_db.m_records.count(SerializeData{key.begin(), key.end()}) != 0;
+        }
+    public:
+        explicit Batch(UnreadablePaymasterDatabase& db) : MockableBatch(db.m_records, db.m_pass), m_db(db) {}
+    };
+public:
+    std::string unreadable;
+    size_t failed_reads{0};
+    std::unique_ptr<DatabaseBatch> MakeBatch(bool = true) override { return std::make_unique<Batch>(*this); }
+};
+
 class CountingPaymasterDatabase : public MockableDatabase
 {
 public:
@@ -180,6 +217,102 @@ struct RawProviderSettingsV2 {
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(paymaster_wallet_identity_tests, WalletTestingSetup)
+
+BOOST_AUTO_TEST_CASE(policy_setters_never_initialize_over_unreadable_accounting)
+{
+    SyncWithValidationInterfaceQueue();
+    auto owned = std::make_unique<UnreadablePaymasterDatabase>();
+    auto& db = *owned;
+    CWallet wallet{m_node.chain.get(), "unreadable-accounting", std::move(owned)};
+    LOCK(wallet.cs_wallet);
+    wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+    wallet.SetupDescriptorScriptPubKeyMans();
+    ProviderIdentityRecord identity;
+    std::string error;
+    BOOST_REQUIRE(CreatePaymasterIdentity(wallet, "Read failure", 1000, identity, error));
+    ProviderLiquidityPolicy liquidity;
+    liquidity.paid_maintenance_approved = true;
+    liquidity.maximum_maintenance_fee_per_transaction = DGBSatoshis{20000000};
+    liquidity.maximum_maintenance_fee_per_hour = DGBSatoshis{40000000};
+    liquidity.maximum_maintenance_fee_per_day = DGBSatoshis{60000000};
+    liquidity.updated_at = 1000;
+    ApproveRefillExecution(wallet, liquidity, FundingModel::USER_PAID);
+    ClientSafetyPolicy client;
+    client.maximum_service_fee_per_transaction = DDCents{100};
+    client.maximum_service_fee_per_day = DDCents{1000};
+    BOOST_REQUIRE(SetPaymasterClientSafetyPolicy(wallet, client, 1000, error));
+    WalletBatch batch{db};
+    ProviderSafetyPolicy safety;
+    ProviderBudgetLedger budget;
+    BOOST_REQUIRE(batch.ReadPaymasterProviderSafetyPolicy(safety));
+    BOOST_REQUIRE(batch.ReadPaymasterProviderBudgetLedger(budget));
+    ProviderBudgetReservation spent;
+    spent.commit_key = GetRandHash();
+    spent.recipient_bucket = GetRandHash();
+    spent.netgroup_bucket = GetRandHash();
+    spent.network_fee = DGBSatoshis{10000};
+    spent.state = BudgetReservationState::SPENT;
+    spent.reserved_at = spent.updated_at = 1000;
+    budget.reservations.push_back(spent);
+    BOOST_REQUIRE(batch.WritePaymasterProviderBudgetLedger(budget));
+    ClientFeeLedger fees;
+    fees.accounting_time_high_water = 1000;
+    fees.reservations.push_back({ClientFeeReservation::CURRENT_VERSION, GetRandHash(), DDCents{30}, BudgetReservationState::SPENT, 1000, 1000});
+    BOOST_REQUIRE(batch.WritePaymasterClientFeeLedger(fees));
+    ProviderMaintenanceLedger maintenance;
+    maintenance.accounting_time_high_water = 1000;
+    ProviderMaintenanceRecord planned;
+    planned.operation_id = GetRandHash(); planned.plan_id = GetRandHash();
+    planned.kind = ProviderMaintenanceKind::REPLENISH_DGB;
+    planned.maximum_fee = DGBSatoshis{10000};
+    planned.created_at = planned.updated_at = 1000;
+    ProviderMaintenanceOutput output;
+    output.script_pub_key = identity.identity_script;
+    output.dgb_value = DGBSatoshis{20000000};
+    planned.outputs = {output};
+    maintenance.records.push_back(planned);
+    BOOST_REQUIRE(batch.WritePaymasterMaintenanceLedger(maintenance));
+    ProviderPoolEntry entry;
+    entry.outpoint = COutPoint{GetRandHash(), 0};
+    entry.script_pub_key = identity.identity_script;
+    entry.dgb_value = DGBSatoshis{20000000};
+    entry.state = PoolEntryState::RESERVED;
+    entry.reservation_id = planned.operation_id;
+    entry.updated_at = 1000;
+    BOOST_REQUIRE(batch.WritePaymasterProviderPool({entry}));
+    for (const auto& key : {DBKeys::PAYMASTER_PROVIDER_BUDGET, DBKeys::PAYMASTER_PROVIDER_SAFETY,
+             DBKeys::PAYMASTER_MAINTENANCE_LEDGER, DBKeys::PAYMASTER_LIQUIDITY_POLICY,
+             DBKeys::PAYMASTER_CLIENT_FEES, DBKeys::PAYMASTER_CLIENT_SAFETY, DBKeys::PAYMASTER_PROVIDER_POOL}) {
+        const auto before = db.m_records;
+        db.unreadable = key;
+        db.failed_reads = 0;
+        bool result;
+        if (key == DBKeys::PAYMASTER_PROVIDER_BUDGET || key == DBKeys::PAYMASTER_PROVIDER_SAFETY)
+            result = SetPaymasterProviderSafetyPolicy(wallet, safety, 1000, error);
+        else if (key == DBKeys::PAYMASTER_MAINTENANCE_LEDGER || key == DBKeys::PAYMASTER_LIQUIDITY_POLICY)
+            result = SetPaymasterProviderLiquidityPolicy(wallet, liquidity, 1000, error);
+        else if (key == DBKeys::PAYMASTER_CLIENT_FEES || key == DBKeys::PAYMASTER_CLIENT_SAFETY)
+            result = SetPaymasterClientSafetyPolicy(wallet, client, 1000, error);
+        else result = SetPaymasterProviderPoolEntries(wallet, {}, error);
+        BOOST_CHECK_MESSAGE(!result, key);
+        BOOST_CHECK_GT(db.failed_reads, 0U);
+        BOOST_CHECK(db.m_records == before); // Includes the independent checkpoint row.
+        db.unreadable.clear();
+        BOOST_REQUIRE_MESSAGE(CheckPaymasterCheckpoint(db, error), error);
+    }
+    BOOST_REQUIRE(SetPaymasterProviderSafetyPolicy(wallet, safety, 1000, error));
+    BOOST_REQUIRE(SetPaymasterProviderLiquidityPolicy(wallet, liquidity, 1000, error));
+    BOOST_REQUIRE(SetPaymasterClientSafetyPolicy(wallet, client, 1000, error));
+    ProviderBudgetLedger retained;
+    ClientFeeLedger retained_fees;
+    ProviderMaintenanceLedger retained_maintenance;
+    BOOST_REQUIRE(batch.ReadPaymasterProviderBudgetLedger(retained));
+    BOOST_REQUIRE(batch.ReadPaymasterClientFeeLedger(retained_fees));
+    BOOST_REQUIRE(batch.ReadPaymasterMaintenanceLedger(retained_maintenance));
+    BOOST_CHECK((HashWriter{} << retained).GetHash() == (HashWriter{} << budget).GetHash());
+    BOOST_CHECK((HashWriter{} << retained_fees).GetHash() == (HashWriter{} << fees).GetHash());
+    BOOST_CHECK((HashWriter{} << retained_maintenance).GetHash() == (HashWriter{} << maintenance).GetHash());
+}
 
 BOOST_AUTO_TEST_CASE(background_service_contains_invalid_maintenance)
 {

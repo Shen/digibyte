@@ -335,7 +335,13 @@ bool TrackCheckpoint(const WalletBatch* owner, DatabaseBatch& batch, WalletDatab
     // Quarantined wallets cannot advance the original provider's high-water
     // mark through signed recovery/accounting. Only an explicit reviewed
     // retirement or current-backup adoption may advance that checkpoint.
-    if (!retirement && !adoption && batch.Exists(DBKeys::PAYMASTER_RESTORE_GUARD)) return true;
+    if (!retirement && !adoption) {
+        DigiDollar::Paymaster::ProviderIdentityRecord guard;
+        const auto guard_status = batch.ReadWithStatus(DBKeys::PAYMASTER_RESTORE_GUARD, guard);
+        if (guard_status == DatabaseReadStatus::FOUND &&
+            guard.version == DigiDollar::Paymaster::ProviderIdentityRecord::CURRENT_VERSION && !guard.provider_id.IsNull()) return true;
+        if (guard_status != DatabaseReadStatus::NOT_FOUND) { state.failed = true; return false; }
+    }
     DigiDollar::Paymaster::ProviderIdentityRecord identity;
     const auto identity_status = batch.ReadWithStatus(DBKeys::PAYMASTER_IDENTITY, identity);
     if (identity_status == DatabaseReadStatus::NOT_FOUND) return true;

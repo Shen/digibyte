@@ -420,7 +420,12 @@ bool PaymasterStore::ReserveInputs(
             return false;
         }
         InputReservation existing;
-        const bool occupied = batch.ReadPaymasterReservation(outpoint, existing);
+        const auto reservation_status = batch.ReadPaymasterReservationWithStatus(outpoint, existing);
+        if (reservation_status != DatabaseReadStatus::FOUND && reservation_status != DatabaseReadStatus::NOT_FOUND) {
+            error = "PAYMASTER_RESERVATION_DATABASE_READ";
+            return false;
+        }
+        const bool occupied = reservation_status == DatabaseReadStatus::FOUND;
         const bool ours = occupied && existing.session_id == session.session_id;
         if ((occupied && !ours) || (m_wallet.IsLockedCoin(outpoint) && !ours)) {
             error = "PAYMASTER_INPUT_ALREADY_RESERVED";

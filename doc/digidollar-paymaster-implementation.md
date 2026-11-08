@@ -317,6 +317,10 @@ checkpoint operation. The pending marker begins immediately before wallet
 commit/accounting. A rejected stale plan leaves no pending operation; failures
 after a possible commit retain the conservative fence.
 
+Policy and pool setters initialize records only after a status-bearing read
+proves `NOT_FOUND`. Read errors and unsupported versions preserve budgets, pool
+reservations and checkpoint state.
+
 Checkpoint file reads hold the same per-path recursive mutex as atomic file replacement
 for the complete read-handle lifetime. On Windows, a CRT reader otherwise can
 deny replacement and make an unrelated wallet transaction fail its commit.
