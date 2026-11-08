@@ -11,6 +11,7 @@
 #include <logging.h>
 #include <logging/timer.h>
 #include <paymaster/finance.h>
+#include <paymaster/psbt.h>
 #include <oracle/bundle_manager.h>
 #include <wallet/paymasteridentity.h>
 #include <util/time.h>
@@ -257,10 +258,19 @@ bool CanRepairMaintenanceCost(const ProviderFinanceEvent& previous,
     return CheckProviderFinanceEventBinding(corrected, event, error);
 }
 
-ProviderFinanceEvent TransferEvent(const ProviderIdentityRecord& identity,
-                                    const ProviderAttempt& attempt, const ProviderCommitRecord& commit)
+bool TransferEvent(const ProviderIdentityRecord& identity,
+                   const ProviderAttempt& attempt, const ProviderCommitRecord& commit,
+                   ProviderFinanceEvent& event, std::string& error)
 {
-    ProviderFinanceEvent event;
+    ProviderCommitArtifacts artifacts;
+    if (identity.provider_id != attempt.provider_id ||
+        identity.identity_key != attempt.provider_identity_key ||
+        !ValidateProviderCommitArtifacts(attempt, commit, artifacts, error) ||
+        artifacts.genesis_hash != Params().GenesisBlock().GetHash()) {
+        if (error.empty()) error = "PAYMASTER_FINANCE_TRANSFER_BINDING_MISMATCH";
+        return false;
+    }
+    event = {};
     event.event_id = commit.commit_key;
     event.genesis_hash = Params().GenesisBlock().GetHash();
     event.provider_id = identity.provider_id;
@@ -272,7 +282,7 @@ ProviderFinanceEvent TransferEvent(const ProviderIdentityRecord& identity,
     event.dgb_cost = attempt.provider_manifest.network_fee;
     event.created_at = commit.committed_at;
     event.updated_at = commit.committed_at;
-    return event;
+    return ValidateProviderFinanceEvent(event, error);
 }
 
 bool RecoveryEvent(const ProviderIdentityRecord& identity, const AlternativeRecoveryRecord& recovery,
@@ -693,7 +703,8 @@ bool RebuildProviderFinancesAtTime(CWallet& wallet, size_t& changed_events,
             }
             continue;
         }
-        auto event = TransferEvent(identity, attempt->second, commit);
+        ProviderFinanceEvent event;
+        if (!TransferEvent(identity, attempt->second, commit, event, error)) return false;
         transaction_state(event.transaction_id, event.created_at,
                           event.state, event.confirmed_at);
         if (!apply_event(std::move(event))) return false;
@@ -958,7 +969,7 @@ bool ReconcileProviderFinancesAtTime(CWallet& wallet, size_t& changed_events,
                     return false;
                 }
                 if (attempt_status == DatabaseReadStatus::FOUND && !attempt.provider_manifest.manifest_id.IsNull()) {
-                    event = TransferEvent(identity, attempt, commit);
+                    if (!TransferEvent(identity, attempt, commit, event, error)) return false;
                     have_event = true;
                 } else if (!recovery_id.IsNull()) {
                     AlternativeRecoveryRecord recovery;
@@ -1441,7 +1452,7 @@ bool PrepareProviderTransferFinanceEvent(
         error = "PAYMASTER_PROVIDER_AUTH_MANIFEST_REQUIRED";
         return false;
     }
-    event = TransferEvent(identity, attempt, commit);
+    if (!TransferEvent(identity, attempt, commit, event, error)) return false;
     return PrepareProviderFinanceEvent(batch, identity, expected_genesis, ledger, event, changed, error);
 }
 

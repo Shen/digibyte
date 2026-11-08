@@ -181,6 +181,21 @@ bool ValidateProviderAuthorizationForExecution(
     CollaborativePSBTTemplate& trusted_template,
     std::string& error);
 
+struct ProviderCommitArtifacts {
+    CMutableTransaction final_transaction{};
+    uint256 genesis_hash;
+};
+
+/** Authenticate immutable provider authorization and the complete signed final.
+ * Suitable for historical accounting, including expired or conflicted attempts.
+ * This does not authorize signing or broadcast and imposes no current lifecycle,
+ * wallet ownership or wall-clock requirements. */
+bool ValidateProviderCommitArtifacts(
+    const ProviderAttempt& attempt,
+    const ProviderCommitRecord& commit,
+    ProviderCommitArtifacts& artifacts,
+    std::string& error);
+
 /** Re-run the provider authorization firewall and validate every byte of a
  * durable final commit against the trusted PSBT before recovery or broadcast.
  * The returned transaction is suitable for a subsequent mempool preflight;

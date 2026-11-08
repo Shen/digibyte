@@ -731,52 +731,27 @@ bool ValidateProviderAuthorizationForExecution(
     return true;
 }
 
-bool ValidateProviderCommitForExecution(
+bool ValidateProviderCommitArtifacts(
     const ProviderAttempt& attempt,
     const ProviderCommitRecord& commit,
-    int64_t now,
-    CMutableTransaction& final_transaction,
+    ProviderCommitArtifacts& artifacts,
     std::string& error)
 {
     error.clear();
-    final_transaction = CMutableTransaction{};
+    artifacts = {};
     if (attempt.version != ProviderAttempt::CURRENT_VERSION) {
         error = "PAYMASTER_PROVIDER_AUTHORIZATION_VERSION";
         return false;
     }
-    PaymasterResult signed_result;
-    const bool exact_persisted_provider_signature =
-        attempt.state == AttemptState::PROVIDER_SIGNED &&
-        !attempt.final_txid.IsNull() &&
-        !attempt.final_transaction.empty() &&
-        DecodeProviderSignedResultEnvelope(attempt, signed_result, error);
-    const bool exact_durable_commit_state =
-        attempt.state >= AttemptState::FINAL_COMMITTED &&
-        attempt.state <= AttemptState::MEMPOOL;
-    if (!exact_persisted_provider_signature && !exact_durable_commit_state) {
-        if (error.empty()) {
-            error = "PAYMASTER_PROVIDER_COMMIT_AUTHORIZATION_STATE";
-        }
-        return false;
-    }
-    if (now <= 0 || commit.version != ProviderCommitRecord::CURRENT_VERSION ||
+    if (commit.version != ProviderCommitRecord::CURRENT_VERSION ||
         commit.commit_key.IsNull() || commit.provider_id.IsNull() ||
         commit.quote_id.IsNull() || commit.template_commitment.IsNull() ||
         commit.final_txid.IsNull() || commit.raw_transaction_hash.IsNull() ||
         commit.final_transaction.empty() || commit.provider_inputs.empty() ||
-        commit.committed_at <= 0 || now < commit.committed_at ||
-        (exact_persisted_provider_signature &&
-         commit.committed_at < attempt.provider_signed_at)) {
+        commit.committed_at <= 0) {
         error = "PAYMASTER_PROVIDER_COMMIT_NOT_EXECUTABLE";
         return false;
     }
-
-    // retry_until limits creation of a new provider signature and network
-    // resubmission of a merely user-signed PSBT. It cannot revoke a complete
-    // transaction that was already persisted in PROVIDER_SIGNED before that
-    // boundary. Such an exact attempt may be promoted to its first atomic
-    // commit after a crash; later states are accepted only by callers that
-    // first loaded the byte-exact durable ProviderCommitRecord.
 
     PaymasterQuoteRequest request;
     PaymasterQuoteResponse response;
@@ -842,7 +817,48 @@ bool ValidateProviderCommitForExecution(
             trusted, error)) {
         return false;
     }
-    final_transaction = std::move(decoded);
+    artifacts.final_transaction = std::move(decoded);
+    artifacts.genesis_hash = request.intent.genesis_hash;
+    return true;
+}
+
+bool ValidateProviderCommitForExecution(
+    const ProviderAttempt& attempt,
+    const ProviderCommitRecord& commit,
+    int64_t now,
+    CMutableTransaction& final_transaction,
+    std::string& error)
+{
+    error.clear();
+    final_transaction = CMutableTransaction{};
+    if (attempt.version != ProviderAttempt::CURRENT_VERSION) {
+        error = "PAYMASTER_PROVIDER_AUTHORIZATION_VERSION";
+        return false;
+    }
+    PaymasterResult signed_result;
+    const bool exact_persisted_provider_signature =
+        attempt.state == AttemptState::PROVIDER_SIGNED &&
+        !attempt.final_txid.IsNull() &&
+        !attempt.final_transaction.empty() &&
+        DecodeProviderSignedResultEnvelope(attempt, signed_result, error);
+    const bool exact_durable_commit_state =
+        attempt.state >= AttemptState::FINAL_COMMITTED &&
+        attempt.state <= AttemptState::MEMPOOL;
+    if (!exact_persisted_provider_signature && !exact_durable_commit_state) {
+        if (error.empty()) error = "PAYMASTER_PROVIDER_COMMIT_AUTHORIZATION_STATE";
+        return false;
+    }
+    if (now <= 0 || now < commit.committed_at ||
+        (exact_persisted_provider_signature && commit.committed_at < attempt.provider_signed_at)) {
+        error = "PAYMASTER_PROVIDER_COMMIT_NOT_EXECUTABLE";
+        return false;
+    }
+    // retry_until limits creation of new signatures, not execution of an
+    // already persisted complete transaction. Lifecycle gates above remain
+    // separate from authentication used by historical finance observations.
+    ProviderCommitArtifacts artifacts;
+    if (!ValidateProviderCommitArtifacts(attempt, commit, artifacts, error)) return false;
+    final_transaction = std::move(artifacts.final_transaction);
     return true;
 }
 

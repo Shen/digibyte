@@ -9,8 +9,10 @@
 #include <key.h>
 #include <paymaster/directory.h>
 #include <paymaster/finance.h>
+#include <paymaster/psbt.h>
 #include <rpc/request.h>
 #include <rpc/util.h>
+#include <script/interpreter.h>
 #include <script/standard.h>
 #include <univalue.h>
 #include <util/time.h>
@@ -205,6 +207,156 @@ struct FinanceTestingSetup : WalletTestingSetup {
         event.state = ProviderFinanceEventState::CONFIRMED;
         event.confirmed_at = event.updated_at = 1001;
         return event;
+    }
+
+    std::pair<ProviderAttempt, ProviderCommitRecord> Transfer()
+    {
+        using paymaster_store::internal::CanonicalBytes;
+        LOCK(provider->cs_wallet);
+        CKey signer, user_key, spending_key;
+        ProviderIdentityRecord signing_identity;
+        BOOST_REQUIRE(GetPaymasterIdentityKey(*provider, signer, signing_identity, error));
+        ProviderPolicy policy;
+        policy.funding_models = FUNDING_MODEL_USER_PAID;
+        policy.fee_rate_bps = 1000;
+        policy.min_payment = DDCents{100};
+        policy.max_payment = DDCents{100000};
+        policy.quote_ttl = 60;
+        policy.maximum_network_fee = DGBSatoshis{500};
+        user_key.MakeNewKey(true);
+        spending_key.MakeNewKey(true);
+        TaprootBuilder user_taproot, provider_taproot;
+        user_taproot.Finalize(XOnlyPubKey{user_key.GetPubKey()});
+        provider_taproot.Finalize(XOnlyPubKey{spending_key.GetPubKey()});
+        const CScript user_script = GetScriptForDestination(user_taproot.GetOutput());
+        const CScript provider_script = GetScriptForDestination(provider_taproot.GetOutput());
+        CMutableTransaction user_previous, provider_previous;
+        user_previous.SetDigiDollarType(::DD_TX_TRANSFER);
+        user_previous.vin.emplace_back(COutPoint{uint256S("f301"), 0});
+        user_previous.vout.emplace_back(0, user_script);
+        user_previous.vout.emplace_back(0, CScript{} << OP_RETURN <<
+            std::vector<unsigned char>{'D', 'D'} << CScriptNum(::DD_TX_TRANSFER) << CScriptNum(1100));
+        provider_previous.vin.emplace_back(COutPoint{uint256S("f302"), 0});
+        provider_previous.vout.emplace_back(2000, provider_script);
+        const auto user_parent = MakeTransactionRef(user_previous);
+        const auto provider_parent = MakeTransactionRef(provider_previous);
+        CMutableTransaction transaction;
+        transaction.SetDigiDollarType(::DD_TX_TRANSFER);
+        transaction.vin.emplace_back(COutPoint{user_parent->GetHash(), 0});
+        transaction.vin.emplace_back(COutPoint{provider_parent->GetHash(), 0});
+        transaction.vout.emplace_back(0, user_script);
+        transaction.vout.emplace_back(0, provider_script);
+        transaction.vout.emplace_back(1500, provider_script);
+        transaction.vout.emplace_back(0, CScript{} << OP_RETURN <<
+            std::vector<unsigned char>{'D', 'D'} << CScriptNum(::DD_TX_TRANSFER) << CScriptNum(1000) << CScriptNum(100));
+        CollaborativePSBTTemplate trusted;
+        BOOST_REQUIRE_MESSAGE(CreateCollaborativePSBTTemplate(transaction,
+            {{transaction.vin[0].prevout, user_parent, InputRole::USER_DD},
+             {transaction.vin[1].prevout, provider_parent, InputRole::PROVIDER_DGB}}, trusted, error), error);
+        PaymentIntent intent;
+        intent.genesis_hash = Params().GenesisBlock().GetHash();
+        intent.provider_id = identity.provider_id;
+        intent.request_id = "550e8400-e29b-41d4-a716-446655449005";
+        intent.session_id = uint256S("f303");
+        intent.client_nonce = uint256S("f304");
+        intent.canonical_request_hash = uint256S("f305");
+        intent.user_dd_inputs = {transaction.vin[0].prevout};
+        intent.recipient_script = intent.user_dd_change_script = user_script;
+        intent.recipient_amount = DDCents{1000};
+        intent.offer_id = uint256S("f306");
+        intent.policy_hash = GetProviderPolicyHash(policy);
+        intent.funding_model = FundingModel::USER_PAID;
+        intent.expires_at = 2060;
+        const uint256 empty_merkle_root;
+        UserInputControlProof proof{intent.user_dd_inputs.front(), std::vector<unsigned char>(64)};
+        BOOST_REQUIRE(user_key.SignSchnorr(GetUserInputControlHash(intent, proof.outpoint),
+            proof.signature, &empty_merkle_root, uint256{}));
+        intent.user_input_proofs = {proof};
+        BOOST_REQUIRE_MESSAGE(ValidatePaymentIntent(intent, intent.genesis_hash, 2000,
+            {XOnlyPubKey{user_taproot.GetOutput()}}, error), error);
+        PaymasterQuote quote;
+        quote.genesis_hash = intent.genesis_hash;
+        quote.provider_id = identity.provider_id;
+        quote.quote_id = uint256S("f308");
+        quote.intent_hash = GetPaymentIntentHash(intent);
+        quote.offer_id = intent.offer_id;
+        quote.policy_hash = intent.policy_hash;
+        quote.funding_model = intent.funding_model;
+        quote.fee_rate_bps = policy.fee_rate_bps;
+        quote.service_fee = DDCents{100};
+        quote.network_fee = DGBSatoshis{500};
+        quote.provider_fee_script = quote.dgb_change_script = provider_script;
+        quote.reserved_dgb_inputs = {{transaction.vin[1].prevout, provider_previous, DGBSatoshis{2000}}};
+        quote.created_at = 2000;
+        quote.expires_at = 2060;
+        quote.retry_until = 2600;
+        quote.unsigned_transaction = transaction;
+        quote.unsigned_txid = CTransaction{transaction}.GetHash();
+        quote.template_commitment = GetCollaborativeTemplateCommitment(intent, quote, trusted);
+        quote.identity_signature.resize(64);
+        BOOST_REQUIRE(signer.SignSchnorr(GetPaymasterQuoteSignatureHash(quote),
+            quote.identity_signature, nullptr, uint256{}));
+        BOOST_REQUIRE_MESSAGE(ValidatePaymasterQuote(quote, intent, policy,
+            identity.identity_key, DDCents{100}, 2000, error), error);
+        PaymasterQuoteRequest request;
+        request.intent = intent;
+        PaymasterQuoteResponse response;
+        response.request_id = intent.request_id;
+        response.session_id = intent.session_id;
+        response.quote = quote;
+        ProviderAttempt attempt;
+        attempt.session_id = intent.session_id;
+        attempt.attempt_id = uint256S("f309");
+        attempt.provider_id = identity.provider_id;
+        attempt.provider_identity_key = identity.identity_key;
+        attempt.state = AttemptState::FINAL_COMMITTED;
+        attempt.client_nonce = intent.client_nonce;
+        attempt.intent_hash = quote.intent_hash;
+        attempt.quote_id = quote.quote_id;
+        attempt.template_commitment = quote.template_commitment;
+        attempt.commit_key = GetPaymasterCommitKey(identity.provider_id, intent.client_nonce,
+            quote.intent_hash, quote.quote_id, quote.template_commitment);
+        attempt.unsigned_txid = quote.unsigned_txid;
+        attempt.quote_request = CanonicalBytes(request);
+        attempt.signed_quote = CanonicalBytes(response);
+        attempt.unsigned_transaction = CanonicalBytes(transaction);
+        attempt.unsigned_psbt = CanonicalBytes(trusted.psbt);
+        attempt.input_roles = {ReservationRole::USER_DD, ReservationRole::PROVIDER_DGB};
+        attempt.quote_expires_at = quote.expires_at;
+        attempt.retry_until = quote.retry_until;
+        attempt.created_at = 2000;
+        attempt.updated_at = 2001;
+        BOOST_REQUIRE_MESSAGE(BuildProviderAuthorizationManifest(intent, quote, trusted,
+            uint256S("f30a"), attempt.provider_manifest, error), error);
+        const auto txdata = PrecomputePSBTData(trusted.psbt);
+        for (unsigned int index{0}; index < transaction.vin.size(); ++index) {
+            ScriptExecutionData execution;
+            execution.m_annex_init = true;
+            execution.m_annex_present = false;
+            uint256 sighash;
+            BOOST_REQUIRE(SignatureHashSchnorr(sighash, execution, CTransaction{transaction}, index,
+                SIGHASH_DEFAULT, SigVersion::TAPROOT, txdata, MissingDataBehavior::FAIL));
+            std::vector<unsigned char> signature(64);
+            BOOST_REQUIRE((index == 0 ? user_key : spending_key).SignSchnorr(
+                sighash, signature, &empty_merkle_root, uint256{}));
+            transaction.vin[index].scriptWitness.stack = {signature};
+        }
+        attempt.final_transaction = CanonicalBytes(transaction);
+        attempt.final_txid = CTransaction{transaction}.GetHash();
+        ProviderCommitRecord commit;
+        commit.commit_key = attempt.commit_key;
+        commit.provider_id = identity.provider_id;
+        commit.quote_id = quote.quote_id;
+        commit.template_commitment = quote.template_commitment;
+        commit.final_txid = attempt.final_txid;
+        commit.raw_transaction_hash = CTransaction{transaction}.GetWitnessHash();
+        commit.final_transaction = attempt.final_transaction;
+        commit.provider_inputs = {transaction.vin[1].prevout};
+        commit.committed_at = 2001;
+        commit.retry_until = quote.retry_until;
+        ProviderCommitArtifacts authenticated;
+        BOOST_REQUIRE_MESSAGE(ValidateProviderCommitArtifacts(attempt, commit, authenticated, error), error);
+        return {std::move(attempt), std::move(commit)};
     }
 
     std::pair<AlternativeRecoveryRecord, ProviderCommitRecord> Recovery(bool known_pool_funding = false)
@@ -413,6 +565,120 @@ struct FinanceTestingSetup : WalletTestingSetup {
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(paymaster_wallet_finance_tests, FinanceTestingSetup)
+
+BOOST_AUTO_TEST_CASE(transfer_finance_authenticates_expired_and_conflicted_history)
+{
+    auto [attempt, commit] = Transfer();
+    CMutableTransaction final;
+    BOOST_REQUIRE_MESSAGE(ValidateProviderCommitForExecution(attempt, commit,
+        std::max(GetTime(), attempt.retry_until + 1), final, error), error);
+    attempt.state = AttemptState::CONFLICTED;
+    ProviderCommitArtifacts artifacts;
+    BOOST_REQUIRE_MESSAGE(ValidateProviderCommitArtifacts(attempt, commit, artifacts, error), error);
+    BOOST_CHECK(!ValidateProviderCommitForExecution(attempt, commit,
+        std::max(GetTime(), attempt.retry_until + 1), final, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_COMMIT_AUTHORIZATION_STATE");
+
+    WalletBatch batch{*database};
+    ProviderFinanceMetadata metadata;
+    ProviderFinanceEvent prepared;
+    bool changed{false};
+    const auto before = database->m_records;
+    BOOST_REQUIRE_MESSAGE(paymaster_store::internal::PrepareProviderTransferFinanceEvent(
+        batch, identity, attempt, commit, Params().GenesisBlock().GetHash(),
+        metadata, prepared, changed, error), error);
+    BOOST_CHECK(changed);
+    BOOST_CHECK_EQUAL(prepared.dd_income.value, 100);
+    BOOST_CHECK_EQUAL(prepared.dgb_cost.value, 500);
+    BOOST_CHECK(database->m_records == before);
+
+    PaymentSession session;
+    session.request_id = attempt.provider_manifest.request_id;
+    session.session_id = attempt.session_id;
+    session.attempt_ids = {attempt.attempt_id};
+    session.created_at = session.updated_at = attempt.created_at;
+    BOOST_REQUIRE(batch.WritePaymasterSession(session));
+    BOOST_REQUIRE(batch.WritePaymasterAttempt(attempt));
+    BOOST_REQUIRE(batch.WritePaymasterProviderCommit(commit));
+    {
+        LOCK(provider->cs_wallet);
+        BOOST_REQUIRE(provider->AddToWallet(MakeTransactionRef(artifacts.final_transaction),
+            TxStateConfirmed{Params().GenesisBlock().GetHash(), 2, 0}));
+    }
+    size_t changed_events{0};
+    BOOST_REQUIRE_MESSAGE(RebuildProviderFinances(*provider, changed_events, error), error);
+    BOOST_CHECK_EQUAL(Metadata().event_count, 1U);
+    BOOST_CHECK_EQUAL(Metadata().totals.total.dd_income.value, 100);
+    BOOST_CHECK_EQUAL(Metadata().totals.total.dgb_cost.value, 500);
+    BOOST_CHECK_EQUAL(Metadata().totals.total.successful_transfers, 1U);
+    ProviderFinanceEvent stored;
+    BOOST_REQUIRE(batch.ReadPaymasterFinanceEvent(commit.commit_key, stored) == DatabaseReadStatus::FOUND);
+    BOOST_CHECK(stored.kind == ProviderFinanceEventKind::TRANSFER);
+    BOOST_CHECK(stored.funding_model == FundingModel::USER_PAID);
+    BOOST_REQUIRE_MESSAGE(paymaster_store::internal::PrepareProviderTransferFinanceEvent(
+        batch, identity, attempt, commit, Params().GenesisBlock().GetHash(),
+        metadata, prepared, changed, error), error);
+    BOOST_CHECK(!changed);
+}
+
+BOOST_AUTO_TEST_CASE(transfer_finance_rejects_changed_manifest_economics_at_every_ingress)
+{
+    auto [attempt, commit] = Transfer();
+    Drain();
+    WalletBatch batch{*database};
+    PaymentSession session;
+    session.request_id = attempt.provider_manifest.request_id;
+    session.session_id = attempt.session_id;
+    session.attempt_ids = {attempt.attempt_id};
+    session.created_at = session.updated_at = attempt.created_at;
+    BOOST_REQUIRE(batch.WritePaymasterSession(session));
+    BOOST_REQUIRE(batch.WritePaymasterProviderCommit(commit));
+    const auto corrupted = [&](int field) {
+        ProviderAttempt changed{attempt};
+        if (field == 0) ++changed.provider_manifest.service_fee.value;
+        if (field == 1) ++changed.provider_manifest.network_fee.value;
+        if (field == 2) changed.provider_manifest.funding_model = FundingModel::SPONSORED;
+        // Retain the saved manifest id: a derived event is not an independent
+        // authority for the unauthenticated economics underneath that id.
+        BOOST_REQUIRE(changed.provider_manifest.manifest_id == attempt.provider_manifest.manifest_id);
+        return changed;
+    };
+    for (const bool prior_event : {false, true}) {
+        BOOST_CHECK_EQUAL(Metadata().event_count, prior_event ? 1U : 0U);
+        for (int field{0}; field < 3; ++field) {
+            const auto changed_attempt = corrupted(field);
+            BOOST_REQUIRE(batch.WritePaymasterAttempt(changed_attempt));
+            const auto before = database->m_records;
+            ProviderFinanceMetadata metadata;
+            ProviderFinanceEvent event;
+            bool changed{false};
+            BOOST_CHECK(!paymaster_store::internal::PrepareProviderTransferFinanceEvent(
+                batch, identity, changed_attempt, commit, Params().GenesisBlock().GetHash(),
+                metadata, event, changed, error));
+            BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_AUTH_MANIFEST_INVALID");
+            BOOST_CHECK(!ReconcileProviderFinanceReport(*provider, false, error));
+            BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_AUTH_MANIFEST_INVALID");
+            BOOST_CHECK(database->m_records == before);
+        }
+        // Full reconstruction must apply the same authority check even when
+        // no earlier event exists to expose an immutable-event conflict.
+        for (int field{0}; field < 3; ++field) {
+            BOOST_REQUIRE(batch.WritePaymasterAttempt(corrupted(field)));
+            const auto before = database->m_records;
+            size_t changed{0};
+            BOOST_CHECK(!RebuildProviderFinances(*provider, changed, error));
+            BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_AUTH_MANIFEST_INVALID");
+            BOOST_CHECK(database->m_records == before);
+        }
+        BOOST_REQUIRE(batch.WritePaymasterAttempt(attempt));
+        size_t changed{0};
+        BOOST_REQUIRE_MESSAGE(RebuildProviderFinances(*provider, changed, error), error);
+        ProviderFinanceEvent event;
+        BOOST_REQUIRE(batch.ReadPaymasterFinanceEvent(commit.commit_key, event) == DatabaseReadStatus::FOUND);
+        BOOST_CHECK_EQUAL(event.dd_income.value, 100);
+        BOOST_CHECK_EQUAL(event.dgb_cost.value, 500);
+    }
+}
 
 BOOST_AUTO_TEST_CASE(warm_finance_work_does_not_rescan_100_1000_8192_sessions)
 {
