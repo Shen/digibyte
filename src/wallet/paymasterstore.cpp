@@ -213,6 +213,36 @@ bool RequireNoAuthorizationEvidence(WalletBatch& batch, const uint256& commit_ke
     return false;
 }
 
+bool HasAcceptedClientManifest(const ProviderAttempt& attempt, int64_t observation_time)
+{
+    using namespace DigiDollar::Paymaster;
+    // A persisted signature or later attempt state is never a substitute for
+    // the wallet's durable acceptance of this exact, current manifest.
+    return attempt.client_manifest.version ==
+               ClientAuthorizationManifest::CURRENT_VERSION &&
+           !attempt.client_manifest.manifest_id.IsNull() &&
+           !attempt.accepted_client_manifest_id.IsNull() &&
+           attempt.accepted_client_manifest_id ==
+               attempt.client_manifest.manifest_id &&
+           attempt.created_at > 0 &&
+           attempt.client_manifest_accepted_at > 0 &&
+           attempt.client_manifest_accepted_at >= attempt.created_at &&
+           attempt.client_manifest_accepted_at <= observation_time &&
+           attempt.client_manifest_accepted_at <= attempt.updated_at &&
+           attempt.retry_until > 0 &&
+           attempt.client_manifest_accepted_at <= attempt.retry_until &&
+           attempt.client_manifest_accepted_at <=
+               attempt.client_manifest.expires_at &&
+           attempt.capacity_snapshot.version ==
+               ValidatedCapacitySnapshot::CURRENT_VERSION &&
+           attempt.capacity_snapshot.validated_at > 0 &&
+           attempt.capacity_snapshot.expires_at > 0 &&
+           attempt.client_manifest_accepted_at >=
+               attempt.capacity_snapshot.validated_at &&
+           attempt.client_manifest_accepted_at <=
+               attempt.capacity_snapshot.expires_at;
+}
+
 bool RequireNoClientAuthorizationEvidence(WalletBatch& batch, const PaymentSession& session,
                                           std::string& error)
 {

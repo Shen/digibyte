@@ -77,6 +77,9 @@ bool RequireNoAuthorizationEvidence(WalletBatch& batch, const uint256& commit_ke
  * authority. A bound negative response alone is not signature evidence. */
 bool RequireNoClientAuthorizationEvidence(WalletBatch& batch, const PaymentSession& session,
                                           std::string& error);
+/** Historical acceptance binding; expiry now never invalidates an old proof.
+ * This predicate alone does not establish an active attempt or permit signing. */
+bool HasAcceptedClientManifest(const ProviderAttempt& attempt, int64_t observation_time);
 bool RegisterProviderPoolSuccessors(const ProviderAttempt& attempt,
                                     const ProviderCommitRecord& commit,
                                     const CTransaction& transaction,

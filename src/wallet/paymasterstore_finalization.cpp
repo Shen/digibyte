@@ -844,28 +844,8 @@ bool PaymasterStore::StoreClientResult(const PaymasterResult& result,
         AttemptHasReached(attempt.state, AttemptState::USER_SIGNED) ||
         attempt.state == AttemptState::AMBIGUOUS;
     const bool has_current_accepted_client_manifest =
-        attempt.client_manifest.version ==
-            ClientAuthorizationManifest::CURRENT_VERSION &&
-        !attempt.client_manifest.manifest_id.IsNull() &&
-        attempt.accepted_client_manifest_id ==
-            attempt.client_manifest.manifest_id &&
-        attempt.created_at > 0 &&
-        attempt.client_manifest_accepted_at > 0 &&
-        attempt.client_manifest_accepted_at >= attempt.created_at &&
-        attempt.client_manifest_accepted_at <= now &&
-        attempt.client_manifest_accepted_at <= attempt.updated_at &&
-        attempt.client_manifest_accepted_at <= session.updated_at &&
-        attempt.client_manifest_accepted_at <= attempt.retry_until &&
-        attempt.client_manifest_accepted_at <=
-            attempt.client_manifest.expires_at &&
-        attempt.capacity_snapshot.version ==
-            ValidatedCapacitySnapshot::CURRENT_VERSION &&
-        attempt.capacity_snapshot.validated_at > 0 &&
-        attempt.capacity_snapshot.expires_at > 0 &&
-        attempt.client_manifest_accepted_at >=
-            attempt.capacity_snapshot.validated_at &&
-        attempt.client_manifest_accepted_at <=
-            attempt.capacity_snapshot.expires_at;
+        HasAcceptedClientManifest(attempt, now) &&
+        attempt.client_manifest_accepted_at <= session.updated_at;
     const bool final_artifact_known = AttemptHasReached(attempt.state, AttemptState::FINAL_COMMITTED) ||
                                       !attempt.final_txid.IsNull() ||
                                       !attempt.final_transaction.empty();
