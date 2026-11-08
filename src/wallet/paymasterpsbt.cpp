@@ -75,6 +75,20 @@ void CopySignatures(const PSBTInput& source, PSBTInput& destination)
 
 } // namespace
 
+bool CheckPaymasterNewSignatureInputs(
+    const CWallet& wallet, const std::vector<COutPoint>& inputs, std::string& error)
+{
+    LOCK(wallet.cs_wallet);
+    for (const auto& input : inputs) {
+        if (wallet.IsOrdinaryLockedCoin(input)) {
+            error = "PAYMASTER_PROVIDER_INPUT_LOCKED";
+            return false;
+        }
+    }
+    error.clear();
+    return true;
+}
+
 bool SignCollaborativePSBTForParty(
     CWallet& wallet,
     PartiallySignedTransaction& psbt,
@@ -109,13 +123,11 @@ bool SignCollaborativePSBTForParty(
     // This entry point creates a new signature. Exact durable provider replay
     // uses its saved bytes instead; our own reservation reason is not a veto.
     if (party == SigningParty::PROVIDER) {
+        std::vector<COutPoint> provider_inputs;
         for (size_t index = 0; index < psbt.inputs.size(); ++index) {
-            if (IsInputOwnedBy(trusted_template.input_roles[index], party) &&
-                wallet.IsOrdinaryLockedCoin(psbt.tx->vin[index].prevout)) {
-                error = "PAYMASTER_PROVIDER_INPUT_LOCKED";
-                return false;
-            }
+            if (IsInputOwnedBy(trusted_template.input_roles[index], party)) provider_inputs.push_back(psbt.tx->vin[index].prevout);
         }
+        if (!CheckPaymasterNewSignatureInputs(wallet, provider_inputs, error)) return false;
     }
 
     PartiallySignedTransaction working{psbt};

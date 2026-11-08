@@ -19,6 +19,11 @@ namespace wallet {
 
 class CWallet;
 
+/** A new provider signature must respect ordinary/manual lock ownership.
+ * Paymaster's own reservation reason is checked by the calling operation. */
+bool CheckPaymasterNewSignatureInputs(
+    const CWallet& wallet, const std::vector<COutPoint>& inputs, std::string& error);
+
 /** Sign and finalize only inputs assigned to party. The untrusted PSBT is
  * validated before signing, and the result is reconstructed from the trusted
  * input so FillPSBT cannot add or alter fields outside the permitted signature
