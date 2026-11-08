@@ -4745,7 +4745,7 @@ BOOST_FIXTURE_TEST_CASE(provider_final_commit_spends_budget_atomically,
                               /*shared_provider_input=*/nullptr,
                               /*shared_client_nonce=*/{},
                               DGBSatoshis{network_fee},
-                              transaction_output_value),
+                              transaction_output_value, Params().GenesisBlock().GetHash()),
                           error);
     BOOST_REQUIRE(PersistProviderQuoteEnvironment(
         m_wallet, environment, {fixture.pool_entry}));
@@ -7471,6 +7471,30 @@ BOOST_FIXTURE_TEST_CASE(automatic_recovery_rejection_allows_following_quote_and_
     BOOST_CHECK(CheckpointBytes() == checkpoint_before);
 }
 
+static void AddPendingOperationalTarget(QuoteRequestProcessingSetup& setup)
+{
+    // Service fairness runs while a useful target is pending. The reserved
+    // quote's 2,000-satoshi input is below the configured target/fee minimum.
+    CMutableTransaction pending;
+    pending.vin.emplace_back(COutPoint{SecurityTestId(setup.seed, 195), 0});
+    pending.vout.emplace_back(setup.environment.policy.maximum_network_fee.value,
+                             setup.environment.identity.identity_script);
+    const auto transaction = MakeTransactionRef(pending);
+    LOCK(setup.wallet.cs_wallet);
+    BOOST_REQUIRE(setup.wallet.AddToWallet(transaction, TxStateInMempool{}));
+    WalletBatch batch{setup.wallet.GetDatabase()};
+    std::vector<ProviderPoolEntry> pool;
+    BOOST_REQUIRE(batch.ReadPaymasterProviderPool(pool));
+    ProviderPoolEntry entry;
+    entry.outpoint = COutPoint{transaction->GetHash(), 0};
+    entry.purpose = PoolPurpose::OPERATIONAL;
+    entry.script_pub_key = pending.vout.front().scriptPubKey;
+    entry.dgb_value = DGBSatoshis{pending.vout.front().nValue};
+    entry.updated_at = GetTime();
+    pool.push_back(entry);
+    BOOST_REQUIRE(batch.WritePaymasterProviderPool(pool));
+}
+
 static void CheckAutomaticSubmitProgress(QuoteRequestProcessingSetup& setup, bool flood_recovery)
 {
     auto& environment = setup.environment;
@@ -7480,6 +7504,7 @@ static void CheckAutomaticSubmitProgress(QuoteRequestProcessingSetup& setup, boo
     const auto& seed = setup.seed;
     environment.settings.operation_mode = ProviderOperationMode::AUTOMATIC;
     BOOST_REQUIRE(WalletBatch{wallet.GetDatabase()}.WritePaymasterSettings(environment.settings));
+    AddPendingOperationalTarget(setup);
     RunPaymasterProviderServiceCycle(context, wallet);
     const auto initial = manager.GetProviderServiceStatus(wallet.GetName());
     BOOST_REQUIRE(initial.state == ProviderServiceState::WAITING_FOR_LIQUIDITY_CONFIRMATION);
@@ -7576,6 +7601,7 @@ static void CheckAutomaticRequestProgress(QuoteRequestProcessingSetup& setup, bo
     const auto& seed = setup.seed;
     environment.settings.operation_mode = ProviderOperationMode::AUTOMATIC;
     BOOST_REQUIRE(WalletBatch{wallet.GetDatabase()}.WritePaymasterSettings(environment.settings));
+    AddPendingOperationalTarget(setup);
     RunPaymasterProviderServiceCycle(context, wallet);
     const auto initial = manager.GetProviderServiceStatus(wallet.GetName());
     BOOST_REQUIRE(initial.state == ProviderServiceState::WAITING_FOR_LIQUIDITY_CONFIRMATION);
