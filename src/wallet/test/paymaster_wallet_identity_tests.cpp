@@ -37,6 +37,7 @@
 #include <wallet/paymasterstore.h>
 #include <wallet/rpc/paymaster.h>
 #include <wallet/rpc/paymaster_internal.h>
+#include <wallet/test/paymaster_chain.h>
 #include <wallet/test/util.h>
 #include <wallet/test/wallet_test_fixture.h>
 #include <wallet/wallet.h>
@@ -3876,6 +3877,7 @@ BOOST_AUTO_TEST_CASE(pool_setup_journal_survives_abort_and_rejects_unknown_recor
 
 BOOST_AUTO_TEST_CASE(empty_wallet_refill_waits_for_funds_without_duplicate_plans)
 {
+    m_wallet.SetBroadcastTransactions(true);
     using namespace paymaster_rpc::internal;
     ScopedPaymasterMockTime clock{2000};
     LOCK(m_wallet.cs_wallet);
@@ -3940,23 +3942,26 @@ BOOST_AUTO_TEST_CASE(partial_dgb_refill_funds_whole_slots_and_preserves_recovery
 {
     using namespace paymaster_rpc::internal;
     ScopedPaymasterMockTime clock{2000};
-    LOCK(m_wallet.cs_wallet);
-    m_wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
-    m_wallet.SetupDescriptorScriptPubKeyMans();
-    m_wallet.SetLastBlockProcessed(100, Params().GenesisBlock().GetHash());
-    m_wallet.SetBroadcastTransactions(false);
-    m_wallet.m_pay_tx_fee = CFeeRate{10000000};
+    PaymasterBroadcastChain broadcast_chain{*m_node.chain};
+    CWallet wallet{&broadcast_chain, "partial_dgb_refill_funds_whole_slots_and_preserves_recovery", CreateMockableWalletDatabase()};
+    wallet.LoadWallet();
+    LOCK(wallet.cs_wallet);
+    wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+    wallet.SetupDescriptorScriptPubKeyMans();
+    wallet.SetLastBlockProcessed(100, Params().GenesisBlock().GetHash());
+    wallet.SetBroadcastTransactions(true);
+    wallet.m_pay_tx_fee = CFeeRate{10000000};
     ProviderIdentityRecord identity;
     std::string error;
-    BOOST_REQUIRE(CreatePaymasterIdentity(m_wallet, "Partial refill", 1000, identity, error));
-    const auto destination = m_wallet.GetNewDestination(OutputType::BECH32M, "partial refill test");
+    BOOST_REQUIRE(CreatePaymasterIdentity(wallet, "Partial refill", 1000, identity, error));
+    const auto destination = wallet.GetNewDestination(OutputType::BECH32M, "partial refill test");
     BOOST_REQUIRE(destination);
     const auto script = GetScriptForDestination(*destination);
     CMutableTransaction funding;
     funding.vin.emplace_back(COutPoint{uint256::ONE, 0});
     funding.vout.emplace_back(30000000, script);
     for (int i = 0; i < 3; ++i) funding.vout.emplace_back(MIN_ADMISSION_DGB_SATOSHIS, script);
-    BOOST_REQUIRE(m_wallet.AddToWallet(MakeTransactionRef(funding),
+    BOOST_REQUIRE(wallet.AddToWallet(MakeTransactionRef(funding),
         TxStateConfirmed{Params().GenesisBlock().GetHash(), 1, 0}));
     std::vector<ProviderPoolEntry> pool;
     for (uint32_t i = 1; i < 4; ++i) {
@@ -3969,7 +3974,7 @@ BOOST_AUTO_TEST_CASE(partial_dgb_refill_funds_whole_slots_and_preserves_recovery
         entry.updated_at = 1000;
         pool.push_back(entry);
     }
-    WalletBatch batch{m_wallet.GetDatabase()};
+    WalletBatch batch{wallet.GetDatabase()};
     BOOST_REQUIRE(batch.WritePaymasterProviderPool(pool));
     ProviderPolicy offer;
     offer.funding_models = FUNDING_MODEL_SPONSORED;
@@ -3989,7 +3994,7 @@ BOOST_AUTO_TEST_CASE(partial_dgb_refill_funds_whole_slots_and_preserves_recovery
     readiness.policy = offer;
     readiness.liquidity_policy = policy;
     readiness.pool_entries = pool;
-    const auto status = ProviderLiquidityStatusToJSON(readiness, 2000, &m_wallet);
+    const auto status = ProviderLiquidityStatusToJSON(readiness, 2000, &wallet);
     const auto& capital = status.find_value("refill_funding");
     BOOST_CHECK_EQUAL(capital.find_value("required_dgb_satoshis").getInt<int64_t>(), 60000000);
     BOOST_CHECK_EQUAL(capital.find_value("available_dgb_satoshis").getInt<int64_t>(), 30000000);
@@ -3998,22 +4003,22 @@ BOOST_AUTO_TEST_CASE(partial_dgb_refill_funds_whole_slots_and_preserves_recovery
     // A lower transaction fee ceiling must still stop even a smaller refill.
     auto low_fee = policy;
     low_fee.maximum_maintenance_fee_per_transaction = DGBSatoshis{1};
-    BOOST_CHECK(!RunAutomaticDGBReplenishment(m_wallet, low_fee, 0, 3, error));
+    BOOST_CHECK(!RunAutomaticDGBReplenishment(wallet, low_fee, 0, 3, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_MAINTENANCE_FEE_EXCEEDED");
-    BOOST_CHECK_EQUAL(m_wallet.mapWallet.size(), 1U);
-    BOOST_REQUIRE_MESSAGE(RunAutomaticDGBReplenishment(m_wallet, policy, 0, 3, error), error);
+    BOOST_CHECK_EQUAL(wallet.mapWallet.size(), 1U);
+    BOOST_REQUIRE_MESSAGE(RunAutomaticDGBReplenishment(wallet, policy, 0, 3, error), error);
     BOOST_REQUIRE(batch.ReadPaymasterProviderPool(pool));
     const auto counts = CountLiquiditySlots(pool, PoolPurpose::OPERATIONAL, PoolAsset::DGB, 3, 20000000);
     BOOST_CHECK_EQUAL(counts.ready, 0U);
     BOOST_CHECK_EQUAL(counts.pending, 1U);
     BOOST_CHECK_EQUAL(counts.missing, 2U);
     readiness.pool_entries = pool;
-    const auto partial_status = ProviderLiquidityStatusToJSON(readiness, 2000, &m_wallet);
+    const auto partial_status = ProviderLiquidityStatusToJSON(readiness, 2000, &wallet);
     BOOST_CHECK_EQUAL(partial_status.find_value("maintenance_state").get_str(), "waiting_for_liquidity_confirmation");
     BOOST_CHECK_EQUAL(partial_status.find_value("refill_funding").find_value("required_dgb_satoshis").getInt<int64_t>(), 40000000);
     BOOST_REQUIRE_EQUAL(pool.size(), 4U);
     BOOST_CHECK_EQUAL(pool.back().dgb_value.value, 20000000); // A whole slot, never 0.10 DGB fragments.
-    for (uint32_t i = 1; i < 4; ++i) BOOST_CHECK(!m_wallet.IsSpent(COutPoint{funding.GetHash(), i}));
+    for (uint32_t i = 1; i < 4; ++i) BOOST_CHECK(!wallet.IsSpent(COutPoint{funding.GetHash(), i}));
 
     ProviderMaintenanceLedger ledger;
     BOOST_REQUIRE(batch.ReadPaymasterMaintenanceLedger(ledger));
@@ -4030,30 +4035,30 @@ BOOST_AUTO_TEST_CASE(partial_dgb_refill_funds_whole_slots_and_preserves_recovery
     BOOST_REQUIRE(batch.WritePaymasterMaintenanceLedger(ledger));
     for (int retry = 0; retry < 2; ++retry) {
         size_t recovered{0};
-        BOOST_REQUIRE_MESSAGE(ReconcileProviderMaintenance(m_wallet, recovered, error), error);
+        BOOST_REQUIRE_MESSAGE(ReconcileProviderMaintenance(wallet, recovered, error), error);
         BOOST_REQUIRE(batch.ReadPaymasterMaintenanceLedger(ledger));
         BOOST_CHECK(ledger.records.back().transaction_id == txid);
         BOOST_REQUIRE(batch.ReadPaymasterProviderPool(pool));
         BOOST_CHECK_EQUAL(pool.size(), 4U);
-        BOOST_CHECK_EQUAL(m_wallet.mapWallet.size(), 2U);
+        BOOST_CHECK_EQUAL(wallet.mapWallet.size(), 2U);
     }
 
     // After confirmation, new funding may fill the remaining two whole slots,
     // but the first batch's actual cost still counts against the rolling limit.
-    m_wallet.mapWallet.at(txid).m_state = TxStateConfirmed{Params().GenesisBlock().GetHash(), 1, 0};
+    wallet.mapWallet.at(txid).m_state = TxStateConfirmed{Params().GenesisBlock().GetHash(), 1, 0};
     size_t reconciled{0};
-    BOOST_REQUIRE_MESSAGE(ReconcileProviderMaintenance(m_wallet, reconciled, error), error);
+    BOOST_REQUIRE_MESSAGE(ReconcileProviderMaintenance(wallet, reconciled, error), error);
     CMutableTransaction additional;
     additional.vin.emplace_back(COutPoint{uint256::ONE, 1});
     additional.vout.emplace_back(50000000, script);
-    BOOST_REQUIRE(m_wallet.AddToWallet(MakeTransactionRef(additional),
+    BOOST_REQUIRE(wallet.AddToWallet(MakeTransactionRef(additional),
         TxStateConfirmed{Params().GenesisBlock().GetHash(), 1, 0}));
     auto limited = policy;
     limited.maximum_maintenance_fee_per_hour = limited.maximum_maintenance_fee_per_transaction;
-    BOOST_CHECK(!RunAutomaticDGBReplenishment(m_wallet, limited, 0, 2, error));
+    BOOST_CHECK(!RunAutomaticDGBReplenishment(wallet, limited, 0, 2, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_MAINTENANCE_LIMIT_EXHAUSTED");
-    BOOST_CHECK_EQUAL(m_wallet.mapWallet.size(), 3U);
-    BOOST_REQUIRE_MESSAGE(RunAutomaticDGBReplenishment(m_wallet, policy, 0, 2, error), error);
+    BOOST_CHECK_EQUAL(wallet.mapWallet.size(), 3U);
+    BOOST_REQUIRE_MESSAGE(RunAutomaticDGBReplenishment(wallet, policy, 0, 2, error), error);
     BOOST_REQUIRE(batch.ReadPaymasterProviderPool(pool));
     const auto continued = CountLiquiditySlots(pool, PoolPurpose::OPERATIONAL, PoolAsset::DGB, 3, 20000000);
     BOOST_CHECK_EQUAL(continued.ready, 1U);
@@ -4062,7 +4067,13 @@ BOOST_AUTO_TEST_CASE(partial_dgb_refill_funds_whole_slots_and_preserves_recovery
     BOOST_REQUIRE(batch.ReadPaymasterMaintenanceLedger(ledger));
     BOOST_REQUIRE_EQUAL(ledger.records.back().outputs.size(), 2U);
     for (const auto& output : ledger.records.back().outputs) BOOST_CHECK_EQUAL(output.dgb_value.value, 20000000);
-    for (uint32_t i = 1; i < 4; ++i) BOOST_CHECK(!m_wallet.IsSpent(COutPoint{funding.GetHash(), i}));
+    for (uint32_t i = 1; i < 4; ++i) BOOST_CHECK(!wallet.IsSpent(COutPoint{funding.GetHash(), i}));
+    BOOST_CHECK(!broadcast_chain.submissions.empty());
+    for (const auto& submission : broadcast_chain.submissions) {
+        BOOST_CHECK(submission.relay);
+        BOOST_CHECK(wallet.mapWallet.count(submission.tx->GetHash()) != 0);
+        BOOST_CHECK(submission.tx->GetWitnessHash() == wallet.mapWallet.at(submission.tx->GetHash()).tx->GetWitnessHash());
+    }
 }
 
 BOOST_AUTO_TEST_CASE(carrier_refill_fences_only_after_exact_construction)
@@ -4070,12 +4081,13 @@ BOOST_AUTO_TEST_CASE(carrier_refill_fences_only_after_exact_construction)
     ScopedPaymasterMockTime clock{2000};
     SyncWithValidationInterfaceQueue();
     for (const bool fail_after_commit : {false, true}) {
-        CWallet wallet{m_node.chain.get(), fail_after_commit ? "refill-after-commit" : "refill-before-commit", CreateMockableWalletDatabase()};
+        PaymasterBroadcastChain broadcast_chain{*m_node.chain};
+        CWallet wallet{&broadcast_chain, fail_after_commit ? "refill-after-commit" : "refill-before-commit", CreateMockableWalletDatabase()};
         LOCK(wallet.cs_wallet);
         wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
         wallet.SetupDescriptorScriptPubKeyMans();
         wallet.SetLastBlockProcessed(100, Params().GenesisBlock().GetHash());
-        wallet.SetBroadcastTransactions(false);
+        wallet.SetBroadcastTransactions(true);
         wallet.EnsureDDWallet();
         auto* dd_wallet = wallet.GetDDWallet();
         BOOST_REQUIRE(dd_wallet);
@@ -4127,6 +4139,8 @@ BOOST_AUTO_TEST_CASE(carrier_refill_fences_only_after_exact_construction)
         const bool replenished = paymaster_app::RunAutomaticCarrierReplenishment(wallet, policy, 2, 0, error);
         database.m_on_write = {};
         database.m_refuse_write = {};
+        if (fail_after_commit) BOOST_CHECK_EQUAL(broadcast_chain.submissions.size(), 1U);
+        else BOOST_CHECK(broadcast_chain.submissions.empty());
         BOOST_CHECK(!replenished);
         PaymasterCheckpoint checkpoint;
         BOOST_REQUIRE(database.MakeBatch()->Read(std::string{"pmcheckpoint"}, checkpoint));
@@ -4301,29 +4315,32 @@ BOOST_AUTO_TEST_CASE(carrier_withdrawal_stale_fee_input_does_not_fence_provider)
     }
 }
 
-BOOST_AUTO_TEST_CASE(carrier_refill_preserves_multiple_outputs_and_send_history_without_broadcast)
+BOOST_AUTO_TEST_CASE(carrier_refill_preserves_multiple_outputs_and_send_history_with_submission)
 {
     ScopedPaymasterMockTime clock{2000};
-    LOCK(m_wallet.cs_wallet);
-    m_wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
-    m_wallet.SetupDescriptorScriptPubKeyMans();
-    m_wallet.SetLastBlockProcessed(100, Params().GenesisBlock().GetHash());
-    m_wallet.SetBroadcastTransactions(false);
-    m_wallet.EnsureDDWallet();
-    auto* dd_wallet = m_wallet.GetDDWallet();
+    PaymasterBroadcastChain broadcast_chain{*m_node.chain};
+    CWallet wallet{&broadcast_chain, "carrier_refill_preserves_multiple_outputs_and_send_history_with_submission", CreateMockableWalletDatabase()};
+    wallet.LoadWallet();
+    LOCK(wallet.cs_wallet);
+    wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+    wallet.SetupDescriptorScriptPubKeyMans();
+    wallet.SetLastBlockProcessed(100, Params().GenesisBlock().GetHash());
+    wallet.SetBroadcastTransactions(true);
+    wallet.EnsureDDWallet();
+    auto* dd_wallet = wallet.GetDDWallet();
     BOOST_REQUIRE(dd_wallet);
     ProviderIdentityRecord identity;
     std::string error;
-    BOOST_REQUIRE(CreatePaymasterIdentity(m_wallet, "Multiple carrier refill", 1000, identity, error));
+    BOOST_REQUIRE(CreatePaymasterIdentity(wallet, "Multiple carrier refill", 1000, identity, error));
     CMutableTransaction funding;
     funding.vin.emplace_back(COutPoint{uint256::ONE, 0});
     funding.vout.emplace_back(COIN, identity.identity_script);
     funding.vout.emplace_back(0, identity.identity_script);
-    BOOST_REQUIRE(m_wallet.AddToWallet(MakeTransactionRef(funding),
+    BOOST_REQUIRE(wallet.AddToWallet(MakeTransactionRef(funding),
         TxStateConfirmed{Params().GenesisBlock().GetHash(), 1, 0}));
     const COutPoint source{funding.GetHash(), 1};
     dd_wallet->AddDDUTXO(source, 200);
-    WalletBatch batch{m_wallet.GetDatabase()};
+    WalletBatch batch{wallet.GetDatabase()};
     BOOST_REQUIRE(batch.WriteDDUTXO(source, 200));
     ProviderLiquidityPolicy policy;
     policy.paid_maintenance_approved = true;
@@ -4331,11 +4348,11 @@ BOOST_AUTO_TEST_CASE(carrier_refill_preserves_multiple_outputs_and_send_history_
     policy.maximum_maintenance_fee_per_hour = DGBSatoshis{40000000};
     policy.maximum_maintenance_fee_per_day = DGBSatoshis{60000000};
     policy.updated_at = 1000;
-    BOOST_REQUIRE_MESSAGE(paymaster_app::RunAutomaticCarrierReplenishment(m_wallet, policy, 2, 0, error), error);
+    BOOST_REQUIRE_MESSAGE(paymaster_app::RunAutomaticCarrierReplenishment(wallet, policy, 2, 0, error), error);
     ProviderMaintenanceLedger ledger;
     BOOST_REQUIRE(batch.ReadPaymasterMaintenanceLedger(ledger));
     const uint256 txid = ledger.records.back().transaction_id;
-    const auto transaction = m_wallet.mapWallet.at(txid).tx;
+    const auto transaction = wallet.mapWallet.at(txid).tx;
     std::vector<ProviderPoolEntry> pool;
     BOOST_REQUIRE(batch.ReadPaymasterProviderPool(pool));
     BOOST_REQUIRE_EQUAL(pool.size(), 2U);
@@ -4346,7 +4363,7 @@ BOOST_AUTO_TEST_CASE(carrier_refill_preserves_multiple_outputs_and_send_history_
         BOOST_REQUIRE(batch.ReadDDUTXO(entry.outpoint, amount));
         BOOST_CHECK_EQUAL(amount, 100);
     }
-    BOOST_CHECK(m_wallet.IsSpent(source));
+    BOOST_CHECK(wallet.IsSpent(source));
     BOOST_CHECK_EQUAL(dd_wallet->GetDDFromUTXO(source), 0);
     BOOST_CHECK_EQUAL(dd_wallet->GetTotalDDBalance(), 0);
     BOOST_CHECK_EQUAL(dd_wallet->GetSpendableDDBalance(), 0);
@@ -4360,10 +4377,10 @@ BOOST_AUTO_TEST_CASE(carrier_refill_preserves_multiple_outputs_and_send_history_
     BOOST_CHECK_EQUAL(history.category, "send");
     BOOST_CHECK_EQUAL(history.address, "multiple");
     BOOST_CHECK_EQUAL(history.comment, "Paymaster automatic carrier replenishment");
-    m_wallet.mapWallet.at(txid).m_state = TxStateConfirmed{Params().GenesisBlock().GetHash(), 1, 0};
+    wallet.mapWallet.at(txid).m_state = TxStateConfirmed{Params().GenesisBlock().GetHash(), 1, 0};
     dd_wallet->ProcessTransactionForDD(*transaction, txid);
     size_t recovered{0};
-    BOOST_REQUIRE_MESSAGE(paymaster_app::ReconcileProviderMaintenance(m_wallet, recovered, error), error);
+    BOOST_REQUIRE_MESSAGE(paymaster_app::ReconcileProviderMaintenance(wallet, recovered, error), error);
     BOOST_REQUIRE(batch.ReadPaymasterProviderPool(pool));
     BOOST_CHECK_EQUAL(paymaster_app::CountLiquiditySlots(pool, PoolPurpose::ADMISSION, PoolAsset::DD_CARRIER, 2).ready, 2U);
     BOOST_CHECK_EQUAL(dd_wallet->GetTotalDDBalance(), 200);
@@ -4372,25 +4389,34 @@ BOOST_AUTO_TEST_CASE(carrier_refill_preserves_multiple_outputs_and_send_history_
     BOOST_CHECK_EQUAL(dd_wallet->GetPendingDDBalance(), 0);
     CAmount amount{0};
     BOOST_CHECK(!batch.ReadDDUTXO(source, amount));
-    BOOST_REQUIRE_MESSAGE(CheckPaymasterProviderRestoreGuard(m_wallet, error), error);
+    BOOST_REQUIRE_MESSAGE(CheckPaymasterProviderRestoreGuard(wallet, error), error);
+    BOOST_CHECK(!broadcast_chain.submissions.empty());
+    for (const auto& submission : broadcast_chain.submissions) {
+        BOOST_CHECK(submission.relay);
+        BOOST_CHECK(wallet.mapWallet.count(submission.tx->GetHash()) != 0);
+        BOOST_CHECK(submission.tx->GetWitnessHash() == wallet.mapWallet.at(submission.tx->GetHash()).tx->GetWitnessHash());
+    }
 }
 
 BOOST_AUTO_TEST_CASE(partial_carrier_refill_preserves_whole_slots_and_admission_priority)
 {
     using namespace paymaster_rpc::internal;
     ScopedPaymasterMockTime clock{2000};
-    LOCK(m_wallet.cs_wallet);
-    m_wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
-    m_wallet.SetupDescriptorScriptPubKeyMans();
-    m_wallet.SetLastBlockProcessed(100, Params().GenesisBlock().GetHash());
-    m_wallet.SetBroadcastTransactions(false);
-    m_wallet.EnsureDDWallet();
-    auto* dd_wallet = m_wallet.GetDDWallet();
+    PaymasterBroadcastChain broadcast_chain{*m_node.chain};
+    CWallet wallet{&broadcast_chain, "partial_carrier_refill_preserves_whole_slots_and_admission_priority", CreateMockableWalletDatabase()};
+    wallet.LoadWallet();
+    LOCK(wallet.cs_wallet);
+    wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+    wallet.SetupDescriptorScriptPubKeyMans();
+    wallet.SetLastBlockProcessed(100, Params().GenesisBlock().GetHash());
+    wallet.SetBroadcastTransactions(true);
+    wallet.EnsureDDWallet();
+    auto* dd_wallet = wallet.GetDDWallet();
     BOOST_REQUIRE(dd_wallet);
     ProviderIdentityRecord identity;
     std::string error;
-    BOOST_REQUIRE(CreatePaymasterIdentity(m_wallet, "Partial carrier refill", 1000, identity, error));
-    const auto destination = m_wallet.GetNewDestination(OutputType::BECH32M, "partial carrier test");
+    BOOST_REQUIRE(CreatePaymasterIdentity(wallet, "Partial carrier refill", 1000, identity, error));
+    const auto destination = wallet.GetNewDestination(OutputType::BECH32M, "partial carrier test");
     BOOST_REQUIRE(destination);
     const auto script = GetScriptForDestination(*destination);
     CMutableTransaction funding;
@@ -4398,7 +4424,7 @@ BOOST_AUTO_TEST_CASE(partial_carrier_refill_preserves_whole_slots_and_admission_
     funding.vout.emplace_back(COIN, script);
     funding.vout.emplace_back(0, script);
     funding.vout.emplace_back(0, script);
-    BOOST_REQUIRE(m_wallet.AddToWallet(MakeTransactionRef(funding),
+    BOOST_REQUIRE(wallet.AddToWallet(MakeTransactionRef(funding),
         TxStateConfirmed{Params().GenesisBlock().GetHash(), 1, 0}));
     dd_wallet->AddDDUTXO(COutPoint{funding.GetHash(), 1}, 100);
     dd_wallet->AddDDUTXO(COutPoint{funding.GetHash(), 2}, 100);
@@ -4410,7 +4436,7 @@ BOOST_AUTO_TEST_CASE(partial_carrier_refill_preserves_whole_slots_and_admission_
     protected_carrier.carrier_value = DDCents{100};
     protected_carrier.confirmation_height = 1;
     protected_carrier.updated_at = 1000;
-    WalletBatch batch{m_wallet.GetDatabase()};
+    WalletBatch batch{wallet.GetDatabase()};
     BOOST_REQUIRE(batch.WritePaymasterProviderPool({protected_carrier}));
     ProviderLiquidityPolicy policy;
     policy.paid_maintenance_approved = true;
@@ -4424,14 +4450,14 @@ BOOST_AUTO_TEST_CASE(partial_carrier_refill_preserves_whole_slots_and_admission_
     readiness.have_policy = readiness.have_liquidity_policy = true;
     readiness.liquidity_policy = policy;
     readiness.pool_entries = {protected_carrier};
-    const auto status = ProviderLiquidityStatusToJSON(readiness, 2000, &m_wallet);
+    const auto status = ProviderLiquidityStatusToJSON(readiness, 2000, &wallet);
     const auto& capital = status.find_value("refill_funding");
     BOOST_CHECK_EQUAL(capital.find_value("required_dd_cents").getInt<int64_t>(), 300);
     BOOST_CHECK_EQUAL(capital.find_value("available_dd_cents").getInt<int64_t>(), 100);
     BOOST_CHECK_EQUAL(capital.find_value("shortfall_dd_cents").getInt<int64_t>(), 200);
     // One ordinary DD can fund one complete admission slot; it cannot fund
     // the other missing slots as well or consume the protected carrier.
-    BOOST_REQUIRE_MESSAGE(RunAutomaticCarrierReplenishment(m_wallet, policy, 2, 1, error), error);
+    BOOST_REQUIRE_MESSAGE(RunAutomaticCarrierReplenishment(wallet, policy, 2, 1, error), error);
     ProviderMaintenanceLedger ledger;
     BOOST_REQUIRE(batch.ReadPaymasterMaintenanceLedger(ledger));
     const auto& partial = ledger.records.back();
@@ -4441,7 +4467,7 @@ BOOST_AUTO_TEST_CASE(partial_carrier_refill_preserves_whole_slots_and_admission_
     BOOST_CHECK_EQUAL(partial.outputs.front().carrier_value.value, 100);
     BOOST_CHECK_EQUAL(partial.outputs.front().dgb_value.value, 0);
     BOOST_CHECK(partial.actual_fee.value > 0 && partial.actual_fee.value <= partial.maximum_fee.value);
-    BOOST_CHECK(!m_wallet.IsSpent(protected_carrier.outpoint));
+    BOOST_CHECK(!wallet.IsSpent(protected_carrier.outpoint));
     std::vector<ProviderPoolEntry> pool;
     BOOST_REQUIRE(batch.ReadPaymasterProviderPool(pool));
     const auto admission = CountLiquiditySlots(pool, PoolPurpose::ADMISSION, PoolAsset::DD_CARRIER, 3);
@@ -4450,6 +4476,12 @@ BOOST_AUTO_TEST_CASE(partial_carrier_refill_preserves_whole_slots_and_admission_
     BOOST_CHECK_EQUAL(admission.missing, 1U);
     const auto operational = CountLiquiditySlots(pool, PoolPurpose::OPERATIONAL, PoolAsset::DD_CARRIER, 1);
     BOOST_CHECK_EQUAL(operational.missing, 1U);
+    BOOST_CHECK(!broadcast_chain.submissions.empty());
+    for (const auto& submission : broadcast_chain.submissions) {
+        BOOST_CHECK(submission.relay);
+        BOOST_CHECK(wallet.mapWallet.count(submission.tx->GetHash()) != 0);
+        BOOST_CHECK(submission.tx->GetWitnessHash() == wallet.mapWallet.at(submission.tx->GetHash()).tx->GetWitnessHash());
+    }
 }
 
 BOOST_AUTO_TEST_CASE(maintenance_reconciliation_preserves_accounting_time)

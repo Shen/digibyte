@@ -1557,6 +1557,31 @@ static bool ReduceReplenishmentPlan(
     return true;
 }
 
+bool CheckPaymasterPoolFundingBroadcast(CWallet& wallet, std::string& error)
+{
+    LOCK(wallet.cs_wallet);
+    error.clear();
+    if (wallet.GetBroadcastTransactions()) return true;
+    error = "PAYMASTER_WALLET_BROADCAST_DISABLED";
+    return false;
+}
+
+bool ProviderMaintenanceBroadcastPending(
+    const CWallet& wallet, const DigiDollar::Paymaster::ProviderMaintenanceLedger& ledger)
+{
+    LOCK(wallet.cs_wallet);
+    for (const auto& record : ledger.records) {
+        if (!record.HasUnresolvedTransaction()) continue;
+        const auto found = wallet.mapWallet.find(record.transaction_id);
+        if (found == wallet.mapWallet.end()) continue; // Reconciliation owns missing evidence.
+        const auto& transaction = found->second;
+        if (!transaction.isAbandoned() && !transaction.isConflicted() &&
+            wallet.GetTxDepthInMainChain(transaction) == 0 &&
+            !transaction.InMempool() && !wallet.chain().isInStempool(record.transaction_id)) return true;
+    }
+    return false;
+}
+
 bool RunAutomaticDGBReplenishment(
     CWallet& wallet,
     const DigiDollar::Paymaster::ProviderLiquidityPolicy& policy,
@@ -1580,6 +1605,7 @@ bool RunAutomaticDGBReplenishment(
         error = "PAYMASTER_MAINTENANCE_APPROVAL_REQUIRED";
         return false;
     }
+    if (!CheckPaymasterPoolFundingBroadcast(wallet, error)) return false;
     ProviderPolicy provider_policy;
     if (!GetPaymasterProviderPolicy(wallet, provider_policy)) {
         error = "PAYMASTER_POLICY_NOT_FOUND";
@@ -1765,6 +1791,8 @@ bool RunAutomaticDGBReplenishment(
         return false;
     }
     if (!ReduceReplenishmentPlan(wallet, policy, *operation, recipients.size(), error)) return false;
+    LOCK(wallet.cs_wallet);
+    if (!CheckPaymasterPoolFundingBroadcast(wallet, error)) return false;
     // Run the normal signed construction again against current wallet inputs;
     // all ordinary transaction, fee, signature and size checks remain in force.
     created = CreateTransaction(wallet, recipients, /*change_pos=*/-1, coin_control, /*sign=*/true);
@@ -1776,7 +1804,6 @@ bool RunAutomaticDGBReplenishment(
         error = "PAYMASTER_MAINTENANCE_FEE_EXCEEDED";
         return false;
     }
-    LOCK(wallet.cs_wallet);
     PaymasterCheckpointOperation checkpoint{wallet};
     if (!checkpoint.Begin(error)) return false;
     std::string commit_error;
@@ -1885,6 +1912,7 @@ bool RunAutomaticCarrierReplenishment(
         error = "PAYMASTER_MAINTENANCE_APPROVAL_REQUIRED";
         return false;
     }
+    if (!CheckPaymasterPoolFundingBroadcast(wallet, error)) return false;
     DigiDollarWallet* dd_wallet = wallet.GetDDWallet();
     if (!dd_wallet) {
         error = "PAYMASTER_DD_WALLET_UNAVAILABLE";
@@ -2060,6 +2088,7 @@ bool RunAutomaticCarrierReplenishment(
     if (!ReduceReplenishmentPlan(wallet, policy, *operation, recipients.size(), error)) return false;
 
     LOCK(wallet.cs_wallet);
+    if (!CheckPaymasterPoolFundingBroadcast(wallet, error)) return false;
     std::string transfer_error;
     CMutableTransaction built;
     // A stale selection or unavailable key can still fail without publishing
@@ -2204,6 +2233,8 @@ bool ProviderCanServeDuringRefill(
         return status.last_error == "PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING";
     case DigiDollar::Paymaster::ProviderServiceState::WAITING_FOR_READINESS:
         return status.last_error == "PAYMASTER_AUTOMATIC_REPLENISHMENT_DISABLED" ||
+               status.last_error == "PAYMASTER_WALLET_BROADCAST_DISABLED" ||
+               status.last_error == "PAYMASTER_MAINTENANCE_BROADCAST_PENDING" ||
                (status.last_error == "PAYMASTER_LIQUIDITY_TARGETS_INCOMPLETE" &&
                 (readiness.available_funding_models & DigiDollar::Paymaster::FUNDING_MODEL_SPONSORED) != 0);
     default:
@@ -2277,6 +2308,11 @@ ProviderAutomationSnapshot CaptureProviderAutomationStatus(const CWallet& wallet
             state = ProviderAutomationState::PAUSED;
             if (reason.empty()) reason = "PAYMASTER_PROVIDER_DRAIN_ONLY";
         } else if (reason == "PAYMASTER_PROVIDER_SYNCING") state = ProviderAutomationState::PAUSED;
+        else if (ProviderMaintenanceBroadcastPending(wallet, readiness.maintenance_ledger)) {
+            state = ProviderAutomationState::BLOCKED;
+            reason = wallet.GetBroadcastTransactions() ? "PAYMASTER_MAINTENANCE_BROADCAST_PENDING"
+                                                       : "PAYMASTER_WALLET_BROADCAST_DISABLED";
+        }
         else if (pending) state = ProviderAutomationState::WAITING_CONFIRMATION;
         else if (!reason.empty() && reason != "PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING") state = ProviderAutomationState::BLOCKED;
         else if (planned) state = ProviderAutomationState::WORKING;

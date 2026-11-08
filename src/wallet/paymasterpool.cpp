@@ -116,7 +116,8 @@ std::string ExecutePreparationStep(CWallet& wallet, const ProviderMaintenanceRec
     ProviderSettings settings;
     if (!GetPaymasterProviderSettings(wallet, settings) || !settings.enabled) return "PAYMASTER_PROVIDER_DISABLED";
     if (record.preparation_authorization != PoolPreparationAuthorization(wallet)) return "PAYMASTER_POOL_POLICY_CHANGED";
-    if (!wallet.GetBroadcastTransactions()) return "PAYMASTER_WALLET_BROADCAST_DISABLED";
+    std::string broadcast_error;
+    if (!CheckPaymasterPoolFundingBroadcast(wallet, broadcast_error)) return broadcast_error;
     if (!record.transaction_id.IsNull()) {
         const auto found = wallet.mapWallet.find(record.transaction_id);
         if (found == wallet.mapWallet.end()) return "PAYMASTER_POOL_TRANSACTION_NOT_IN_WALLET";

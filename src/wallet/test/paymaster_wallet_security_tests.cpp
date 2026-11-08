@@ -1546,6 +1546,72 @@ BOOST_AUTO_TEST_CASE(provider_restore_guard_is_durable_and_blocks_new_signatures
     BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_RESTORE_REVIEW_REQUIRED");
 }
 
+BOOST_AUTO_TEST_CASE(automatic_pool_funding_requires_broadcast_before_side_effects)
+{
+    const auto environment = MakeProviderEnvironment(200000, 2000);
+    auto& database = GetMockableDatabase(m_wallet);
+    BOOST_REQUIRE(WalletBatch{database}.WritePaymasterIdentity(environment.identity));
+    const COutPoint manually_locked{uint256::ONE, 7};
+    m_wallet.LockCoin(manually_locked);
+    m_wallet.SetBroadcastTransactions(false);
+    const auto before = database.m_records;
+    const auto transactions_before = m_wallet.mapWallet.size();
+    ProviderLiquidityPolicy policy;
+    policy.automatic_replenishment = true;
+    policy.paid_maintenance_approved = true;
+    policy.updated_at = 200000;
+    for (const bool carrier : {false, true}) {
+        std::string error;
+        const auto run = carrier ? paymaster_app::RunAutomaticCarrierReplenishment
+                                 : paymaster_app::RunAutomaticDGBReplenishment;
+        BOOST_CHECK(!run(m_wallet, policy, 1, 1, error));
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_WALLET_BROADCAST_DISABLED");
+        BOOST_CHECK(database.m_records == before);
+        BOOST_CHECK_EQUAL(m_wallet.mapWallet.size(), transactions_before);
+        BOOST_CHECK(m_wallet.IsOrdinaryLockedCoin(manually_locked));
+        // An already satisfied target remains a no-op, including offline.
+        BOOST_CHECK(run(m_wallet, policy, 0, 0, error));
+        BOOST_CHECK(error.empty());
+        BOOST_CHECK(database.m_records == before);
+    }
+    std::string error;
+    BOOST_CHECK(!paymaster_app::CheckPaymasterPoolFundingBroadcast(m_wallet, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_WALLET_BROADCAST_DISABLED");
+    m_wallet.SetBroadcastTransactions(true);
+    BOOST_CHECK(paymaster_app::CheckPaymasterPoolFundingBroadcast(m_wallet, error));
+    BOOST_CHECK(error.empty());
+    BOOST_CHECK(database.m_records == before);
+}
+
+BOOST_AUTO_TEST_CASE(saved_maintenance_is_not_a_broadcast_observation)
+{
+    m_wallet.SetLastBlockProcessed(1, Params().GenesisBlock().GetHash());
+    CMutableTransaction saved;
+    saved.vin.emplace_back(COutPoint{uint256::ONE, 0});
+    saved.vout.emplace_back(COIN, CScript{} << OP_TRUE);
+    const auto transaction = MakeTransactionRef(saved);
+    BOOST_REQUIRE(m_wallet.AddToWallet(transaction, TxStateInactive{}));
+    ProviderMaintenanceRecord record;
+    record.state = ProviderMaintenanceState::BROADCAST;
+    record.transaction_id = transaction->GetHash();
+    ProviderMaintenanceLedger ledger;
+    ledger.records.push_back(record);
+    auto& database = GetMockableDatabase(m_wallet);
+    const auto before = database.m_records;
+    const uint256 witness_hash = transaction->GetWitnessHash();
+    m_wallet.SetBroadcastTransactions(false);
+    BOOST_CHECK(paymaster_app::ProviderMaintenanceBroadcastPending(m_wallet, ledger));
+    m_wallet.SetBroadcastTransactions(true);
+    BOOST_CHECK(paymaster_app::ProviderMaintenanceBroadcastPending(m_wallet, ledger));
+    auto& wallet_transaction = m_wallet.mapWallet.at(transaction->GetHash());
+    wallet_transaction.m_state = TxStateInMempool{};
+    BOOST_CHECK(!paymaster_app::ProviderMaintenanceBroadcastPending(m_wallet, ledger));
+    wallet_transaction.m_state = TxStateConfirmed{Params().GenesisBlock().GetHash(), 0, 0};
+    BOOST_CHECK(!paymaster_app::ProviderMaintenanceBroadcastPending(m_wallet, ledger));
+    BOOST_CHECK(wallet_transaction.tx->GetWitnessHash() == witness_hash);
+    BOOST_CHECK(database.m_records == before);
+}
+
 BOOST_AUTO_TEST_CASE(provider_restore_marker_failure_prevents_restore_completion)
 {
     const auto environment = MakeProviderEnvironment(200000, 2000);

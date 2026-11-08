@@ -184,6 +184,13 @@ bool ReconcileProviderMaintenance(CWallet& wallet,
                                   std::string& error);
 bool ReleaseSatisfiedProviderReplenishment(CWallet& wallet, bool dgb_satisfied,
                                           bool carriers_satisfied, std::string& error);
+/** Common prerequisite for creating a finite or recurring funding signature. */
+bool CheckPaymasterPoolFundingBroadcast(CWallet& wallet, std::string& error);
+/** Read-only observation of a saved maintenance transaction which has not
+ * reached either local relay pool. This never releases or resubmits it. */
+bool ProviderMaintenanceBroadcastPending(
+    const CWallet& wallet,
+    const DigiDollar::Paymaster::ProviderMaintenanceLedger& ledger);
 bool RunAutomaticDGBReplenishment(
     CWallet& wallet,
     const DigiDollar::Paymaster::ProviderLiquidityPolicy& policy,

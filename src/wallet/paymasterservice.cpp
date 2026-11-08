@@ -550,7 +550,14 @@ void RunPaymasterProviderServiceCycleImpl(WalletContext& context, CWallet& walle
                                                   StableProviderServiceError(cleanup_error));
                 return;
             }
-            if (!targets_satisfy_provider_policy) {
+            if (ProviderMaintenanceBroadcastPending(wallet, liquidity.maintenance_ledger)) {
+                // Signed work remains protected, but an unsubmitted wallet
+                // transaction cannot be described as waiting for confirmation.
+                accept_new_requests = false;
+                state = ProviderServiceState::WAITING_FOR_READINESS;
+                first_error = wallet.GetBroadcastTransactions() ? "PAYMASTER_MAINTENANCE_BROADCAST_PENDING"
+                                                               : "PAYMASTER_WALLET_BROADCAST_DISABLED";
+            } else if (!targets_satisfy_provider_policy) {
                 // A zero operational carrier target can be a deliberate result of
                 // release_slot. It is valid to persist, but automatic maintenance
                 // must not claim success or silently recreate capital the operator
@@ -593,7 +600,9 @@ void RunPaymasterProviderServiceCycleImpl(WalletContext& context, CWallet& walle
                             maintenance_error.empty()
                                 ? "PAYMASTER_LIQUIDITY_REPLENISHMENT_FAILED"
                                 : maintenance_error);
-                        state = first_error == "PAYMASTER_MAINTENANCE_APPROVAL_REQUIRED" ||
+                        state = first_error == "PAYMASTER_WALLET_BROADCAST_DISABLED"
+                            ? ProviderServiceState::WAITING_FOR_READINESS
+                            : first_error == "PAYMASTER_MAINTENANCE_APPROVAL_REQUIRED" ||
                                         first_error == "PAYMASTER_MAINTENANCE_LIMIT_EXHAUSTED"
                             ? ProviderServiceState::WAITING_FOR_MAINTENANCE_APPROVAL
                             : ProviderServiceState::REPLENISHING_LIQUIDITY;

@@ -901,6 +901,7 @@ BOOST_FIXTURE_TEST_CASE(concurrent_replenishment_retains_one_current_budget_plan
 {
     {
         LOCK(m_wallet.cs_wallet);
+        m_wallet.SetBroadcastTransactions(true);
         m_wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
         m_wallet.SetupDescriptorScriptPubKeyMans();
         ProviderPolicy offer;
