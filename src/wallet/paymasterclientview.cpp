@@ -257,7 +257,7 @@ bool LoadClientSessionView(PaymasterStore& store,
                            const PaymentSession& session,
                            int64_t now,
                            ClientSessionView& view,
-                           std::string& error)
+                           std::string& error, bool summary_only)
 {
     view = {};
     view.observed_at = now;
@@ -322,7 +322,7 @@ bool LoadClientSessionView(PaymasterStore& store,
 
     bool has_live_reservations{false};
     if (!store.ClientSessionHasLiveReservations(
-            session, has_live_reservations, error)) {
+            session, has_live_reservations, error, summary_only)) {
         return false;
     }
     if (has_live_reservations) view.authorization_may_exist = true;
@@ -405,13 +405,15 @@ bool LoadClientSessionView(PaymasterStore& store,
     // Bound unsigned work must pass the same firewall as signing and release.
     if (view.artifact == "none" && early_session && !view.recovery &&
         (!session.attempt_ids.empty() || !session.user_inputs.empty())) {
-        if (view.attempt) {
+        if (summary_only) {
+            if (!store.CheckClientSessionSummaryEvidence(session, error)) return false;
+        } else if (view.attempt) {
             ClientAuthorizationState authorization;
             if (!store.GetClientAuthorizationState(session, *view.attempt, now, authorization, error)) return false;
         } else if (!store.ValidateUnsignedClientSession(session, error)) return false;
     }
     view.allowed_actions.push_back("refresh");
-    if (!IsTerminal(session.state) && !view.recovery) {
+    if (!summary_only && !IsTerminal(session.state) && !view.recovery) {
         if (view.artifact == "none" && early_session) {
             // Resume is deliberately a capability token for the idempotent
             // send RPC, not a new resolvepaymastersession mutation.
@@ -455,7 +457,7 @@ bool LoadClientSessionView(PaymasterStore& store,
         ((view.attempt->state >= AttemptState::USER_SIGNED &&
           view.attempt->state <= AttemptState::MEMPOOL) ||
          view.attempt->state == AttemptState::AMBIGUOUS);
-    if (resumable_recovery || recoverable_original) {
+    if (!summary_only && (resumable_recovery || recoverable_original)) {
         view.allowed_actions.push_back("cancel_to_self");
     }
 
@@ -479,6 +481,29 @@ ClientRecoveryResult CaptureClientSession(PaymasterStore& store, const PaymentSe
     result.action = action;
     result.session = CaptureSessionPayment(session, &store);
     if (result.view.recipient_address && !result.session.to_address) result.session.to_address = result.view.recipient_address;
+    return result;
+}
+
+ClientSessionPage ListClientSessionPage(CWallet& wallet, bool active_only,
+    size_t limit, const std::string& after)
+{
+    if (limit == 0 || limit > 100 || (!after.empty() && !IsCanonicalRequestId(after)))
+        throw ApplicationError(ErrorKind::INVALID_INPUT, "PAYMASTER_SESSION_PAGE_INVALID");
+    LOCK(wallet.cs_wallet);
+    PaymasterStore store{wallet};
+    ClientSessionPage result;
+    std::vector<PaymentSession> sessions;
+    std::string error;
+    if (!store.ListClientSessionsPage(after, limit, sessions, result.next, error))
+        throw ApplicationError(ErrorKind::WALLET, error);
+    for (auto& session : sessions) {
+        if (active_only && (session.state == SessionState::CONFIRMED || session.state == SessionState::CANCELED_SAFE)) continue;
+        ClientSessionView view;
+        if (!LoadClientSessionView(store, session, GetTime(), view, error, /*summary_only=*/true))
+            throw ApplicationError(ErrorKind::WALLET, error);
+        if (active_only && !IsActiveClientSession(session, view)) continue;
+        result.entries.push_back({std::move(session), std::move(view)});
+    }
     return result;
 }
 

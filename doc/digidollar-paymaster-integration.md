@@ -188,6 +188,14 @@ recovery confirmation cannot be substituted for recipient-payment evidence.
 | `listdigidollarsendsessions` | Bounded pages; follow the cursor, use `active_only=false` for completed history. A failed session view rejects the whole page; no partial successful list is returned. |
 | `resolvepaymastersession` | Follow `allowed_actions`. `refresh` can persist received evidence, but grants no new payment authority. Other actions can mutate, communicate or sign. |
 
+The list limit bounds scanned database rows, including provider and filtered
+terminal records, with an additional byte budget. A page can be empty and still
+contain `next_cursor`; continue until that cursor is absent. List summaries expose
+only `refresh`. Read the selected order's detailed status for current mutation
+capabilities. Reused historical inputs can conservatively keep a failed summary
+visible until detailed inspection proves safe closure. Qt follows these pages
+before allowing a new transfer and reads the selected session separately.
+
 High-level send/session responses include `status`, `final`,
 `payment_confirmed` and, when available, `payment_view`. `final=true` alone
 is not successful recipient payment: cancellation/recovery can also be final.

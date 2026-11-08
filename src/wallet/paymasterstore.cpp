@@ -243,8 +243,8 @@ bool HasAcceptedClientManifest(const ProviderAttempt& attempt, int64_t observati
                attempt.capacity_snapshot.expires_at;
 }
 
-bool RequireNoClientAuthorizationEvidence(WalletBatch& batch, const PaymentSession& session,
-                                          std::string& error)
+bool CheckIndexedClientAuthorizationEvidence(WalletBatch& batch, const PaymentSession& session,
+                                               std::string& error)
 {
     error.clear();
     const auto unsafe = [&] {
@@ -267,17 +267,6 @@ bool RequireNoClientAuthorizationEvidence(WalletBatch& batch, const PaymentSessi
         error = index_status == DatabaseReadStatus::FOUND
             ? "PAYMASTER_UNSIGNED_CLIENT_AUTHORIZATION_MAY_EXIST" : "PAYMASTER_RECOVERY_DATABASE_READ";
         return false;
-    }
-    // A damaged/missing locator cannot hide an authoritative recovery record.
-    // This scan is confined to unsigned release and authorization validation.
-    std::vector<AlternativeRecoveryRecord> recoveries;
-    if (!batch.ListPaymasterAlternativeRecoveries(recoveries)) {
-        error = "PAYMASTER_RECOVERY_DATABASE_READ";
-        return false;
-    }
-    for (const auto& recovery : recoveries) {
-        if (!recovery.provider_side &&
-            (recovery.request_id == session.request_id || recovery.session_id == session.session_id)) return unsafe();
     }
     for (const auto& attempt_id : session.attempt_ids) {
         ProviderAttempt attempt;
@@ -314,6 +303,23 @@ bool RequireNoClientAuthorizationEvidence(WalletBatch& batch, const PaymentSessi
         if (!ValidatePaymasterResult(result, Params().GenesisBlock().GetHash(),
                 attempt.provider_id, attempt.commit_key, attempt.provider_identity_key, 1, error)) return false;
         if (!IsNegativeTerminalResultStatus(result.status)) return unsafe();
+    }
+    return true;
+}
+
+bool RequireNoClientAuthorizationEvidence(WalletBatch& batch, const PaymentSession& session, std::string& error)
+{
+    if (!CheckIndexedClientAuthorizationEvidence(batch, session, error)) return false;
+    // A damaged/missing locator cannot hide an authoritative recovery record.
+    // This scan is confined to unsigned release and authorization validation.
+    std::vector<AlternativeRecoveryRecord> recoveries;
+    if (!batch.ListPaymasterAlternativeRecoveries(recoveries)) {
+        error = "PAYMASTER_RECOVERY_DATABASE_READ";
+        return false;
+    }
+    for (const auto& recovery : recoveries) {
+        if (!recovery.provider_side &&
+            (recovery.request_id == session.request_id || recovery.session_id == session.session_id)) { error = "PAYMASTER_UNSIGNED_CLIENT_AUTHORIZATION_MAY_EXIST"; return false; }
     }
     return true;
 }

@@ -401,6 +401,49 @@ bool WalletBatch::ListPaymasterSessions(
     return true;
 }
 
+bool WalletBatch::ListPaymasterSessionsPage(const std::string& after, size_t maximum_rows,
+    size_t maximum_bytes, std::vector<DigiDollar::Paymaster::PaymentSession>& sessions, std::string& next)
+{
+    using namespace DigiDollar::Paymaster;
+    constexpr size_t maximum_row_bytes{8192};
+    sessions.clear();
+    next.clear();
+    if ((!after.empty() && !IsCanonicalRequestId(after)) || maximum_rows == 0 || maximum_rows > 100 ||
+        maximum_bytes < maximum_row_bytes || maximum_bytes > 100 * maximum_row_bytes) return false;
+    DataStream begin;
+    begin << DBKeys::PAYMASTER_SESSION;
+    SerializeData end{begin.begin(), begin.end()};
+    if (end.empty() || end.back() == std::byte{0xff}) return false;
+    end.back() = std::byte{static_cast<unsigned char>(std::to_integer<unsigned char>(end.back()) + 1)};
+    if (!after.empty()) begin << after << uint8_t{0};
+    auto cursor = m_batch->GetNewRangeCursor(begin, end);
+    if (!cursor) return false;
+    size_t scanned{0}, bytes{0};
+    while (scanned < maximum_rows && bytes <= maximum_bytes - maximum_row_bytes) {
+        DataStream key, value;
+        const auto status = cursor->Next(key, value);
+        if (status == DatabaseCursor::Status::DONE) { next.clear(); return true; }
+        if (status != DatabaseCursor::Status::MORE || key.size() > maximum_row_bytes ||
+            value.size() > maximum_row_bytes - key.size()) return false;
+        ++scanned;
+        bytes += key.size() + value.size();
+        try {
+            std::string type, request;
+            PaymentSession session;
+            key >> type >> request;
+            value >> session;
+            if (!key.empty() || !value.empty() || type != DBKeys::PAYMASTER_SESSION ||
+                !IsCanonicalRequestId(request) || (!after.empty() && request <= after) ||
+                session.request_id != request || session.version != PaymentSession::CURRENT_VERSION ||
+                session.session_id.IsNull() || !CanTransition(session.state, session.state) ||
+                session.user_inputs.size() > MAX_PAYMENT_INTENT_INPUTS || session.attempt_ids.size() > 16) return false;
+            next = request;
+            sessions.push_back(std::move(session));
+        } catch (const std::ios_base::failure&) { return false; }
+    }
+    return true;
+}
+
 bool WalletBatch::ErasePaymasterSession(const std::string& request_id)
 {
     const bool own = !PaymasterCheckpointInTransaction(this);

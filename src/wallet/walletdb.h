@@ -445,6 +445,11 @@ public:
     bool ReadPaymasterSession(const std::string& request_id, DigiDollar::Paymaster::PaymentSession& session);
     bool HasPaymasterSession(const std::string& request_id);
     bool ListPaymasterSessions(std::vector<DigiDollar::Paymaster::PaymentSession>& sessions);
+    /** Ordered raw session page. Bounds rows and bytes scanned before filtering;
+     * a page may be empty after filtering and still have a continuation. */
+    bool ListPaymasterSessionsPage(const std::string& after, size_t maximum_rows,
+        size_t maximum_bytes, std::vector<DigiDollar::Paymaster::PaymentSession>& sessions,
+        std::string& next);
     bool ErasePaymasterSession(const std::string& request_id);
     bool WritePaymasterClientOrder(const DigiDollar::Paymaster::ClientPaymentOrder& order, bool overwrite = false);
     DatabaseReadStatus ReadPaymasterClientOrderWithStatus(

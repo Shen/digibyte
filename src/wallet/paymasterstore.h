@@ -170,13 +170,16 @@ public:
     bool ListClientSessions(
         std::vector<DigiDollar::Paymaster::PaymentSession>& sessions,
         std::string& error) const;
+    bool ListClientSessionsPage(const std::string& after, size_t maximum_rows,
+        std::vector<DigiDollar::Paymaster::PaymentSession>& sessions,
+        std::string& next, std::string& error) const;
     /** Report whether a client session still owns any live USER_DD
      * reservation. This is a read-only inbox/status aid; mutation RPCs remain
      * the sole authority for deciding whether an input can be released. */
     bool ClientSessionHasLiveReservations(
         const DigiDollar::Paymaster::PaymentSession& session,
         bool& has_live_reservations,
-        std::string& error) const;
+        std::string& error, bool summary_only = false) const;
 
     /** Read-only safety check for unsigned actions; execution repeats it under
      * the same wallet lock as the release. Unknown authority fails closed. */
@@ -186,6 +189,9 @@ public:
     /** Classify current authority, preserving accepted unsigned history without
      * treating it as a live signing request. Closed work must prove the whole
      * session unsigned; corruption and unknown independent authority fail. */
+    /** Point-read summary check only; never sufficient for unsigned release. */
+    bool CheckClientSessionSummaryEvidence(const DigiDollar::Paymaster::PaymentSession& session,
+                                           std::string& error) const;
     bool GetClientAuthorizationState(
         const DigiDollar::Paymaster::PaymentSession& session,
         const DigiDollar::Paymaster::ProviderAttempt& attempt, int64_t now,

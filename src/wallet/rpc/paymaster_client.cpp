@@ -335,64 +335,17 @@ RPCHelpMan listdigidollarsendsessions()
             }
 
             wallet->BlockUntilSyncedToCurrentChain();
-            // Keep the live-session list and each derived attempt/recovery
-            // view on one wallet database snapshot. PaymasterStore uses the
-            // same recursive wallet lock internally.
             LOCK(wallet->cs_wallet);
+            const auto listed = ListClientSessionPage(*wallet, active_only, static_cast<size_t>(limit), cursor);
             PaymasterStore store{*wallet};
-            std::vector<PaymentSession> sessions;
-            std::string error;
-            if (!store.ListClientSessions(sessions, error)) {
-                throw JSONRPCError(RPC_WALLET_ERROR, error);
-            }
-            std::sort(sessions.begin(), sessions.end(),
-                      [](const PaymentSession& lhs,
-                         const PaymentSession& rhs) {
-                          return lhs.request_id < rhs.request_id;
-                      });
-
-            struct ListedSession {
-                PaymentSession session;
-                ClientSessionView view;
-            };
-            std::vector<ListedSession> listed;
-            listed.reserve(static_cast<size_t>(limit) + 1);
-            for (PaymentSession& session : sessions) {
-                if (!cursor.empty() && session.request_id <= cursor) {
-                    continue;
-                }
-                if (active_only &&
-                    (session.state == SessionState::CONFIRMED ||
-                     session.state == SessionState::CANCELED_SAFE)) {
-                    continue;
-                }
-                ClientSessionView view;
-                if (!LoadClientSessionView(
-                        store, session, GetTime(), view, error)) {
-                    throw ApplicationError(ErrorKind::WALLET, error);
-                }
-                if (active_only && !IsActiveClientSession(session, view)) {
-                    continue;
-                }
-                listed.push_back({std::move(session), std::move(view)});
-                if (listed.size() > static_cast<size_t>(limit)) break;
-            }
-
-            const size_t page_size = std::min(
-                listed.size(), static_cast<size_t>(limit));
             UniValue page{UniValue::VARR};
-            for (size_t index = 0; index < page_size; ++index) {
-                page.push_back(ClientSessionSummaryToJSON(
-                    store, listed[index].session, listed[index].view));
-            }
+            for (const auto& entry : listed.entries)
+                page.push_back(ClientSessionSummaryToJSON(store, entry.session, entry.view));
             UniValue result{UniValue::VOBJ};
             result.pushKV("active_only", active_only);
-            result.pushKV("count", static_cast<uint64_t>(page_size));
+            result.pushKV("count", static_cast<uint64_t>(listed.entries.size()));
             result.pushKV("sessions", std::move(page));
-            if (page_size < listed.size() && page_size > 0) {
-                result.pushKV("next_cursor",
-                              listed[page_size - 1].session.request_id);
-            }
+            if (!listed.next.empty()) result.pushKV("next_cursor", listed.next);
             return result;
         }),
     };

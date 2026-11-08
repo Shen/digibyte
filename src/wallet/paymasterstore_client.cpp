@@ -305,6 +305,21 @@ bool PaymasterStore::ListClientSessions(
     return true;
 }
 
+bool PaymasterStore::ListClientSessionsPage(const std::string& after, size_t maximum_rows,
+    std::vector<PaymentSession>& sessions, std::string& next, std::string& error) const
+{
+    LOCK(m_wallet.cs_wallet);
+    error.clear();
+    if (!WalletBatch{m_wallet.GetDatabase()}.ListPaymasterSessionsPage(after, maximum_rows,
+            8192 * maximum_rows, sessions, next)) {
+        error = "PAYMASTER_SESSION_DATABASE_READ";
+        return false;
+    }
+    sessions.erase(std::remove_if(sessions.begin(), sessions.end(),
+        [](const auto& session) { return session.provider_side; }), sessions.end());
+    return true;
+}
+
 bool PaymasterStore::ValidateUnsignedClientSession(
     const PaymentSession& session, std::string& error) const
 {
@@ -317,6 +332,19 @@ bool PaymasterStore::ValidateUnsignedClientSession(
         return false;
     }
     return RequireNoClientAuthorizationEvidence(batch, current, error);
+}
+
+bool PaymasterStore::CheckClientSessionSummaryEvidence(const PaymentSession& session, std::string& error) const
+{
+    LOCK(m_wallet.cs_wallet);
+    WalletBatch batch{m_wallet.GetDatabase()};
+    PaymentSession current;
+    if (batch.ReadPaymasterSessionWithStatus(session.request_id, current) != DatabaseReadStatus::FOUND ||
+        CanonicalBytes(current) != CanonicalBytes(session)) {
+        error = "PAYMASTER_ATTEMPT_SESSION_CONFLICT";
+        return false;
+    }
+    return CheckIndexedClientAuthorizationEvidence(batch, current, error);
 }
 
 bool PaymasterStore::GetClientAuthorizationState(
@@ -394,7 +422,7 @@ bool PaymasterStore::GetClientAuthorizationState(
 bool PaymasterStore::ClientSessionHasLiveReservations(
     const PaymentSession& session,
     bool& has_live_reservations,
-    std::string& error) const
+    std::string& error, bool summary_only) const
 {
     has_live_reservations = false;
     error.clear();
@@ -440,6 +468,13 @@ bool PaymasterStore::ClientSessionHasLiveReservations(
             return false;
         }
         if (reservation.request_id == session.request_id && reservation.session_id == session.session_id) {
+            has_live_reservations = true;
+            continue;
+        }
+        if (summary_only) {
+            // A list page cannot perform the global proof needed to dismiss
+            // reused inputs as harmless history. Keep this entry visible for
+            // detailed inspection; this observation grants no release action.
             has_live_reservations = true;
             continue;
         }

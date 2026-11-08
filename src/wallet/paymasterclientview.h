@@ -9,6 +9,7 @@
 #include <string_view>
 #include <variant>
 namespace wallet {
+class CWallet;
 class PaymasterStore;
 namespace paymaster_app {
 using ClientSessionLookup = std::variant<std::string, uint256>;
@@ -30,8 +31,11 @@ struct ClientSessionView {
     bool requires_attention{false};
     std::vector<std::string> allowed_actions;
 };
+/** Summary mode performs bounded point reads and exposes refresh only. Full
+ * unsigned evidence proofs and mutation capabilities require a detail read. */
 bool LoadClientSessionView(PaymasterStore& store, const DigiDollar::Paymaster::PaymentSession& session,
-                           int64_t now, ClientSessionView& view, std::string& error);
+                           int64_t now, ClientSessionView& view, std::string& error,
+                           bool summary_only = false);
 struct ClientRecoveryResult {
     std::string action;
     PaymentResult session;
@@ -47,6 +51,17 @@ struct ClientRecoveryResult {
 };
 ClientRecoveryResult CaptureClientSession(PaymasterStore& store, const DigiDollar::Paymaster::PaymentSession& session, std::string_view action);
 bool IsActiveClientSession(const DigiDollar::Paymaster::PaymentSession& session, const ClientSessionView& view);
+struct ClientSessionPageEntry {
+    DigiDollar::Paymaster::PaymentSession session;
+    ClientSessionView view;
+};
+struct ClientSessionPage {
+    std::vector<ClientSessionPageEntry> entries;
+    std::string next;
+};
+/** One bounded wallet snapshot; cursors and summaries grant no authority. */
+ClientSessionPage ListClientSessionPage(CWallet& wallet, bool active_only,
+    size_t limit, const std::string& after);
 } // namespace paymaster_app
 } // namespace wallet
 #endif // DIGIBYTE_WALLET_PAYMASTERCLIENTVIEW_H

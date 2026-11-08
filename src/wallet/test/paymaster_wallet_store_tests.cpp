@@ -69,15 +69,21 @@ class SessionIndexDatabase : public MockableDatabase
     class CapacityCursor : public DatabaseCursor {
         std::unique_ptr<DatabaseCursor> m_cursor;
         SessionIndexDatabase& m_database;
+        bool m_sessions;
     public:
-        CapacityCursor(std::unique_ptr<DatabaseCursor> cursor, SessionIndexDatabase& database)
-            : m_cursor(std::move(cursor)), m_database(database) {}
+        CapacityCursor(std::unique_ptr<DatabaseCursor> cursor, SessionIndexDatabase& database, bool sessions = false)
+            : m_cursor(std::move(cursor)), m_database(database), m_sessions(sessions) {}
         Status Next(DataStream& key, DataStream& value) override
         {
             const auto status = m_cursor->Next(key, value);
             if (status == Status::MORE) {
-                ++m_database.capacity_rows;
-                m_database.capacity_bytes += key.size() + value.size();
+                if (m_sessions) {
+                    ++m_database.session_rows;
+                    m_database.session_bytes += key.size() + value.size();
+                } else {
+                    ++m_database.capacity_rows;
+                    m_database.capacity_bytes += key.size() + value.size();
+                }
             }
             return status;
         }
@@ -96,6 +102,10 @@ class SessionIndexDatabase : public MockableDatabase
             if (prefix.size() == expected.size() && std::equal(prefix.begin(), prefix.end(), expected.begin())) {
                 ++m_database.session_scans;
             }
+            DataStream recoveries;
+            recoveries << DBKeys::PAYMASTER_ALT_RECOVERY;
+            if (prefix.size() == recoveries.size() && std::equal(prefix.begin(), prefix.end(), recoveries.begin()))
+                ++m_database.recovery_scans;
             return MockableBatch::GetNewPrefixCursor(prefix);
         }
         std::unique_ptr<DatabaseCursor> GetNewRangeCursor(Span<const std::byte> begin, Span<const std::byte> end) override
@@ -107,11 +117,18 @@ class SessionIndexDatabase : public MockableDatabase
                 ++m_database.capacity_ranges;
                 return std::make_unique<CapacityCursor>(std::move(cursor), m_database);
             }
+            DataStream sessions;
+            sessions << DBKeys::PAYMASTER_SESSION;
+            if (begin.size() >= sessions.size() && std::equal(sessions.begin(), sessions.end(), begin.begin())) {
+                ++m_database.session_ranges;
+                return std::make_unique<CapacityCursor>(std::move(cursor), m_database, true);
+            }
             return cursor;
         }
     };
 public:
     size_t session_scans{0};
+    size_t session_rows{0}, session_bytes{0}, session_ranges{0}, recovery_scans{0};
     size_t capacity_ranges{0};
     size_t capacity_rows{0};
     size_t capacity_bytes{0};
@@ -825,6 +842,85 @@ void CheckUnreadableClientArtifact(WalletTestingSetup& fixture, const PaymentSes
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(paymaster_wallet_store_tests, WalletTestingSetup)
+
+BOOST_AUTO_TEST_CASE(client_session_pages_bound_raw_rows_before_filtering)
+{
+    SyncWithValidationInterfaceQueue();
+    auto owned = std::make_unique<SessionIndexDatabase>();
+    auto& db = *owned;
+    wallet::CWallet wallet{m_node.chain.get(), "session-pages", std::move(owned)};
+    LOCK(wallet.cs_wallet);
+    WalletBatch batch{db};
+    BOOST_REQUIRE(batch.TxnBegin());
+    for (size_t i{0}; i < 105; ++i) {
+        PaymentSession session;
+        session.request_id = strprintf("550e8400-e29b-41d4-a716-%012u", i);
+        session.session_id = uint256S(strprintf("%064x", i + 1));
+        session.created_at = session.updated_at = 100;
+        session.provider_side = i < 100;
+        BOOST_REQUIRE(batch.WritePaymasterSession(session));
+    }
+    BOOST_REQUIRE(batch.TxnCommit());
+    const auto before = db.m_records;
+    std::string cursor;
+    std::set<std::string> found;
+    size_t pages{0};
+    do {
+        db.session_rows = db.session_bytes = 0;
+        const auto page = wallet::paymaster_app::ListClientSessionPage(wallet, true, 20, cursor);
+        BOOST_CHECK_LE(db.session_rows, 20U);
+        BOOST_CHECK_LE(db.session_bytes, 20U * 8192);
+        BOOST_CHECK_EQUAL(db.session_scans, 0U);
+        BOOST_CHECK_EQUAL(db.recovery_scans, 0U);
+        if (pages < 5) {
+            BOOST_CHECK(page.entries.empty());
+            BOOST_CHECK(!page.next.empty()); // Empty filtered pages are not end-of-list.
+        }
+        for (const auto& entry : page.entries) {
+            BOOST_CHECK(found.insert(entry.session.request_id).second);
+            BOOST_REQUIRE_EQUAL(entry.view.allowed_actions.size(), 1U);
+            BOOST_CHECK_EQUAL(entry.view.allowed_actions.front(), "refresh");
+        }
+        BOOST_CHECK(page.next.empty() || page.next > cursor);
+        cursor = page.next;
+        BOOST_REQUIRE_LE(++pages, 6U);
+    } while (!cursor.empty());
+    BOOST_CHECK_EQUAL(found.size(), 5U);
+    BOOST_CHECK(db.m_records == before);
+    BOOST_CHECK_EQUAL(db.session_ranges, 6U);
+    // Reused historical inputs must not trigger a global release proof while
+    // listing. Keep the history visible with refresh only until detail lookup.
+    PaymentSession historical, owner;
+    BOOST_REQUIRE(batch.ReadPaymasterSession("550e8400-e29b-41d4-a716-000000000104", historical));
+    BOOST_REQUIRE(batch.ReadPaymasterSession("550e8400-e29b-41d4-a716-000000000103", owner));
+    const COutPoint input{uint256S("abcdef"), 0};
+    historical.state = SessionState::FAILED;
+    historical.user_inputs = owner.user_inputs = {input};
+    BOOST_REQUIRE(batch.WritePaymasterSession(historical));
+    BOOST_REQUIRE(batch.WritePaymasterSession(owner));
+    BOOST_REQUIRE(batch.WritePaymasterSessionId(owner.session_id, owner.request_id));
+    BOOST_REQUIRE(batch.WritePaymasterReservation({InputReservation::CURRENT_VERSION, input,
+        owner.request_id, owner.session_id, ReservationRole::USER_DD, false, 100}));
+    const auto observed = wallet::paymaster_app::ListClientSessionPage(wallet, true, 20,
+        "550e8400-e29b-41d4-a716-000000000103");
+    BOOST_REQUIRE_EQUAL(observed.entries.size(), 1U);
+    BOOST_CHECK(observed.entries.front().view.requires_attention);
+    BOOST_REQUIRE_EQUAL(observed.entries.front().view.allowed_actions.size(), 1U);
+    BOOST_CHECK_EQUAL(observed.entries.front().view.allowed_actions.front(), "refresh");
+    BOOST_CHECK_EQUAL(db.recovery_scans, 0U);
+    PaymasterStore store{wallet};
+    wallet::paymaster_app::ClientSessionView detailed;
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(wallet::paymaster_app::LoadClientSessionView(store, historical, 110, detailed, error), error);
+    BOOST_CHECK(!wallet::paymaster_app::IsActiveClientSession(historical, detailed));
+    BOOST_CHECK_EQUAL(db.recovery_scans, 1U);
+    // A malformed later row must fail that page rather than masquerade as EOF.
+    BOOST_REQUIRE(db.MakeBatch()->Write(std::make_pair(DBKeys::PAYMASTER_SESSION,
+        std::string{"550e8400-e29b-41d4-a716-999999999999"}), uint16_t{65535}));
+    BOOST_CHECK_EXCEPTION(wallet::paymaster_app::ListClientSessionPage(wallet, true, 20,
+        "550e8400-e29b-41d4-a716-000000000104"), DigiDollar::Paymaster::ApplicationError,
+        [](const auto& e) { return e.kind == DigiDollar::Paymaster::ErrorKind::WALLET; });
+}
 
 BOOST_AUTO_TEST_CASE(provider_capacity_pages_bound_scanned_rows_and_bytes)
 {
