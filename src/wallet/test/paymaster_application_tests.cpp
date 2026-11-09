@@ -813,6 +813,37 @@ BOOST_FIXTURE_TEST_CASE(provider_readiness_requires_matching_wallet_and_index_ti
     BOOST_CHECK(ProviderTxIndexIsReady(wallet, false));
     BOOST_CHECK(ProviderTxIndexIsReady(wallet, true));
 
+    // Exercise the automatic start caller, not only the bounded recovery API.
+    // Repeated readiness attempts must advance pages instead of rescanning all
+    // retained terminal history on every scheduler tick.
+    {
+        LOCK(wallet.cs_wallet);
+        WalletBatch batch{wallet.GetDatabase()};
+        BOOST_REQUIRE(batch.TxnBegin());
+        for (size_t i{0}; i < 3 * PAYMASTER_BACKGROUND_SESSION_ROWS; ++i) {
+            PaymentSession session;
+            session.request_id = strprintf("550e8400-e29b-41d4-a716-%012u", i);
+            session.session_id = uint256S(strprintf("%064x", i + 1));
+            session.created_at = session.updated_at = 100;
+            session.state = SessionState::FAILED;
+            BOOST_REQUIRE(batch.WritePaymasterSession(session));
+        }
+        BOOST_REQUIRE(batch.TxnCommit());
+    }
+    WalletContext automatic_context;
+    automatic_context.chain = m_node.chain.get();
+    automatic_context.args = m_node.args;
+    Manager automatic_manager{true};
+    automatic_context.paymaster = &automatic_manager;
+    const auto automatic_start = [&] {
+        BOOST_CHECK_NO_THROW(StartPaymaster(automatic_context, wallet, false, ExecutionMode::AUTOMATIC));
+        return GetPaymasterScanPosition(wallet.GetDatabase(), PaymasterScan::CLIENT_FINALS).request;
+    };
+    const auto first_page = automatic_start();
+    BOOST_CHECK(!first_page.empty());
+    BOOST_CHECK(automatic_start() > first_page);
+    ForgetPaymasterSessionIndex(wallet.GetDatabase());
+
     {
         LOCK(wallet.cs_wallet);
         wallet.SetLastBlockProcessed(tip->height, uint256::ONE);

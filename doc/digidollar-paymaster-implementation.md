@@ -227,6 +227,9 @@ fee reservations on that basis. Actual unsigned nonce-reservation release remain
 a separate operation vetoed by either owner family and validated against current
 pool and budget records. Drain work point-reads only live reserved admissions.
 
+Automatic startup uses bounded durable recovery too: repeated readiness attempts
+advance disposable page cursors instead of rescanning terminal history every
+scheduler tick. Explicit operator startup retains the full recovery audit.
 Tip/periodic session reconciliation, unsigned quote expiry, capacity-snapshot
 compaction and recovery expiry use independent disposable continuations. Session
 pages scan at most 64 rows and 512 KiB before filtering; record pages also bound

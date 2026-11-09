@@ -79,7 +79,7 @@ ProviderStartResult StartPaymaster(WalletContext& context, CWallet& target, bool
     }
     const int64_t now = GetTime();
     const DurablePaymasterRecoveryReport recovery =
-        RecoverDurablePaymasterCommits(*wallet, now);
+        RecoverDurablePaymasterCommits(*wallet, now, /*bounded=*/automatic_autostart);
     std::string restore_error;
     if (!CheckPaymasterProviderRestoreGuard(*wallet, restore_error)) {
         throw ApplicationError(ErrorKind::WALLET, restore_error);
