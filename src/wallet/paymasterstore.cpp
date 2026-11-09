@@ -45,7 +45,7 @@ namespace wallet {
 using namespace DigiDollar::Paymaster;
 
 namespace {
-DatabaseReadStatus ReadProtectedPaymasterInputs(WalletBatch& batch, std::set<COutPoint>& inputs)
+DatabaseReadStatus ReadProtectedPaymasterInputs(const CWallet& wallet, WalletBatch& batch, std::set<COutPoint>& inputs)
 {
     inputs.clear();
     std::vector<ProviderPoolEntry> pool;
@@ -53,6 +53,22 @@ DatabaseReadStatus ReadProtectedPaymasterInputs(WalletBatch& batch, std::set<COu
     if (pool_status != DatabaseReadStatus::FOUND && pool_status != DatabaseReadStatus::NOT_FOUND) return pool_status;
     for (const auto& entry : pool)
         if (IsActiveProviderPoolState(entry.state)) inputs.insert(entry.outpoint);
+    const auto history_status = batch.ReadPaymasterPoolHistoryMarker();
+    if (history_status != DatabaseReadStatus::FOUND && history_status != DatabaseReadStatus::NOT_FOUND) return history_status;
+    if (history_status == DatabaseReadStatus::FOUND) {
+        // Point-read only present, unspent wallet outputs, never the archive.
+        // A reorg must not make retired signed inputs ordinary selectable coins.
+        for (const auto& [txid, transaction] : wallet.mapWallet) {
+            for (uint32_t n{0}; n < transaction.tx->vout.size(); ++n) {
+                const COutPoint outpoint{txid, n};
+                if (wallet.IsSpent(outpoint) || inputs.count(outpoint)) continue;
+                ProviderPoolEntry retired;
+                const auto status = batch.ReadPaymasterPoolHistoryWithStatus(outpoint, retired);
+                if (status != DatabaseReadStatus::FOUND && status != DatabaseReadStatus::NOT_FOUND) return status;
+                if (status == DatabaseReadStatus::FOUND && retired.state != PoolEntryState::RELEASED) inputs.insert(outpoint);
+            }
+        }
+    }
     PaymasterMaintenanceExecution execution;
     const auto execution_status = batch.ReadPaymasterMaintenanceExecutionWithStatus(execution);
     if (execution_status != DatabaseReadStatus::FOUND && execution_status != DatabaseReadStatus::NOT_FOUND) return execution_status;
@@ -95,7 +111,7 @@ DatabaseReadStatus PaymasterInputReservations::GetReservationStatus(const COutPo
         m_batch->ReadPaymasterReservationWithStatus(outpoint, reservation)};
     if (reservation_status != DatabaseReadStatus::NOT_FOUND) return reservation_status;
     if (!m_pool_loaded) {
-        m_pool_status = ReadProtectedPaymasterInputs(*m_batch, m_pool_inputs);
+        m_pool_status = ReadProtectedPaymasterInputs(*m_wallet, *m_batch, m_pool_inputs);
         m_pool_loaded = true;
     }
     // AVAILABLE pool entries are dedicated liquidity too. An unreadable pool
@@ -116,7 +132,7 @@ DatabaseReadStatus GetPaymasterProviderPoolInputs(
 {
     LOCK(wallet.cs_wallet);
     WalletBatch batch{wallet.GetDatabase()};
-    return ReadProtectedPaymasterInputs(batch, inputs);
+    return ReadProtectedPaymasterInputs(wallet, batch, inputs);
 }
 
 namespace paymaster_store::internal {
@@ -384,7 +400,18 @@ bool MakeProviderPoolRoom(std::vector<ProviderPoolEntry>& entries,
 /** Register wallet-owned outputs of an exact provider commit as durable pool
  * successors. The scripts originate in the provider authorization manifest,
  * so no output is inferred from value or position. */
-bool RegisterProviderPoolSuccessors(const ProviderAttempt& attempt,
+DatabaseReadStatus ReadProviderPoolDisposition(WalletBatch& batch,
+    const std::vector<ProviderPoolEntry>& original, const COutPoint& outpoint, ProviderPoolEntry& entry)
+{
+    const auto found = std::find_if(original.begin(), original.end(), [&](const auto& candidate) { return candidate.outpoint == outpoint; });
+    if (found != original.end()) {
+        entry = *found;
+        return DatabaseReadStatus::FOUND;
+    }
+    return batch.ReadPaymasterPoolHistoryWithStatus(outpoint, entry);
+}
+
+bool RegisterProviderPoolSuccessors(CWallet& wallet, const ProviderAttempt& attempt,
                                     const ProviderCommitRecord& commit,
                                     const CTransaction& transaction,
                                     const std::optional<ProviderPolicy>& policy,
@@ -393,6 +420,8 @@ bool RegisterProviderPoolSuccessors(const ProviderAttempt& attempt,
                                     std::string& error)
 {
     changed = false;
+    AssertLockHeld(wallet.cs_wallet);
+    WalletBatch records{wallet.GetDatabase()};
     const ProviderAuthorizationManifest& manifest = attempt.provider_manifest;
     if (manifest.manifest_id.IsNull()) return true;
     if (manifest.carrier_return_scripts.size() > 1 ||
@@ -470,6 +499,18 @@ bool RegisterProviderPoolSuccessors(const ProviderAttempt& attempt,
         }
     }
 
+    // Neither a consumed successor nor an explicitly released one becomes
+    // new capacity when its bounded inventory row has been retired.
+    for (auto it = successors.begin(); it != successors.end();) {
+        ProviderPoolEntry retired;
+        const auto status = records.ReadPaymasterPoolHistoryWithStatus(it->outpoint, retired);
+        if (status != DatabaseReadStatus::FOUND && status != DatabaseReadStatus::NOT_FOUND) {
+            error = "PAYMASTER_POOL_HISTORY_READ";
+            return false;
+        }
+        if (wallet.IsSpent(it->outpoint) || status == DatabaseReadStatus::FOUND) it = successors.erase(it);
+        else ++it;
+    }
     size_t missing{0};
     for (const ProviderPoolEntry& successor : successors) {
         const auto existing = std::find_if(

@@ -42,6 +42,7 @@
 #include <wallet/paymasterprovider.h>
 #include <wallet/paymasterpsbt.h>
 #include <wallet/paymasterstore.h>
+#include <wallet/paymasterstore_internal.h>
 #include <wallet/spend.h>
 
 #include <util/overflow.h>
@@ -656,7 +657,7 @@ CarrierWithdrawalResult WithdrawPaymasterCarrier(WalletContext& context, CWallet
             source->reservation_id = plan.operation_id;
             source->updated_at = now;
         }
-        if (!MakeProviderPoolRoomForMaintenance(
+        if (!paymaster_store::internal::MakeProviderPoolRoom(
                 current_pool,
                 plan.replacement_carriers.size(),
                 transfer_error)) {

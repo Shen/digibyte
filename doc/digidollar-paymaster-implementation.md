@@ -301,6 +301,17 @@ beyond the wall clock, as can a later clock correction. Recovering a transaction
 observing confirmation or a conflict must preserve that time floor; otherwise
 completed reserve work can fail validation and incorrectly block capital release.
 Wall-clock expiry checks remain separate from accounting timestamps.
+Terminal pool rows removed from the 256-entry inventory are retained as
+versioned `pmpoolhistory` dispositions in the same checkpointed transaction.
+They never authorize capacity. Reconstruction skips consumed and released
+outputs; a confirmed withdrawal does not require its spent sources in current
+inventory. A returning unresolved source uses its retained full row. Ordinary
+reservation/balance reads point-read present unspent wallet outputs when
+history exists, preserving protection after a reorg without scanning archives.
+Missing disposition for an already-confirmed, unspent legacy output requires
+explicit review (`PAYMASTER_POOL_HISTORY_REVIEW_REQUIRED`); absence cannot
+undo a lost release decision. History grows with retired wallet outputs,
+independently of the bounded live inventory, and requires this compatible build.
 Pool refresh and refill planning read and update their current authoritative
 records within one wallet-lock interval. A caller's status snapshot cannot
 replace newer reservations. Unknown maintenance transaction IDs use a derived

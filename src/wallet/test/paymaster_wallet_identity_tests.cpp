@@ -5279,6 +5279,18 @@ BOOST_AUTO_TEST_CASE(recurring_maintenance_conflict_reversal_survives_restart_at
             BOOST_REQUIRE(find_successor(pool) != pool.end());
             BOOST_CHECK(find_successor(pool)->state == PoolEntryState::AVAILABLE);
 
+            if (withdrawal) {
+                pool.erase(std::remove_if(pool.begin(), pool.end(), [&](const auto& entry) {
+                    return entry.outpoint == record.source_inputs.front();
+                }), pool.end());
+                BOOST_REQUIRE(batch.WritePaymasterProviderPool(pool));
+                BOOST_REQUIRE_MESSAGE(ReconcilePaymasterProviderMaintenance(wallet, recovered, error), error);
+                BOOST_REQUIRE(batch.ReadPaymasterProviderPool(pool));
+                BOOST_CHECK(std::none_of(pool.begin(), pool.end(), [&](const auto& entry) {
+                    return entry.outpoint == record.source_inputs.front();
+                }));
+            }
+
             for (const TxState& failure : {TxState{TxStateConflicted{uint256S("c4"), 1}}, TxState{TxStateInactive{true}}}) {
                 wtx->m_state = failure;
                 BOOST_REQUIRE(batch.WriteTx(*wtx));

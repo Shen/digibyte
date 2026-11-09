@@ -855,31 +855,6 @@ DigiDollar::Paymaster::ProviderServiceStatus ProviderServiceStatusForObservation
     return status;
 }
 
-bool MakeProviderPoolRoomForMaintenance(
-    std::vector<DigiDollar::Paymaster::ProviderPoolEntry>& entries,
-    size_t additional,
-    std::string& error)
-{
-    using namespace DigiDollar::Paymaster;
-    while (entries.size() + additional > 256) {
-        const auto removable = std::min_element(
-            entries.begin(), entries.end(),
-            [](const ProviderPoolEntry& lhs, const ProviderPoolEntry& rhs) {
-                const bool lhs_active = IsActiveProviderPoolState(lhs.state);
-                const bool rhs_active = IsActiveProviderPoolState(rhs.state);
-                if (lhs_active != rhs_active) return !lhs_active;
-                return lhs.updated_at < rhs.updated_at;
-            });
-        if (removable == entries.end() ||
-            IsActiveProviderPoolState(removable->state)) {
-            error = "PAYMASTER_POOL_TOO_LARGE";
-            return false;
-        }
-        entries.erase(removable);
-    }
-    return true;
-}
-
 bool SaveCarrierWithdrawalPreview(
     CWallet& wallet,
     const DigiDollar::Paymaster::ProviderCarrierWithdrawalPlan& plan,
@@ -1120,6 +1095,7 @@ bool ReconcileProviderMaintenance(CWallet& wallet,
     }
     std::vector<ProviderPoolEntry> pool;
     if (!ReadOptionalProviderPool(batch, pool, error)) return false;
+    const auto original_pool = pool;
     bool ledger_changed{false};
     bool pool_changed{false};
     const int64_t now = GetTime();
@@ -1148,7 +1124,22 @@ bool ReconcileProviderMaintenance(CWallet& wallet,
         withdrawal_status == DatabaseReadStatus::FOUND};
     std::map<uint256, std::set<uint256>> history_candidates;
     const bool history_ready = ReadMaintenanceCandidates(wallet, ledger, history_candidates);
+    const auto find_source = [&](const COutPoint& outpoint, bool restore) {
+        auto source = std::find_if(pool.begin(), pool.end(), [&](const auto& entry) { return entry.outpoint == outpoint; });
+        if (source != pool.end() || !restore) return source;
+        ProviderPoolEntry retired;
+        if (paymaster_store::internal::ReadProviderPoolDisposition(batch, original_pool, outpoint, retired) != DatabaseReadStatus::FOUND ||
+            retired.state == PoolEntryState::RELEASED ||
+            !paymaster_store::internal::MakeProviderPoolRoom(pool, 1, error)) {
+            if (error.empty()) error = "PAYMASTER_MAINTENANCE_SOURCE_MISSING";
+            return pool.end();
+        }
+        pool.push_back(std::move(retired));
+        pool_changed = true;
+        return std::prev(pool.end());
+    };
     for (ProviderMaintenanceRecord& record : ledger.records) {
+        const bool previously_confirmed = record.state == ProviderMaintenanceState::CONFIRMED;
         if (record.state != ProviderMaintenanceState::PLANNED &&
             record.state != ProviderMaintenanceState::CONFIRMED &&
             !record.HasUnresolvedTransaction()) {
@@ -1273,14 +1264,8 @@ bool ReconcileProviderMaintenance(CWallet& wallet,
                 pool_changed = true;
             }
             for (const COutPoint& source_input : record.source_inputs) {
-                const auto source = std::find_if(
-                    pool.begin(), pool.end(),
-                    [&](const ProviderPoolEntry& entry) {
-                        return entry.outpoint == source_input;
-                    });
-                if (source == pool.end()) {
-                    continue;
-                }
+                const auto source = find_source(source_input, /*restore=*/true);
+                if (source == pool.end()) return false;
                 // Abandonment or a conflict can reverse. Retain the source for
                 // the exact signed transaction, including records released by
                 // older versions. Never steal another operation's reservation.
@@ -1327,13 +1312,10 @@ bool ReconcileProviderMaintenance(CWallet& wallet,
             ? PoolEntryState::SPENT
             : PoolEntryState::COMMITTED;
         for (const COutPoint& source_input : record.source_inputs) {
-            const auto source = std::find_if(
-                pool.begin(), pool.end(),
-                [&](const ProviderPoolEntry& entry) {
-                    return entry.outpoint == source_input;
-                });
+            auto source = find_source(source_input, /*restore=*/!confirmed);
+            // Confirmation proves consumption of this journal-bound source.
             if (source == pool.end()) {
-                error = "PAYMASTER_MAINTENANCE_SOURCE_MISSING";
+                if (confirmed) continue;
                 return false;
             }
             if (!source->reservation_id.IsNull() &&
@@ -1397,9 +1379,22 @@ bool ReconcileProviderMaintenance(CWallet& wallet,
                     return entry.outpoint == expected.outpoint;
                 });
             if (existing == pool.end()) {
-                if (!MakeProviderPoolRoomForMaintenance(pool, 1, error)) {
+                if (wallet.IsSpent(expected.outpoint)) continue;
+                ProviderPoolEntry retired;
+                const auto status = paymaster_store::internal::ReadProviderPoolDisposition(batch, original_pool, expected.outpoint, retired);
+                if (status != DatabaseReadStatus::FOUND && status != DatabaseReadStatus::NOT_FOUND) {
+                    error = "PAYMASTER_POOL_HISTORY_READ";
                     return false;
                 }
+                if (status == DatabaseReadStatus::FOUND &&
+                    (retired.state == PoolEntryState::RELEASED || retired.state == PoolEntryState::SPENT)) continue;
+                // Older inventories may already have forgotten a release.
+                // Absence is not permission to re-enrol an old unspent output.
+                if (status == DatabaseReadStatus::NOT_FOUND && previously_confirmed) {
+                    error = "PAYMASTER_POOL_HISTORY_REVIEW_REQUIRED";
+                    return false;
+                }
+                if (!paymaster_store::internal::MakeProviderPoolRoom(pool, 1, error)) return false;
                 pool.push_back(std::move(expected));
                 pool_changed = true;
             } else if (existing->purpose != expected.purpose ||
@@ -1848,7 +1843,7 @@ bool PrepareMaintenanceAccounting(CWallet& wallet, const ProviderMaintenanceAuth
             error = "PAYMASTER_MAINTENANCE_POOL_CONFLICT";
             return false;
         }
-        if (!MakeProviderPoolRoomForMaintenance(pool, 1, error)) return false;
+        if (!paymaster_store::internal::MakeProviderPoolRoom(pool, 1, error)) return false;
         ProviderPoolEntry entry;
         entry.outpoint = outpoint;
         entry.purpose = output.purpose;

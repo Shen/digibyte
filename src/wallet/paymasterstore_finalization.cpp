@@ -429,7 +429,7 @@ bool PaymasterStore::CommitProviderFinalTransaction(
         }
         bool pool_changed{false};
         if (!RegisterProviderPoolSuccessors(
-                attempt, existing, transaction, successor_policy,
+                m_wallet, attempt, existing, transaction, successor_policy,
                 pool_entries, pool_changed, error)) {
             return false;
         }
@@ -525,7 +525,7 @@ bool PaymasterStore::CommitProviderFinalTransaction(
 
     bool pool_changed{false};
     if (!RegisterProviderPoolSuccessors(
-            attempt, commit, transaction, successor_policy,
+            m_wallet, attempt, commit, transaction, successor_policy,
             pool_entries, pool_changed, error)) {
         return false;
     }
@@ -717,7 +717,7 @@ bool PaymasterStore::ReconcileProviderPoolSuccessors(size_t& recovered,
         bool commit_changed{false};
         std::string commit_error;
         if (!RegisterProviderPoolSuccessors(
-                attempt, commit, CTransaction{mutable_transaction},
+                m_wallet, attempt, commit, CTransaction{mutable_transaction},
                 successor_policy, pool_entries, commit_changed, commit_error)) {
             // A malformed historical record is isolated from independent
             // valid commits. Exact outpoint conflicts remain fail-closed.

@@ -5,6 +5,8 @@
 #include <wallet/paymasterclient.h>
 #include <wallet/paymasterfinance.h>
 #include <wallet/paymasterservice.h>
+#include <wallet/paymasterstore_internal.h>
+#include <wallet/paymastersessionindex.h>
 #include <wallet/context.h>
 #include <wallet/digidollarwallet.h>
 #include <wallet/rpc/paymaster_internal.h>
@@ -1229,6 +1231,90 @@ BOOST_FIXTURE_TEST_CASE(maintenance_history_is_bounded_and_observes_later_wallet
     BOOST_CHECK(ledger.records.front().state == ProviderMaintenanceState::BROADCAST);
     BOOST_REQUIRE(ReconcileProviderMaintenance(m_wallet, recovered, error));
     BOOST_CHECK_EQUAL(recovered, 0U);
+}
+
+BOOST_FIXTURE_TEST_CASE(maintenance_inventory_pruning_preserves_spends_releases_and_atomic_history, WalletTestingSetup)
+{
+    LOCK(m_wallet.cs_wallet);
+    m_wallet.SetLastBlockProcessed(500, Params().GenesisBlock().GetHash());
+    CKey key;
+    key.MakeNewKey(true);
+    const auto script = GetScriptForDestination(WitnessV1Taproot{XOnlyPubKey{key.GetPubKey()}});
+    ProviderMaintenanceLedger ledger;
+    std::vector<ProviderPoolEntry> all;
+    CMutableTransaction spending;
+    const int64_t now = GetTime();
+    for (uint32_t group{0}; group < 10; ++group) {
+        CMutableTransaction transaction;
+        transaction.vin.emplace_back(COutPoint{uint256::ONE, group});
+        ProviderMaintenanceRecord record;
+        record.operation_id = (HashWriter{} << std::string{"maintenance"} << group).GetHash();
+        record.plan_id = record.operation_id;
+        record.state = ProviderMaintenanceState::CONFIRMED;
+        record.maximum_fee = record.actual_fee = DGBSatoshis{100};
+        record.created_at = record.updated_at = now;
+        for (uint32_t n{0}; n < 30; ++n) {
+            CKey output_key;
+            output_key.MakeNewKey(true);
+            ProviderMaintenanceOutput output;
+            output.script_pub_key = GetScriptForDestination(WitnessV1Taproot{XOnlyPubKey{output_key.GetPubKey()}});
+            output.dgb_value = DGBSatoshis{MIN_ADMISSION_DGB_SATOSHIS + n};
+            record.outputs.push_back(output);
+            transaction.vout.emplace_back(output.dgb_value.value, output.script_pub_key);
+        }
+        record.transaction_id = transaction.GetHash();
+        BOOST_REQUIRE(m_wallet.AddToWallet(MakeTransactionRef(transaction), TxStateConfirmed{Params().GenesisBlock().GetHash(), 1, 0}));
+        for (uint32_t n{0}; n < 30; ++n) {
+            ProviderPoolEntry entry;
+            entry.outpoint = COutPoint{record.transaction_id, n};
+            entry.state = all.size() < 280 ? PoolEntryState::SPENT : PoolEntryState::AVAILABLE;
+            entry.purpose = record.outputs[n].purpose;
+            entry.script_pub_key = record.outputs[n].script_pub_key;
+            entry.dgb_value = record.outputs[n].dgb_value;
+            entry.origin_commit_key = record.operation_id;
+            entry.confirmation_height = 1;
+            entry.updated_at = now;
+            if (all.size() < 280) spending.vin.emplace_back(entry.outpoint);
+            all.push_back(entry);
+        }
+        ledger.records.push_back(record);
+    }
+    spending.vout.emplace_back(1, CScript{} << OP_TRUE);
+    BOOST_REQUIRE(m_wallet.AddToWallet(MakeTransactionRef(spending), TxStateInactive{}));
+    WalletBatch batch{m_wallet.GetDatabase()};
+    std::vector<ProviderPoolEntry> pool(all.begin() + 44, all.end());
+    BOOST_REQUIRE(batch.WritePaymasterProviderPool(pool));
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(ValidateProviderMaintenanceLedger(ledger, error), error);
+    BOOST_REQUIRE(batch.WritePaymasterMaintenanceLedger(ledger));
+    size_t recovered{0};
+    BOOST_REQUIRE_MESSAGE(ReconcileProviderMaintenance(m_wallet, recovered, error), error);
+    BOOST_REQUIRE(batch.ReadPaymasterProviderPool(pool));
+    BOOST_CHECK_EQUAL(pool.size(), 256U);
+    BOOST_CHECK_EQUAL(std::count_if(pool.begin(), pool.end(), [](const auto& entry) { return IsActiveProviderPoolState(entry.state); }), 20);
+
+    const auto released = pool.back().outpoint;
+    pool.back().state = PoolEntryState::RELEASED;
+    BOOST_REQUIRE(batch.WritePaymasterProviderPool(pool));
+    pool.pop_back();
+    BOOST_REQUIRE(batch.TxnBegin());
+    BOOST_REQUIRE(batch.WritePaymasterProviderPool(pool));
+    ProviderPoolEntry history;
+    BOOST_CHECK(batch.ReadPaymasterPoolHistoryWithStatus(released, history) == DatabaseReadStatus::FOUND);
+    BOOST_REQUIRE(batch.TxnAbort());
+    BOOST_CHECK(batch.ReadPaymasterPoolHistoryWithStatus(released, history) == DatabaseReadStatus::NOT_FOUND);
+    BOOST_REQUIRE(batch.WritePaymasterProviderPool(pool));
+    BOOST_REQUIRE(batch.ReadPaymasterPoolHistoryWithStatus(released, history) == DatabaseReadStatus::FOUND);
+    BOOST_CHECK(history.state == PoolEntryState::RELEASED);
+    BOOST_REQUIRE_MESSAGE(ReconcileProviderMaintenance(m_wallet, recovered, error), error);
+    BOOST_REQUIRE(batch.ReadPaymasterProviderPool(pool));
+    BOOST_CHECK(std::none_of(pool.begin(), pool.end(), [&](const auto& entry) { return entry.outpoint == released; }));
+    BOOST_CHECK(!IsPaymasterInputReserved(m_wallet, released));
+    // History failures cannot be interpreted as an absent release decision.
+    auto raw = m_wallet.GetDatabase().MakeBatch();
+    BOOST_REQUIRE(raw->Write(std::make_pair(std::string{"pmpoolhistory"}, released), uint16_t{ProviderPoolEntry::CURRENT_VERSION + 1}));
+    BOOST_CHECK(!ReconcileProviderMaintenance(m_wallet, recovered, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_POOL_HISTORY_READ");
 }
 
 BOOST_FIXTURE_TEST_CASE(maintenance_history_never_recovers_an_ambiguous_match, WalletTestingSetup)

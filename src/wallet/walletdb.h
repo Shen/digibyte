@@ -722,6 +722,11 @@ public:
     DatabaseReadStatus ReadPaymasterProviderPoolWithStatus(
         std::vector<DigiDollar::Paymaster::ProviderPoolEntry>& entries);
     bool HasPaymasterProviderPool();
+    /** Terminal pool rows survive inventory pruning. They are disposition
+     * evidence, never authority to select or sign a new payment. */
+    DatabaseReadStatus ReadPaymasterPoolHistoryWithStatus(
+        const COutPoint& outpoint, DigiDollar::Paymaster::ProviderPoolEntry& entry);
+    DatabaseReadStatus ReadPaymasterPoolHistoryMarker();
     bool WritePaymasterLiquidityPolicy(
         const DigiDollar::Paymaster::ProviderLiquidityPolicy& policy,
         bool overwrite = true);

@@ -2026,7 +2026,49 @@ bool WalletBatch::WritePaymasterProviderPool(
     using namespace DigiDollar::Paymaster;
     std::string error;
     if (!ValidateProviderPoolEntries(entries, error)) return false;
-    return WritePaymasterIC(DBKeys::PAYMASTER_PROVIDER_POOL, entries, overwrite);
+    const bool own = !PaymasterCheckpointInTransaction(this);
+    if (own && !TxnBegin()) return false;
+    const auto fail = [&] {
+        PaymasterCheckpointFailed(this);
+        if (own) TxnAbort();
+        return false;
+    };
+    std::vector<ProviderPoolEntry> previous;
+    const auto status = ReadPaymasterProviderPoolWithStatus(previous);
+    if (status != DatabaseReadStatus::FOUND && status != DatabaseReadStatus::NOT_FOUND) return fail();
+    for (const auto& old : previous) {
+        if (std::any_of(entries.begin(), entries.end(), [&](const auto& entry) { return entry.outpoint == old.outpoint; })) continue;
+        if (IsActiveProviderPoolState(old.state)) continue; // caller owns active transitions; pruning never removes them
+        if (!WritePaymasterIC(std::make_pair(std::string{"pmpoolhistory"}, old.outpoint), old, true) ||
+            !WritePaymasterIC(std::string{"pmpoolhistoryversion"}, uint16_t{1}, true)) return fail();
+    }
+    // Explicit re-enrolment replaces history only in the same transaction as
+    // its new authoritative pool row. Automatic reconstruction reads history.
+    for (const auto& entry : entries) {
+        if (!ErasePaymasterIC(std::make_pair(std::string{"pmpoolhistory"}, entry.outpoint))) return fail();
+    }
+    if (!WritePaymasterIC(DBKeys::PAYMASTER_PROVIDER_POOL, entries, overwrite)) return fail();
+    return !own || TxnCommit();
+}
+
+DatabaseReadStatus WalletBatch::ReadPaymasterPoolHistoryMarker()
+{
+    uint16_t version{0};
+    const auto status = m_batch->ReadWithStatus(std::string{"pmpoolhistoryversion"}, version);
+    if (status != DatabaseReadStatus::FOUND) return status;
+    return version == 1 ? status : DatabaseReadStatus::UNSUPPORTED_VERSION;
+}
+
+DatabaseReadStatus WalletBatch::ReadPaymasterPoolHistoryWithStatus(
+    const COutPoint& outpoint, DigiDollar::Paymaster::ProviderPoolEntry& entry)
+{
+    using namespace DigiDollar::Paymaster;
+    const auto status = ReadPaymasterVersionedRecord(std::make_pair(std::string{"pmpoolhistory"}, outpoint), entry);
+    if (status != DatabaseReadStatus::FOUND) return status;
+    std::string error;
+    if (entry.outpoint != outpoint || IsActiveProviderPoolState(entry.state) ||
+        !ValidateProviderPoolEntries({entry}, error)) return DatabaseReadStatus::READ_ERROR;
+    return status;
 }
 
 DatabaseReadStatus WalletBatch::ReadPaymasterProviderPoolWithStatus(

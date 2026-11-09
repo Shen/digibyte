@@ -84,7 +84,12 @@ bool CheckIndexedClientAuthorizationEvidence(WalletBatch& batch, const PaymentSe
 /** Historical acceptance binding; expiry now never invalidates an old proof.
  * This predicate alone does not establish an active attempt or permit signing. */
 bool HasAcceptedClientManifest(const ProviderAttempt& attempt, int64_t observation_time);
-bool RegisterProviderPoolSuccessors(const ProviderAttempt& attempt,
+bool MakeProviderPoolRoom(std::vector<ProviderPoolEntry>& entries, size_t additional, std::string& error);
+/** Read a disposition from the original inventory or its durable terminal
+ * history. Preserve the original snapshot while pruning the working vector. */
+DatabaseReadStatus ReadProviderPoolDisposition(WalletBatch& batch,
+    const std::vector<ProviderPoolEntry>& original, const COutPoint& outpoint, ProviderPoolEntry& entry);
+bool RegisterProviderPoolSuccessors(CWallet& wallet, const ProviderAttempt& attempt,
                                     const ProviderCommitRecord& commit,
                                     const CTransaction& transaction,
                                     const std::optional<ProviderPolicy>& policy,

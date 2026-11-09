@@ -242,10 +242,6 @@ DigiDollar::Paymaster::ProviderLiquidityPolicy SuggestedLiquidityPolicy(
     int64_t now);
 DigiDollar::Paymaster::ProviderServiceStatus ProviderServiceStatusForObservation(
     DigiDollar::Paymaster::ProviderServiceStatus status, bool ready, bool synchronized);
-bool MakeProviderPoolRoomForMaintenance(
-    std::vector<DigiDollar::Paymaster::ProviderPoolEntry>& entries,
-    size_t additional,
-    std::string& error);
 bool SaveCarrierWithdrawalPreview(
     CWallet& wallet,
     const DigiDollar::Paymaster::ProviderCarrierWithdrawalPlan& plan,
