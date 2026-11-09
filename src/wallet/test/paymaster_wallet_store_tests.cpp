@@ -5143,6 +5143,25 @@ void CheckAlternativeRecoveryCapacityCandidate(WalletTestingSetup& fixture, uint
     BOOST_CHECK_EQUAL(
         error, "PAYMASTER_RECOVERY_CAPACITY_CLAIM_CANDIDATE_MISSING");
 
+    {
+        FlatSigningProvider signing_provider;
+        auto descriptor = Parse("tr(" + EncodeSecret(return_key) + ")", signing_provider, error, false);
+        BOOST_REQUIRE(descriptor);
+        WalletDescriptor wallet_descriptor{std::move(descriptor), 0, 0, 1, 0};
+        LOCK(m_wallet.cs_wallet);
+        m_wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+        BOOST_REQUIRE(m_wallet.AddWalletDescriptor(wallet_descriptor, signing_provider, "", false));
+        PaymentSession original;
+        original.request_id = recovery.request_id;
+        original.session_id = recovery.session_id;
+        original.user_inputs = {user_input};
+        original.state = SessionState::PENDING_PROVIDER;
+        original.created_at = original.updated_at = 100;
+        WalletBatch batch{m_wallet.GetDatabase()};
+        BOOST_REQUIRE(batch.WritePaymasterSession(original));
+        BOOST_REQUIRE(batch.WritePaymasterReservation({InputReservation::CURRENT_VERSION, user_input,
+            original.request_id, original.session_id, ReservationRole::USER_DD, true, 100}));
+    }
     AlternativeRecoveryRecord corrupt_candidate{recovery};
     corrupt_candidate.version = AlternativeRecoveryRecord::CURRENT_VERSION;
     corrupt_candidate.capacity_proof_claim_candidate = {1, 2, 3};
@@ -5265,6 +5284,36 @@ void CheckAlternativeRecoveryCapacityCandidate(WalletTestingSetup& fixture, uint
         error);
     BOOST_CHECK(!equivocation);
     database.ClearFailureInjection();
+
+    {
+        wallet::CWallet mutation_wallet{fixture.m_node.chain.get(), "capacity-mutation", DuplicateMockDatabase(m_wallet.GetDatabase())};
+        BOOST_REQUIRE(mutation_wallet.LoadWallet() == DBErrors::LOAD_OK);
+        PaymasterStore mutation_store{mutation_wallet};
+        auto& mutation_database = GetMockableDatabase(mutation_wallet);
+        request_ready.capacity_proof_claim_candidate = first_proof;
+        const auto before_snapshot = mutation_database.m_records;
+        for (const bool fail_commit : {false, true}) {
+            if (fail_commit) mutation_database.FailCommit();
+            else mutation_database.FailWriteAt(2);
+            BOOST_CHECK(!mutation_store.UpdateAlternativeRecovery(request_ready, error));
+            mutation_database.ClearFailureInjection();
+            BOOST_CHECK(mutation_database.m_records == before_snapshot);
+        }
+        // Corrupt derived resources are neither absence nor payment authority.
+        const auto resource_key = std::make_pair(DBKeys::PAYMASTER_CAPACITY_RESOURCE,
+            std::make_pair(recovery_provider_id, decoded_first_proof.liquidity_slots.front().dgb_inputs.front().input.outpoint));
+        auto raw = mutation_database.MakeBatch();
+        BOOST_REQUIRE(raw->Write(resource_key, uint16_t{65535}));
+        const auto corrupt_snapshot = mutation_database.m_records;
+        BOOST_CHECK(!mutation_store.UpdateAlternativeRecovery(request_ready, error));
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_CAPACITY_RESOURCE_DATABASE_READ");
+        BOOST_CHECK(mutation_database.m_records == corrupt_snapshot);
+        BOOST_REQUIRE(raw->Erase(resource_key));
+        BOOST_REQUIRE_MESSAGE(mutation_store.UpdateAlternativeRecovery(request_ready, error), error);
+        uint256 bound_snapshot;
+        BOOST_REQUIRE(WalletBatch{mutation_database}.ReadPaymasterCapacitySlot(request_ready.capacity_snapshot.resource_commitment, bound_snapshot));
+        BOOST_CHECK(bound_snapshot == request_ready.capacity_snapshot.snapshot_id);
+    }
 
     BOOST_REQUIRE_MESSAGE(
         store.StageAlternativeRecoveryCapacityProofClaimCandidate(
@@ -5422,6 +5471,15 @@ BOOST_AUTO_TEST_CASE(conflicting_capacity_proofs_are_evidence_and_block_provider
                               equivocation, error),
                           error);
     BOOST_CHECK(!equivocation);
+    auto& mutation_database = GetMockableDatabase(m_wallet);
+    const auto before_snapshot = mutation_database.m_records;
+    for (const bool fail_commit : {false, true}) {
+        if (fail_commit) mutation_database.FailCommit();
+        else mutation_database.FailWriteAt(2); // Snapshot/slot + role rows are one transaction.
+        BOOST_CHECK(!store.CommitValidatedCapacitySnapshot(request_id, attempt.attempt_id, first_snapshot, 102, error));
+        mutation_database.ClearFailureInjection();
+        BOOST_CHECK(mutation_database.m_records == before_snapshot);
+    }
     BOOST_REQUIRE_MESSAGE(store.CommitValidatedCapacitySnapshot(
                               request_id, attempt.attempt_id, first_snapshot, 102, error),
                           error);

@@ -998,154 +998,16 @@ bool PaymasterStore::CommitValidatedCapacitySnapshot(
         error = "PAYMASTER_CAPACITY_CLAIM_CANDIDATE_MISSING";
         return false;
     }
-    if (attempt.capacity_proof_claim_candidate != snapshot.capacity_proof) {
-        std::string evidence_error;
-        if (RecordCapacityEquivocationLocked(
-                batch, authoritative_request, attempt.provider_identity_key,
-                attempt.capacity_proof_claim_candidate,
-                snapshot.capacity_proof, snapshot.request_hash, now,
-                evidence_error)) {
-            error = evidence_error.empty() ? "PAYMASTER_CAPACITY_EQUIVOCATION" : std::move(evidence_error);
-            return false;
-        }
-        error = evidence_error.empty() ? "PAYMASTER_CAPACITY_CLAIM_CANDIDATE_CONFLICT" : std::move(evidence_error);
-        return false;
-    }
-
-    ValidatedCapacitySnapshot by_id;
-    if (batch.ReadPaymasterCapacitySnapshot(snapshot.snapshot_id, by_id) &&
-        !SameCapacitySnapshot(by_id, snapshot)) {
-        std::string evidence_error;
-        if (by_id.provider_id == snapshot.provider_id &&
-            by_id.request_hash == snapshot.request_hash &&
-            RecordCapacityEquivocationLocked(
-                batch, capacity_request, attempt.provider_identity_key,
-                by_id.capacity_proof, snapshot.capacity_proof,
-                snapshot.request_hash, now, evidence_error)) {
-            error = std::move(evidence_error);
-            return false;
-        }
-        if (!evidence_error.empty()) {
-            error = std::move(evidence_error);
-            return false;
-        }
-        error = "PAYMASTER_CAPACITY_EQUIVOCATION";
-        return false;
-    }
-    std::vector<CapacityResourceBinding> resource_bindings;
-    if (!BuildCapacityResourceBindings(snapshot, proof, resource_bindings,
-                                       error)) {
-        return false;
-    }
-
-    // Compatibility scan for wallets created before the per-outpoint index.
-    // It also provides a fail-closed cross-check if an index entry was lost or
-    // corrupted. Only live snapshots can conflict; expired authority may be
-    // replaced but remains available as historical evidence.
-    std::vector<ValidatedCapacitySnapshot> persisted_snapshots;
-    if (!batch.ListPaymasterCapacitySnapshots(persisted_snapshots)) {
-        error = "PAYMASTER_CAPACITY_SNAPSHOT_DATABASE_READ";
-        return false;
-    }
-    for (const ValidatedCapacitySnapshot& existing : persisted_snapshots) {
-        if (existing.snapshot_id == snapshot.snapshot_id ||
-            existing.provider_id != snapshot.provider_id ||
-            existing.expires_at <= now) {
-            continue;
-        }
-        PaymasterCapacityProof existing_proof;
-        if (!DecodeCanonicalCapacityProof(existing.capacity_proof,
-                                          existing_proof)) {
-            error = "PAYMASTER_CAPACITY_SNAPSHOT_ENCODING";
-            return false;
-        }
-        for (const CapacityResourceBinding& binding : resource_bindings) {
-            if (!CapacityProofContainsOutpoint(existing_proof,
-                                               binding.outpoint)) {
-                continue;
-            }
-            std::string evidence_error;
-            if (RecordCapacityResourceEquivocationLocked(
-                    batch, snapshot.provider_id,
-                    attempt.provider_identity_key, binding.outpoint,
-                    existing.capacity_proof, snapshot.capacity_proof, now,
-                    evidence_error)) {
-                error = std::move(evidence_error);
-                return false;
-            }
-            error = evidence_error.empty() ? "PAYMASTER_CAPACITY_RESOURCE_ALREADY_BOUND" : std::move(evidence_error);
-            return false;
-        }
-    }
-
-    std::vector<bool> replace_resources;
-    replace_resources.reserve(resource_bindings.size());
-    for (const CapacityResourceBinding& binding : resource_bindings) {
-        CapacityResourceBinding existing;
-        const bool have_existing = batch.ReadPaymasterCapacityResource(
-            binding.provider_id, binding.outpoint, existing);
-        if (!have_existing) {
-            replace_resources.push_back(false);
-            continue;
-        }
-        if (SameCapacityResourceBinding(existing, binding)) {
-            replace_resources.push_back(true);
-            continue;
-        }
-        if (existing.expires_at > now) {
-            ValidatedCapacitySnapshot existing_snapshot;
-            std::string evidence_error;
-            if (batch.ReadPaymasterCapacitySnapshot(existing.snapshot_id,
-                                                    existing_snapshot) &&
-                RecordCapacityResourceEquivocationLocked(
-                    batch, snapshot.provider_id,
-                    attempt.provider_identity_key, binding.outpoint,
-                    existing_snapshot.capacity_proof,
-                    snapshot.capacity_proof, now, evidence_error)) {
-                error = std::move(evidence_error);
-                return false;
-            }
-            error = evidence_error.empty() ? "PAYMASTER_CAPACITY_RESOURCE_ALREADY_BOUND" : std::move(evidence_error);
-            return false;
-        }
-        replace_resources.push_back(true);
-    }
-
-    uint256 bound_snapshot_id;
-    bool replace_slot{false};
-    if (batch.ReadPaymasterCapacitySlot(snapshot.resource_commitment,
-                                        bound_snapshot_id) &&
-        bound_snapshot_id != snapshot.snapshot_id) {
-        ValidatedCapacitySnapshot existing;
-        if (!batch.ReadPaymasterCapacitySnapshot(bound_snapshot_id, existing)) {
-            error = "PAYMASTER_CAPACITY_RESOURCE_ALREADY_BOUND";
-            return false;
-        }
-        // A live aggregate collision necessarily overlaps every resource and
-        // has already been rejected above. Reaching here is therefore only a
-        // safe expired replacement.
-        if (existing.expires_at > now) {
-            error = "PAYMASTER_CAPACITY_RESOURCE_ALREADY_BOUND";
-            return false;
-        }
-        replace_slot = true;
-    }
+    CapacitySnapshotMutation capacity_mutation;
+    if (!PrepareCapacitySnapshotMutation(batch, capacity_request, attempt.provider_identity_key,
+            attempt.capacity_proof_claim_candidate, snapshot, proof, now, capacity_mutation, error)) return false;
 
     attempt.capacity_snapshot = snapshot;
     attempt.updated_at = std::max(attempt.updated_at, now);
     session.updated_at = std::max(session.updated_at, now);
-    if (!batch.TxnBegin()) return Abort(batch, error, "PAYMASTER_DATABASE_BEGIN");
-    if (!batch.WritePaymasterCapacitySnapshot(snapshot, false) ||
-        !batch.WritePaymasterCapacitySlot(snapshot.resource_commitment,
-                                          snapshot.snapshot_id, replace_slot) ||
-        !batch.WritePaymasterAttempt(attempt) || !batch.WritePaymasterSession(session)) {
+    if (!BeginCapacitySnapshotMutation(batch, snapshot, capacity_mutation, error)) return false;
+    if (!batch.WritePaymasterAttempt(attempt) || !batch.WritePaymasterSession(session)) {
         return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
-    }
-    for (size_t index = 0; index < resource_bindings.size(); ++index) {
-        if (!batch.WritePaymasterCapacityResource(
-                resource_bindings[index], replace_resources[index])) {
-            return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
-        }
     }
     if (!batch.TxnCommit()) {
         error = "PAYMASTER_DATABASE_COMMIT";

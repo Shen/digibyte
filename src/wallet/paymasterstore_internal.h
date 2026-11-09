@@ -314,6 +314,23 @@ bool BuildCapacityResourceBindings(const ValidatedCapacitySnapshot& snapshot,
                                    const PaymasterCapacityProof& proof,
                                    std::vector<CapacityResourceBinding>& bindings,
                                    std::string& error);
+/** One conflict/index mutation contract for payment and recovery capacity.
+ * Prepare outside the caller's transaction (signed evidence may be persisted);
+ * begin the index transaction, then add the role-specific writes and commit.
+ * Callers hold cs_wallet throughout preparation and commit. */
+struct CapacitySnapshotMutation {
+    std::vector<CapacityResourceBinding> resources;
+    std::vector<bool> replace_resources;
+    bool replace_slot{false};
+};
+bool PrepareCapacitySnapshotMutation(
+    WalletBatch& batch, const PaymasterCapacityRequest& capacity_request,
+    const XOnlyPubKey& identity_key, const std::vector<unsigned char>& claim_candidate,
+    const ValidatedCapacitySnapshot& snapshot, const PaymasterCapacityProof& proof,
+    int64_t now, CapacitySnapshotMutation& plan, std::string& error);
+bool BeginCapacitySnapshotMutation(WalletBatch& batch,
+    const ValidatedCapacitySnapshot& snapshot, const CapacitySnapshotMutation& plan, std::string& error);
+
 bool DecodeCanonicalQuoteRequest(const std::vector<unsigned char>& bytes,
                                  PaymasterQuoteRequest& request);
 bool DecodeCanonicalQuoteResponse(const std::vector<unsigned char>& bytes,

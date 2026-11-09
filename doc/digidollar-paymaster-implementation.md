@@ -419,6 +419,16 @@ once and updated only after a successful wallet transaction. Aborts invalidate i
 A match triggers point reads and exact artifact validation; the index cannot grant
 payment permission. Corruption invalidates the lookup and forces reconstruction.
 
+Payment and alternative recovery capacity use `PrepareCapacitySnapshotMutation`
+and `BeginCapacitySnapshotMutation` for signed-claim conflicts, snapshot identity,
+legacy aggregate scans, per-outpoint collisions, equivocation evidence and index
+writes. Role-specific request/signature bindings remain at each store boundary;
+the prepared mutation is applied inside the caller's atomic session transition.
+Unreadable resources or snapshots fail closed. Direct-message vector counts are
+bounded before element allocation (one capacity slot, 64 DGB/input proofs,
+four offers, three admission slots and 64-byte signatures); PSBT blobs use the
+existing 900 KiB envelope limit. Supported V5/V6 bytes and hashes are unchanged.
+
 Finance v2 stores immutable event identities individually, with transaction/time
 indexes, checked daily contributions and versioned totals/revision metadata in the
 existing wallet database. Wallet keys, balances and signed artifacts are not
