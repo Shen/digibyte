@@ -4,6 +4,39 @@ There is **no complete current-revision release certification** in this record.
 The candidate below and historical checkpoints identify actual verification;
 implemented behavior alone does not establish release acceptance.
 
+## Pool history, bounded decoding and local recovery completion
+
+AP1–AP6 based on `17db53cde8423ba9790b62b0d00531d062ed8de1`, verified
+on 2026-11-09. Code content through `41e03ab53659468816812ee94ac5f9cdfcba55e3`
+matches the final native run; subsequent edits only document the contracts and
+verification. Existing protocol/record versions are unchanged; retired pool
+dispositions have new versioned history keys. Commands and operator checks are
+in the [focused runbook](digidollar-paymaster-testing.md#review-follow-up-regressions).
+
+| Executed check | Result and scope |
+|---|---|
+| Final native retest | Exit 0: **25 cases / 3,171 assertions**. Covers 300-output pool history, protected before-images during same-pass retirement, spent withdrawal source pruning/reorg restoration, persistent releases, rollback/future row and marker rejection, V5/V6 allocation limits, automatic-start paging, both capacity mutation callers, exact recovery at 239/240 confirmations, disconnect, wrong witness, fee settlement, incoming-result retention, idempotency, ordinary DGB/DD spendability and wallet database behavior. |
+| Qt | **Eight functions / 27 feature rows**, zero failures/skips, Windows/Fusion. Includes all 20 review/cancellation variants; expiry cleanup lag, signed resumability, exact effect parameters, reply generations, lost replies, wallet change and delayed callbacks. |
+| Compilation | All **19 changed C++ units** freshly compiled and linked with MSVC 14.43.34808, `/W3 /WX /Od /MT /std:c++20`; 26 fresh units in total including direct decoder consumers and two ordinary-wallet test consumers. All 13 changed production units plus five decoder consumers pass C++17 `/Zs`. Source/object hashes checked. |
+| Local controls | Trusted baseline dependency/cycle and shared-Core boundary checks, six positive/negative boundary fixtures, JSON and whitespace checks pass. No boundary-policy or validation exception. |
+
+Native SHA256: `161f39e35f1b96cbff44b13363be18c6191f2d2a96be732f723ba94812a00dad`.
+Qt SHA256: `fc652e0ac7c0fdc0d1a3aeddba2b54f614eee614dc4fb95a3925d83a3ec60c30`.
+Commands, full logs and source/object manifests are retained locally under
+`.ai/implement-ap1-ap6-17db53/`. Failed initial runs remain recorded: they exposed
+a completion ordering regression affecting authenticated-result TTL retention,
+fixtures that overwrote intentionally unreadable pool records, missing test
+indexes and partial-link selection of retained inline decoders. A separate
+automatic-service fixture lacked its expected pending target; that failure also
+reproduced with the retained baseline executable. The final run includes the
+corrected fixture and retains its original state assertion.
+
+These are isolated partial links with retained dependencies and incomplete
+transitive-header provenance. Clean product builds, complete native/Qt/functional
+suites, cross-platform builds, sanitizers, the repository Tidy plugin and long
+fuzz/live-network campaigns were not run. They remain operator/release checks;
+use the configured rebuild and matrix commands in the runbook.
+
 ## Maintenance release, missing recovery results and archive work
 
 Packages 1–5 based on `81ea7a772dcf0287df00980aaaa28886e66201ec`,

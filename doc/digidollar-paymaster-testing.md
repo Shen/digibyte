@@ -546,6 +546,38 @@ git diff -w $paymasterBases.official_baseline HEAD
 
 ## Review follow-up regressions
 
+For the pool-history, parser-allocation and missing-result completion changes,
+rebuild the affected objects and run this focused selection. Require exit 0
+and no failed selected cases (runtime: about one minute on Windows):
+
+```powershell
+& ./build_msvc/x64/Release/test_digibyte.exe '--run_test=paymaster_application_tests/maintenance_inventory_pruning_preserves_spends_releases_and_atomic_history,provider_readiness_requires_matching_wallet_and_index_tip:paymaster_protocol_tests/wire_vector_counts_fail_before_element_allocation:paymaster_wallet_store_tests/alternative_recovery_capacity_candidate_is_durable_and_non_authorizing,v5_alternative_recovery_capacity_candidate_is_non_authorizing,conflicting_capacity_proofs_are_evidence_and_block_provider,background_maintenance_pages_terminal_history_and_reuses_final_index,client_tip_reconciles_payment_without_provider_reply:paymaster_wallet_security_tests/client_recovery_permanent_provider_loss_settles_only_after_safety_depth,client_recovery_confirmed_before_first_result_survives_expiry_and_reload:paymaster_wallet_identity_tests/recurring_maintenance_conflict_reversal_survives_restart_atomically,unreadable_paymaster_locks_fail_closed_for_coin_selection,paymaster_input_scan_reuses_pool_without_cross_scan_cache' --report_level=detailed
+if ($LASTEXITCODE -ne 0) { throw 'Paymaster pool/parser/recovery regression failed' }
+```
+
+This reaches 300 cumulative outputs with 20 live entries; spent withdrawal
+source pruning/reorg restoration; protected source before-images when retirement
+and pruning share a transaction; retained releases, history rollback and future
+row/marker rejection including re-enrolment; 25,000 empty slots and nested count limits before allocation with
+V5/V6 byte round trips; real automatic-start paging; both capacity callers with
+write/commit failures and recovery resource corruption. Recovery observation
+retains authority at 239 confirmations and after a disconnect, rejects altered
+witnesses, rolls back failed commits, then settles through public refresh at
+240 confirmations without a provider result. Require separate recovery/payment
+status, spent recovery fee, released original fee and idempotent tombstone replay.
+Keep incoming signed-result retention and ordinary DGB/DD balance/selection,
+manual-lock and database regressions in the adjacent selection.
+
+For Qt use the filters below with `paymasterSendControllerClockAndEffects`,
+`paymasterSendControllerRecoveryReview`, `paymasterClientRecoveryExpiryIsFailClosed`,
+`paymasterSignedRecoverySurvivesQuoteExpiry`, `paymasterClientReviewCancellation`,
+`paymasterSendControllerCancellationAndWalletChange`,
+`paymasterSendControllerAuthorizationAndLostReply` and
+`paymasterClientDelayedCallbackIgnoresWalletClose`. The expiry checks accept
+cleanup lag while denying unsigned signing, retain signed resumability and
+observation, and still reject contradictory signed cleanup. Controller effects
+bind exact parameters and generations; cancellation needs a fresh capability.
+
 For the maintenance-release, missing recovery-result, pruning-cache, archive
 and provider completion fixes, run these focused regressions after compiling
 the changed production and test sources:

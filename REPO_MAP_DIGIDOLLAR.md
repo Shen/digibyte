@@ -682,7 +682,8 @@ Wallet RPC adapters cover provider, client, discovery, processing, runtime
 and send operations. Lifecycle implementation lives in `wallet/paymasterintegration.cpp`.
 `wallet/paymasterresults.h` defines native operation results and
 `ProviderProcessingDisposition` distinguishes no message, processed, rejected
-and deferred independently of optional response delivery.
+and deferred independently of optional response delivery. `HasMessage()` tests
+presence only; the RPC `processed` compatibility field retains its old meaning.
 `wallet/rpc/paymaster_results.cpp` encodes their RPC representation. The shared
 Qt worker queue is `qt/walletasync.*`; `qt/paymasterasync.*` interprets domain errors.
 Exact method groups and
@@ -935,6 +936,11 @@ continuation; `ListPaymasterCapacityResponsesPage` bounds scanned rows and bytes
 Independent `PaymasterScanPage` continuations bound background expiry,
 reconciliation, pool-successor repair and periodic rebroadcast. Record pages reuse canonical point
 readers; final broadcast validation reuses this index and validates exact authority.
+Automatic startup uses these bounded recovery cursors. Payment/recovery capacity
+share the store's `PrepareCapacitySnapshotMutation`/`BeginCapacitySnapshotMutation`
+contract, and `CompleteClientConfirmedFinal` completes exact local final evidence
+without manufacturing provider results. Retired pool dispositions are point-read
+from versioned `pmpoolhistory`; the current pool remains bounded.
 
 ### src/wallet/load.{h,cpp}
 
