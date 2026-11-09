@@ -2038,15 +2038,26 @@ bool WalletBatch::WritePaymasterProviderPool(
     if (status != DatabaseReadStatus::FOUND && status != DatabaseReadStatus::NOT_FOUND) return fail();
     const auto history_status = ReadPaymasterPoolHistoryMarker();
     if (history_status != DatabaseReadStatus::FOUND && history_status != DatabaseReadStatus::NOT_FOUND) return fail();
+    const auto history_readable = [&](const COutPoint& outpoint) {
+        ProviderPoolEntry archived;
+        const auto read = ReadPaymasterPoolHistoryWithStatus(outpoint, archived);
+        return read == DatabaseReadStatus::FOUND || read == DatabaseReadStatus::NOT_FOUND;
+    };
     for (const auto& old : previous) {
         if (std::any_of(entries.begin(), entries.end(), [&](const auto& entry) { return entry.outpoint == old.outpoint; })) continue;
-        if (IsActiveProviderPoolState(old.state)) continue; // caller owns active transitions; pruning never removes them
+        // A source can become SPENT and be pruned in the same working copy.
+        // Retain its protected before-image even when the terminal row was
+        // never written separately. History grants no capacity authority.
+        if (IsActiveProviderPoolState(old.state) && old.state != PoolEntryState::RESERVED &&
+            old.state != PoolEntryState::COMMITTED) continue;
+        if (!history_readable(old.outpoint)) return fail();
         if (!WritePaymasterIC(std::make_pair(std::string{"pmpoolhistory"}, old.outpoint), old, true) ||
             !WritePaymasterIC(std::string{"pmpoolhistoryversion"}, uint16_t{1}, true)) return fail();
     }
     // Explicit re-enrolment replaces history only in the same transaction as
     // its new authoritative pool row. Automatic reconstruction reads history.
     for (const auto& entry : entries) {
+        if (!history_readable(entry.outpoint)) return fail();
         if (!ErasePaymasterIC(std::make_pair(std::string{"pmpoolhistory"}, entry.outpoint))) return fail();
     }
     if (!WritePaymasterIC(DBKeys::PAYMASTER_PROVIDER_POOL, entries, overwrite)) return fail();
@@ -2071,7 +2082,8 @@ DatabaseReadStatus WalletBatch::ReadPaymasterPoolHistoryWithStatus(
     if (status != DatabaseReadStatus::FOUND) return status;
     if (marker_status != DatabaseReadStatus::FOUND) return DatabaseReadStatus::READ_ERROR;
     std::string error;
-    if (entry.outpoint != outpoint || IsActiveProviderPoolState(entry.state) ||
+    if (entry.outpoint != outpoint || entry.state == PoolEntryState::AVAILABLE ||
+        entry.state == PoolEntryState::PENDING_SUCCESSOR ||
         !ValidateProviderPoolEntries({entry}, error)) return DatabaseReadStatus::READ_ERROR;
     return status;
 }

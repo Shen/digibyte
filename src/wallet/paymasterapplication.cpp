@@ -1387,7 +1387,7 @@ bool ReconcileProviderMaintenance(CWallet& wallet,
                     return false;
                 }
                 if (status == DatabaseReadStatus::FOUND &&
-                    (retired.state == PoolEntryState::RELEASED || retired.state == PoolEntryState::SPENT)) continue;
+                    retired.state != PoolEntryState::INVALIDATED) continue;
                 // Older inventories may already have forgotten a release.
                 // Absence is not permission to re-enrol an old unspent output.
                 if (status == DatabaseReadStatus::NOT_FOUND && previously_confirmed) {

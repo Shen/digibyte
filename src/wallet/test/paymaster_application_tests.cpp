@@ -1324,6 +1324,27 @@ BOOST_FIXTURE_TEST_CASE(maintenance_inventory_pruning_preserves_spends_releases_
     BOOST_CHECK_EQUAL(pool.size(), 256U);
     BOOST_CHECK_EQUAL(std::count_if(pool.begin(), pool.end(), [](const auto& entry) { return IsActiveProviderPoolState(entry.state); }), 20);
 
+    // Source retirement can occur before the changed working row was ever
+    // persisted: protect its full committed before-image through pruning.
+    CWallet protected_wallet{m_node.chain.get(), "retired-protected-source", CreateMockableWalletDatabase()};
+    WalletBatch protected_batch{protected_wallet.GetDatabase()};
+    auto full = pool;
+    for (auto& entry : full) { entry.state = PoolEntryState::AVAILABLE; entry.reservation_id.SetNull(); }
+    full.front().state = PoolEntryState::COMMITTED;
+    full.front().reservation_id = uint256::ONE;
+    const auto protected_source = full.front();
+    BOOST_REQUIRE(protected_wallet.AddToWallet(m_wallet.GetWalletTx(protected_source.outpoint.hash)->tx, TxStateInactive{}));
+    BOOST_REQUIRE(protected_batch.WritePaymasterProviderPool(full));
+    full.front().state = PoolEntryState::SPENT;
+    BOOST_REQUIRE_MESSAGE(paymaster_store::internal::MakeProviderPoolRoom(full, 1, error), error);
+    BOOST_REQUIRE(protected_batch.WritePaymasterProviderPool(full));
+    ProviderPoolEntry before_image;
+    BOOST_REQUIRE(protected_batch.ReadPaymasterPoolHistoryWithStatus(protected_source.outpoint, before_image) == DatabaseReadStatus::FOUND);
+    BOOST_CHECK(before_image.state == PoolEntryState::COMMITTED);
+    BOOST_CHECK(before_image.reservation_id == protected_source.reservation_id);
+    BOOST_CHECK(before_image.script_pub_key == protected_source.script_pub_key);
+    BOOST_CHECK(IsPaymasterInputReserved(protected_wallet, protected_source.outpoint));
+
     const auto released = pool.back().outpoint;
     pool.back().state = PoolEntryState::RELEASED;
     BOOST_REQUIRE(batch.WritePaymasterProviderPool(pool));
@@ -1346,6 +1367,12 @@ BOOST_FIXTURE_TEST_CASE(maintenance_inventory_pruning_preserves_spends_releases_
     BOOST_REQUIRE(raw->Write(std::make_pair(std::string{"pmpoolhistory"}, released), uint16_t{ProviderPoolEntry::CURRENT_VERSION + 1}));
     BOOST_CHECK(!ReconcileProviderMaintenance(m_wallet, recovered, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_POOL_HISTORY_READ");
+    auto reenrolled = pool;
+    reenrolled.push_back(history);
+    reenrolled.back().state = PoolEntryState::AVAILABLE;
+    const auto future_entry_rows = GetMockableDatabase(m_wallet).m_records;
+    BOOST_CHECK(!batch.WritePaymasterProviderPool(reenrolled));
+    BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == future_entry_rows);
     BOOST_REQUIRE(raw->Write(std::make_pair(std::string{"pmpoolhistory"}, released), history));
     BOOST_REQUIRE(raw->Write(std::string{"pmpoolhistoryversion"}, uint16_t{2}));
     const auto future_rows = GetMockableDatabase(m_wallet).m_records;
