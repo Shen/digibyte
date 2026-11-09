@@ -173,6 +173,14 @@ transaction, not an undo guarantee: the original transaction can still win.
 Recovery quote expiry applies to unsigned preparation. `USER_SIGNED` and
 `FINAL_COMMITTED` remain observable and resumable through Core-permitted actions
 after that deadline; Qt must not request fresh approval for the saved signature.
+`CompleteClientConfirmedFinal` is the common local observation operation used by
+refresh, recovery resolution and bounded tip maintenance. A fully validated exact
+alternative recovery at 240 confirmations can settle without a provider result:
+spend its reserved fee, release original-attempt fee exposure and input locks,
+and atomically prune into the existing `CANCELED_SAFE` request tombstone retaining
+the recovery txid. No provider result, signature or broadcast is synthesized.
+Before that depth, absence, reorg or invalid witnesses preserve signed authority;
+failed persistence preserves all records and reservations.
 
 Alternative recovery prices the aggregate original DD inputs and deducts its
 fee from wallet-owned returns. The ordinary recipient-plus-fee ceiling does

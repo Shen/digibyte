@@ -237,11 +237,13 @@ DatabaseReadStatus PaymasterStore::GetSessionByRequestIdWithStatus(
 {
     LOCK(m_wallet.cs_wallet);
     WalletBatch batch{m_wallet.GetDatabase()};
+    // Callers may pass session.request_id while reloading that same session.
+    const std::string key{request_id};
     const DatabaseReadStatus session_status =
-        batch.ReadPaymasterSessionWithStatus(request_id, session);
+        batch.ReadPaymasterSessionWithStatus(key, session);
     if (session_status != DatabaseReadStatus::NOT_FOUND) return session_status;
     IdempotencyTombstone tombstone;
-    const auto tombstone_status = batch.ReadPaymasterTombstoneWithStatus(request_id, tombstone);
+    const auto tombstone_status = batch.ReadPaymasterTombstoneWithStatus(key, tombstone);
     if (tombstone_status != DatabaseReadStatus::FOUND) return tombstone_status;
     session = {};
     session.request_id = tombstone.request_id;

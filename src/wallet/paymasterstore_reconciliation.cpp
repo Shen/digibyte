@@ -9,6 +9,7 @@
 
 #include <logging/timer.h>
 #include <wallet/paymasterstore_internal.h>
+#include <wallet/paymasterprovider.h>
 
 #include <chainparams.h>
 #include <digidollar/digidollar.h>
@@ -24,6 +25,7 @@
 #include <tinyformat.h>
 #include <util/time.h>
 #include <version.h>
+#include <validation.h>
 #include <wallet/paymasterpsbt.h>
 #include <wallet/wallet.h>
 #include <wallet/walletdb.h>
@@ -799,6 +801,81 @@ bool PaymasterStore::ReconcileFinalTransaction(const CTransaction& transaction,
     return true;
 }
 
+bool PaymasterStore::CompleteClientConfirmedFinal(const std::string& request_id,
+    int64_t now, bool& completed, std::string& error)
+{
+    completed = false;
+    error.clear();
+    PaymentSession session;
+    AlternativeRecoveryRecord recovery;
+    CTransactionRef transaction;
+    {
+        LOCK(m_wallet.cs_wallet);
+        if (!GetSessionByRequestId(request_id, session)) {
+            error = "PAYMASTER_SESSION_DATABASE_READ";
+            return false;
+        }
+        if (session.provider_side || session.attempt_ids.empty()) return true;
+        const auto status = GetAlternativeRecoveryWithStatus(request_id, recovery);
+        if (status != DatabaseReadStatus::FOUND && status != DatabaseReadStatus::NOT_FOUND) {
+            error = "PAYMASTER_RECOVERY_DATABASE_READ";
+            return false;
+        }
+        if (status == DatabaseReadStatus::FOUND && !ValidateAlternativeRecoveryRecordShape(recovery, error)) return false;
+        if (status == DatabaseReadStatus::NOT_FOUND || recovery.phase != AlternativeRecoveryPhase::USER_SIGNED) {
+            if (!session.final_txid.IsNull()) return true;
+            ProviderAttempt attempt;
+            if (!GetAttempt(session.attempt_ids.back(), attempt)) { error = "PAYMASTER_ATTEMPT_NOT_FOUND"; return false; }
+            if (attempt.user_signed_psbt.empty() || !attempt.final_transaction.empty() ||
+                (attempt.state != AttemptState::USER_SIGNED && attempt.state != AttemptState::USER_PSBT_ACCEPTED &&
+                 attempt.state != AttemptState::AMBIGUOUS)) return true;
+            return CompleteClientConfirmedPayment(request_id, attempt.attempt_id, now, completed, error);
+        }
+        const auto* observed = m_wallet.GetWalletTx(recovery.recovery_response.manifest.unsigned_txid);
+        if (!observed || m_wallet.GetTxDepthInMainChain(*observed) < DEFAULT_REORG_SAFETY_DEPTH) return true;
+        transaction = observed->tx;
+    }
+    // Same local-completion contract as an ordinary payment: no remote result
+    // is synthesized. Spent-prevout reconstruction requires the opaque exact
+    // final proof, and every recovery signature/template check still runs.
+    auto* node = m_wallet.chain().context();
+    ExactFinalTransactionPreflight preflight;
+    if (!node || !node->chainman || now <= 0 ||
+        !ValidateAlternativeRecoveryRecordShape(recovery, error) ||
+        !PreflightExactPaymasterFinalTransaction(m_wallet, transaction, ExactFinalTxIndexMode::NONBLOCKING, preflight, error)) {
+        if (error.empty()) error = "PAYMASTER_RECOVERY_OBSERVATION_UNAVAILABLE";
+        return false;
+    }
+    if (preflight.presence != ExactFinalTransactionPresence::CONFIRMED ||
+        preflight.confirmation_depth < DEFAULT_REORG_SAFETY_DEPTH || !preflight.final_proof) return true;
+    const auto authorization_time = recovery.recovery_authorization_accepted_at;
+    const auto observation_time = std::max(now, authorization_time);
+    AlternativeRecoveryParameters parameters;
+    AlternativeRecoveryTemplate trusted;
+    PartiallySignedTransaction unsigned_psbt, user_psbt;
+    AlternativeRecoverySubmit submit;
+    submit.genesis_hash = Params().GenesisBlock().GetHash();
+    submit.request_id = request_id;
+    submit.session_id = recovery.session_id;
+    submit.recovery_id = recovery.recovery_id;
+    submit.recovery_provider_id = recovery.recovery_provider_id;
+    submit.recovery_request_hash = recovery.recovery_request_hash;
+    submit.recovery_commit_key = recovery.recovery_response.recovery_commit_key;
+    submit.template_commitment = recovery.recovery_response.manifest.template_commitment;
+    submit.user_psbt = recovery.user_signed_psbt;
+    if (!BuildAlternativeRecoveryParametersFromRecord(m_wallet, recovery, parameters, error) ||
+        !ValidateAuthorizedAlternativeRecoveryResponseTemplateAgainstChainstate(recovery.recovery_response,
+            recovery.recovery_request, recovery.recovery_provider_identity_key, parameters, Params(), *node->chainman,
+            authorization_time, observation_time, &*preflight.final_proof, trusted, unsigned_psbt, error) ||
+        !ValidateAuthorizedAlternativeRecoverySubmitAgainstChainstate(submit, recovery.recovery_response, trusted,
+            parameters, Params(), *node->chainman, authorization_time, observation_time, &*preflight.final_proof, user_psbt, error) ||
+        !ValidateAuthorizedFinalAlternativeRecoveryAgainstChainstate(CMutableTransaction{*transaction}, transaction->GetWitnessHash(),
+            trusted, parameters, Params(), *node->chainman, authorization_time, observation_time, &*preflight.final_proof, error)) return false;
+    // At the existing safety depth complete and prune atomically, retaining the
+    // request tombstone/recovery txid. Never publish an intermediate fake FINAL.
+    return PruneSession(request_id, error, 0, completed, &recovery, &*preflight.final_proof, transaction);
+}
+
 bool PaymasterStore::ReconcileFinalSessionsAtTip(int64_t now,
                                                  std::string& error)
 {
@@ -826,6 +903,7 @@ bool PaymasterStore::ReconcileFinalSessionsAtTip(int64_t now,
         bool in_mempool{false};
     };
     std::vector<ReconciliationCandidate> candidates;
+    std::vector<std::string> pending_observations;
     std::set<uint256> scheduled_wtxids;
     size_t pruned_unsigned{0};
     PaymasterScanPage page{m_wallet.GetDatabase(), PaymasterScan::RECONCILIATION};
@@ -848,37 +926,15 @@ bool PaymasterStore::ReconcileFinalSessionsAtTip(int64_t now,
                 if (pruned) ++pruned_unsigned;
                 continue;
             }
-            if (!session.provider_side && session.final_txid.IsNull() &&
+            if (!session.provider_side &&
                 !session.attempt_ids.empty() &&
                 (session.state == SessionState::AUTHORIZED ||
                  session.state == SessionState::PENDING_PROVIDER ||
+                 session.state == SessionState::CONFLICTED ||
                  (!session.recovery_txid.IsNull() &&
                   (session.state == SessionState::CANCELED_SAFE ||
                    session.state == SessionState::CONFLICTED)))) {
-                ProviderAttempt attempt;
-                const auto status = batch.ReadPaymasterAttemptWithStatus(
-                    session.attempt_ids.back(), attempt);
-                if (status != DatabaseReadStatus::FOUND) {
-                    error = PersistedReadError(status, "ProviderAttempt", attempt,
-                        "PAYMASTER_FINAL_ATTEMPT_MISSING",
-                        "PAYMASTER_INVALID_PERSISTED_ATTEMPT");
-                    return false;
-                }
-                if (!attempt.user_signed_psbt.empty() &&
-                    attempt.final_transaction.empty() && attempt.final_txid.IsNull() &&
-                    (attempt.state == AttemptState::USER_SIGNED ||
-                     attempt.state == AttemptState::USER_PSBT_ACCEPTED ||
-                     attempt.state == AttemptState::AMBIGUOUS)) {
-                    bool completed{false};
-                    // The provider reply may be lost even though the wallet
-                    // observed the exact payment. Reuse full authorization and
-                    // witness validation; a spent input or txid is not proof.
-                    if (!CompleteClientConfirmedPayment(session.request_id,
-                            attempt.attempt_id, now, completed, error)) return false;
-                    // Keep the newly recorded evidence through this pass.
-                    // Subsequent passes apply ordinary final/reorg retention.
-                    if (completed) continue;
-                }
+                pending_observations.push_back(session.request_id);
             }
             if (session.state == SessionState::FAILED ||
                 (session.final_txid.IsNull() && session.recovery_txid.IsNull())) {
@@ -910,6 +966,11 @@ bool PaymasterStore::ReconcileFinalSessionsAtTip(int64_t now,
         }
     }
 
+    // Chainstate preflight must not inherit the enumeration's wallet lock.
+    for (const auto& request : pending_observations) {
+        bool completed{false};
+        if (!CompleteClientConfirmedFinal(request, now, completed, error)) return false;
+    }
     for (const ReconciliationCandidate& candidate : candidates) {
         if (!ReconcileFinalTransaction(*candidate.transaction,
                                        candidate.confirmation_depth,
@@ -928,7 +989,10 @@ bool PaymasterStore::PruneFinalSession(const std::string& request_id, std::strin
 }
 
 bool PaymasterStore::PruneSession(const std::string& request_id, std::string& error,
-                                 int64_t unsigned_expiry_time, bool& pruned)
+                                 int64_t unsigned_expiry_time, bool& pruned,
+                                 const AlternativeRecoveryRecord* observed_recovery,
+                                 const ExactFinalTransactionProof* final_proof,
+                                 const CTransactionRef& observed_transaction)
 {
     error.clear();
     pruned = false;
@@ -943,6 +1007,17 @@ bool PaymasterStore::PruneSession(const std::string& request_id, std::string& er
             "PAYMASTER_SESSION_NOT_FOUND",
             "PAYMASTER_INVALID_PERSISTED_SESSION");
         return false;
+    }
+    if (observed_recovery) {
+        if (!final_proof || !observed_transaction || unsigned_expiry_time != 0 || session.provider_side ||
+            observed_recovery->session_id != session.session_id || observed_recovery->request_id != request_id ||
+            observed_recovery->recovery_request.user_dd_inputs != session.user_inputs ||
+            (!session.recovery_txid.IsNull() && session.recovery_txid != observed_transaction->GetHash())) {
+            error = "PAYMASTER_RECOVERY_OBSERVATION_BINDING_MISMATCH";
+            return false;
+        }
+        session.state = SessionState::CANCELED_SAFE;
+        session.recovery_txid = observed_transaction->GetHash();
     }
     if (!IsTerminal(session.state)) {
         error = "PAYMASTER_SESSION_NOT_FINAL";
@@ -1186,6 +1261,12 @@ bool PaymasterStore::PruneSession(const std::string& request_id, std::string& er
             "PAYMASTER_INVALID_PERSISTED_RECOVERY");
         return false;
     }
+    if (observed_recovery) {
+        if (recovery && recovery->final_transaction != CanonicalBytes(*observed_transaction)) {
+            error = "PAYMASTER_RECOVERY_OBSERVATION_BINDING_MISMATCH";
+            return false;
+        }
+    }
 
     std::optional<AlternativeRecoveryRecord> alternative_recovery;
     uint256 alternative_recovery_id;
@@ -1207,7 +1288,9 @@ bool PaymasterStore::PruneSession(const std::string& request_id, std::string& er
         if (alternative.provider_side ||
             alternative.request_id != request_id ||
             alternative.session_id != session.session_id ||
-            (session.state == SessionState::CANCELED_SAFE &&
+            (observed_recovery && (CanonicalBytes(alternative) != CanonicalBytes(*observed_recovery) ||
+                alternative.phase != AlternativeRecoveryPhase::USER_SIGNED)) ||
+            (!observed_recovery && session.state == SessionState::CANCELED_SAFE &&
              (alternative.phase !=
                   AlternativeRecoveryPhase::FINAL_COMMITTED ||
               !recovery ||
@@ -1221,11 +1304,38 @@ bool PaymasterStore::PruneSession(const std::string& request_id, std::string& er
         error = "PAYMASTER_ALTERNATIVE_RECOVERY_INDEX_DATABASE_READ";
         return false;
     }
+    if (observed_recovery && !alternative_recovery) {
+        error = "PAYMASTER_RECOVERY_OBSERVATION_BINDING_MISMATCH";
+        return false;
+    }
     if (prune_unsigned && (recovery || alternative_recovery)) {
         error = "PAYMASTER_UNSIGNED_PRUNE_UNSAFE";
         return false;
     }
 
+    ClientFeeLedger settled_fees;
+    if (observed_recovery) {
+        if (!batch.ReadPaymasterClientFeeLedger(settled_fees) ||
+            !SpendClientFee(settled_fees, observed_recovery->recovery_response.recovery_commit_key, GetTime(), error)) {
+            if (error.empty()) error = "PAYMASTER_CLIENT_FEE_RESERVATION_MISSING";
+            return false;
+        }
+        for (const auto& records : attempts) {
+            const auto fee = std::find_if(settled_fees.reservations.begin(), settled_fees.reservations.end(),
+                [&](const auto& entry) { return entry.commit_key == records.attempt.commit_key; });
+            if (fee != settled_fees.reservations.end() && fee->state == BudgetReservationState::RESERVED &&
+                !ReleaseClientFee(settled_fees, fee->commit_key, GetTime(), error)) return false;
+        }
+        const auto* observed = m_wallet.GetWalletTx(observed_transaction->GetHash());
+        auto* node = m_wallet.chain().context();
+        if (!observed || CanonicalBytes(*observed->tx) != CanonicalBytes(*observed_transaction) ||
+            m_wallet.GetTxDepthInMainChain(*observed) < DEFAULT_REORG_SAFETY_DEPTH || !node || !node->chainman) {
+            error = "PAYMASTER_RECOVERY_OBSERVATION_NOT_CONFIRMED";
+            return false;
+        }
+        LOCK(cs_main);
+        if (!final_proof->Matches(*observed_transaction, *node->chainman, error)) return false;
+    }
     const uint256 tombstone_txid = session.state == SessionState::CANCELED_SAFE ? session.recovery_txid : session.final_txid;
     IdempotencyTombstone tombstone{IdempotencyTombstone::CURRENT_VERSION, request_id, session.session_id,
                                    session.canonical_request_hash, session.fee_mode_requested,
@@ -1234,6 +1344,7 @@ bool PaymasterStore::PruneSession(const std::string& request_id, std::string& er
                                    session.subtract_paymaster_fee_from_amount,
                                    session.send_all_spendable_dd};
     if (!batch.TxnBegin()) return Abort(batch, error, "PAYMASTER_DATABASE_BEGIN");
+    if (observed_recovery && !batch.WritePaymasterClientFeeLedger(settled_fees)) return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
     // Expired unsigned provider artifacts no longer authorize any spend or
     // valid replay. Keeping a permanent tombstone for each public request
     // would only move the unbounded storage growth to another record type.

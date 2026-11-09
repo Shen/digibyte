@@ -67,6 +67,14 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
     using namespace DigiDollar::Paymaster;
     std::string error;
     int64_t now{GetTime()};
+    bool completed{false};
+    if (!store.CompleteClientConfirmedFinal(session.request_id, now, completed, error))
+        throw ApplicationError(ErrorKind::WALLET, error);
+    if (completed) {
+        if (!store.GetSessionByRequestId(session.request_id, session))
+            throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SESSION_DATABASE_READ");
+        return CaptureClientSession(store, session, "cancel_to_self");
+    }
     if (!CheckPaymasterClientReadiness(wallet, context, error) ||
         !CheckPaymasterPrivacyReadiness(
             original_attempt.privacy_profile, context, error)) {
@@ -1112,22 +1120,25 @@ ClientRecoveryResult ResolvePaymasterSession(WalletContext& context, CWallet& ta
                 "PAYMASTER_SESSION_NOT_FOUND: Paymaster session not found", ErrorDisposition::RECONCILE, true);
         }
         if (action == "refresh") {
-            return CaptureClientSession(store, session, action);
-        }
-        ClientSessionView view;
-        std::string view_error;
-        if (!LoadClientSessionView(
-                store, session, GetTime(), view, view_error)) {
-            throw ApplicationError(ErrorKind::WALLET, view_error);
-        }
-        if (std::find(view.allowed_actions.begin(),
-                      view.allowed_actions.end(), action) ==
-            view.allowed_actions.end()) {
-            throw ApplicationError(
-                ErrorKind::WALLET,
-                "PAYMASTER_SESSION_ACTION_NOT_ALLOWED");
+            // Complete local chain evidence outside the wallet lock below.
+        } else {
+            ClientSessionView view;
+            std::string view_error;
+            if (!LoadClientSessionView(store, session, GetTime(), view, view_error)) {
+                throw ApplicationError(ErrorKind::WALLET, view_error);
+            }
+            if (std::find(view.allowed_actions.begin(), view.allowed_actions.end(), action) == view.allowed_actions.end()) {
+                throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SESSION_ACTION_NOT_ALLOWED");
+            }
         }
     }
+    bool locally_completed{false};
+    std::string completion_error;
+    if (!store.CompleteClientConfirmedFinal(session.request_id, GetTime(), locally_completed, completion_error))
+        throw ApplicationError(ErrorKind::WALLET, completion_error);
+    if (locally_completed && !store.GetSessionByRequestId(session.request_id, session))
+        throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SESSION_DATABASE_READ");
+    if (action == "refresh" || locally_completed) return CaptureClientSession(store, session, action);
     if (action == "abandon_unsigned") {
         std::string error;
         if (!store.AbandonUnsignedClientSession(

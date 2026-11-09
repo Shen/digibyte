@@ -6571,7 +6571,8 @@ static void ExerciseFirstProviderRecoveryCommit(node::NodeContext& node,
 static void ExerciseClientRecoveryResult(ClientRecoveryReadSetup& setup, bool confirmed_before_result,
                                          bool exercise_provider_history = false,
                                          bool exercise_quote_intake = false,
-                                         bool observe_without_result = false)
+                                         bool observe_without_result = false,
+                                         bool permanent_provider_loss = false)
 {
     auto& m_node = setup.m_node;
     auto& context = setup.context;
@@ -6884,11 +6885,19 @@ static void ExerciseClientRecoveryResult(ClientRecoveryReadSetup& setup, bool co
     policy.updated_at = now;
     ClientFeeLedger ledger;
     ledger.accounting_time_high_water = now;
+    if (permanent_provider_loss) {
+        policy.maximum_service_fee_per_day = DDCents{200};
+        BOOST_REQUIRE_MESSAGE(ReserveClientFee(ledger, policy, original_attempt.commit_key, DDCents{5}, now, error), error);
+    }
     {
         LOCK(client.cs_wallet);
         WalletBatch batch{client.GetDatabase()};
         BOOST_REQUIRE(batch.WritePaymasterSession(session));
-        if (confirmed_before_result) BOOST_REQUIRE(batch.WritePaymasterAttempt(original_attempt));
+        if (confirmed_before_result) {
+            BOOST_REQUIRE(batch.WritePaymasterAttempt(original_attempt));
+            BOOST_REQUIRE(batch.WritePaymasterTemplate(original_attempt.template_commitment, original_attempt.attempt_id));
+            BOOST_REQUIRE(batch.WritePaymasterUnsignedTx(original_attempt.unsigned_txid, original_attempt.attempt_id));
+        }
         BOOST_REQUIRE(batch.WritePaymasterReservation({InputReservation::CURRENT_VERSION, session.user_inputs.front(), session.request_id,
             session.session_id, ReservationRole::USER_DD, true, now}));
         BOOST_REQUIRE(batch.WritePaymasterLockedUTXO(session.user_inputs.front()));
@@ -7097,6 +7106,88 @@ static void ExerciseClientRecoveryResult(ClientRecoveryReadSetup& setup, bool co
         WITH_LOCK(client.cs_wallet, client.mapWallet.at(final_txid).tx = intact);
         BOOST_CHECK(GetMockableDatabase(client).m_records == before_retry);
     }
+    if (permanent_provider_loss) {
+        BOOST_REQUIRE(confirmed_before_result);
+        const auto reserved_input = session.user_inputs.front();
+        const auto recovery_fee_key = response.recovery_commit_key;
+        bool completed{false};
+        BOOST_REQUIRE_MESSAGE(store.CompleteClientConfirmedFinal(session.request_id, GetTime(), completed, error), error);
+        BOOST_CHECK(!completed);
+        for (int depth = 1; depth < DEFAULT_REORG_SAFETY_DEPTH - 1; ++depth)
+            setup.CreateAndProcessBlock({}, CScript() << OP_TRUE);
+        const auto update_client_tip = [&] {
+            IndexWaitSynced(*g_txindex);
+            const auto tip = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Tip());
+            LOCK(client.cs_wallet);
+            client.SetLastBlockProcessed(tip->nHeight, tip->GetBlockHash());
+        };
+        update_client_tip();
+        BOOST_REQUIRE_MESSAGE(store.CompleteClientConfirmedFinal(session.request_id, GetTime(), completed, error), error);
+        BOOST_CHECK(!completed); // 239 confirmations still retain every artifact.
+        auto& chainstate = m_node.chainman->ActiveChainstate();
+        auto* tip_before_reorg = WITH_LOCK(cs_main, return chainstate.m_chain.Tip());
+        BlockValidationState disconnected;
+        BOOST_REQUIRE_MESSAGE(chainstate.InvalidateBlock(disconnected, tip_before_reorg), disconnected.ToString());
+        update_client_tip();
+        BOOST_REQUIRE_MESSAGE(store.CompleteClientConfirmedFinal(session.request_id, GetTime(), completed, error), error);
+        BOOST_CHECK(!completed);
+        for (int block = 0; block < 2; ++block) setup.CreateAndProcessBlock({}, CScript() << OP_2);
+        IndexWaitSynced(*g_txindex);
+        const int observed_height = *m_node.chain->getHeight();
+        const auto observed_hash = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Tip()->GetBlockHash());
+        { LOCK(client.cs_wallet); client.SetLastBlockProcessed(observed_height, observed_hash); }
+        auto& failed_database = GetMockableDatabase(client);
+        const auto unchanged = failed_database.m_records;
+        failed_database.FailCommit();
+        BOOST_CHECK(!store.CompleteClientConfirmedFinal(session.request_id, GetTime(), completed, error));
+        failed_database.ClearFailureInjection();
+        BOOST_CHECK(failed_database.m_records == unchanged);
+        BOOST_CHECK(IsPaymasterInputReserved(client, session.user_inputs.front()));
+        CTransactionRef exact_final;
+        {
+            LOCK(client.cs_wallet);
+            auto& observed = client.mapWallet.at(final_transaction.GetHash());
+            exact_final = observed.tx;
+            CMutableTransaction altered{*exact_final};
+            altered.vin.front().scriptWitness.stack.front().back() ^= 1;
+            observed.tx = MakeTransactionRef(altered);
+        }
+        BOOST_CHECK(!store.CompleteClientConfirmedFinal(session.request_id, GetTime(), completed, error));
+        BOOST_CHECK(failed_database.m_records == unchanged);
+        WITH_LOCK(client.cs_wallet, client.mapWallet.at(final_transaction.GetHash()).tx = exact_final);
+        // The public refresh entry must finish without any provider result,
+        // transport, operating unlock or new authorization.
+        const auto refreshed = paymaster_app::ResolvePaymasterSession(context, client,
+            paymaster_app::ClientSessionLookup{session.request_id}, "refresh", {});
+        BOOST_REQUIRE(refreshed.session.session);
+        BOOST_CHECK(refreshed.session.session->session.state == SessionState::CANCELED_SAFE);
+        BOOST_REQUIRE(store.GetSessionByRequestId(session.request_id, session));
+        BOOST_CHECK(session.state == SessionState::CANCELED_SAFE);
+        BOOST_CHECK(session.recovery_txid == CTransaction{final_transaction}.GetHash());
+        BOOST_CHECK(session.final_txid.IsNull());
+        BOOST_CHECK(store.GetAlternativeRecoveryWithStatus(session.request_id, recovery) == DatabaseReadStatus::NOT_FOUND);
+        BOOST_REQUIRE(WalletBatch{client.GetDatabase()}.ReadPaymasterClientFeeLedger(ledger));
+        const auto spent = std::find_if(ledger.reservations.begin(), ledger.reservations.end(), [&](const auto& fee) {
+            return fee.commit_key == recovery_fee_key;
+        });
+        BOOST_REQUIRE(spent != ledger.reservations.end());
+        BOOST_CHECK(spent->state == BudgetReservationState::SPENT);
+        const auto released_fee = std::find_if(ledger.reservations.begin(), ledger.reservations.end(), [&](const auto& fee) {
+            return fee.commit_key == original_attempt.commit_key;
+        });
+        BOOST_REQUIRE(released_fee != ledger.reservations.end());
+        BOOST_CHECK(released_fee->state == BudgetReservationState::RELEASED);
+        BOOST_CHECK(!IsPaymasterInputReserved(client, reserved_input));
+        PaymasterSessionObservation observation;
+        BOOST_REQUIRE_MESSAGE(store.GetSessionObservation(session, observation, error), error);
+        BOOST_CHECK(!observation.PaymentConfirmed(session.state));
+        BOOST_CHECK(observation.Status(session.state) == "canceled");
+        const auto settled = failed_database.m_records;
+        BOOST_REQUIRE(store.CompleteClientConfirmedFinal(session.request_id, GetTime(), completed, error));
+        BOOST_CHECK(!completed);
+        BOOST_CHECK(failed_database.m_records == settled);
+        return;
+    }
     const auto encoded = SerializePaymasterSecurityObject(result);
     const uint256 message_id{Hash(encoded)};
     BOOST_REQUIRE(manager.EnqueueDirectMessage(45, message_id, encoded.size(), DirectPayload{result}, now));
@@ -7277,6 +7368,12 @@ BOOST_FIXTURE_TEST_CASE(client_recovery_mempool_final_without_result_retries_exa
     ExerciseClientRecoveryResult(*this, /*confirmed_before_result=*/false,
         /*exercise_provider_history=*/false, /*exercise_quote_intake=*/false,
         /*observe_without_result=*/true);
+}
+
+BOOST_FIXTURE_TEST_CASE(client_recovery_permanent_provider_loss_settles_only_after_safety_depth,
+                        ClientRecoveryReadSetup)
+{
+    ExerciseClientRecoveryResult(*this, true, false, false, false, true);
 }
 
 BOOST_FIXTURE_TEST_CASE(provider_confirmed_recovery_archives_only_after_reorg_safety_depth,

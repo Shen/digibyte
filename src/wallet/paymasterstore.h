@@ -590,6 +590,10 @@ public:
     /** Complete a client payment from its exact locally confirmed transaction
      * after the provider replay-retention depth. No result signature is invented
      * and no broadcast authority is created. Insufficient depth is a no-op. */
+    /** Observe an exact deeply confirmed payment or alternative recovery.
+     * Creates no signature, remote result or broadcast authority. */
+    bool CompleteClientConfirmedFinal(const std::string& request_id,
+                                      int64_t now, bool& completed, std::string& error);
     bool CompleteClientConfirmedPayment(const std::string& request_id,
                                         const uint256& attempt_id,
                                         int64_t now,
@@ -807,7 +811,10 @@ private:
     /** With unsigned_expiry_time > 0, erase only expired unsigned provider
      * history after its complete replay window; retain no permanent tombstone. */
     bool PruneSession(const std::string& request_id, std::string& error,
-                      int64_t unsigned_expiry_time, bool& pruned);
+                      int64_t unsigned_expiry_time, bool& pruned,
+                      const DigiDollar::Paymaster::AlternativeRecoveryRecord* observed_recovery = nullptr,
+                      const DigiDollar::Paymaster::ExactFinalTransactionProof* final_proof = nullptr,
+                      const CTransactionRef& observed_transaction = {});
     CWallet& m_wallet;
 };
 
