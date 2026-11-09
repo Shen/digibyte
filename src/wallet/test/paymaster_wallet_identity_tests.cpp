@@ -981,6 +981,12 @@ BOOST_AUTO_TEST_CASE(unreadable_paymaster_locks_fail_closed_for_coin_selection)
         PaymasterInputReservations reservations{&m_wallet};
         BOOST_CHECK(reservations.GetReservationStatus(outdated_pool_entry.outpoint) ==
                     DatabaseReadStatus::UNSUPPORTED_VERSION);
+        const auto corrupt_rows = GetMockableDatabase(m_wallet).m_records;
+        BOOST_CHECK(!WalletBatch{m_wallet.GetDatabase()}.WritePaymasterProviderPool({}));
+        BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == corrupt_rows);
+        // Repair only the intentionally corrupt fixture row through the raw
+        // test database. Production writes may not discard unreadable history.
+        BOOST_REQUIRE(m_wallet.GetDatabase().MakeBatch()->Erase(DBKeys::PAYMASTER_PROVIDER_POOL));
         BOOST_REQUIRE(WalletBatch{m_wallet.GetDatabase()}.WritePaymasterProviderPool({}));
     }
     const auto available = dd_wallet->GetDDBalanceSummary();
@@ -1100,6 +1106,8 @@ BOOST_AUTO_TEST_CASE(paymaster_input_scan_reuses_pool_without_cross_scan_cache)
         BOOST_CHECK(scan.IsReserved(COutPoint{uint256::ONE, 511}));
         BOOST_CHECK(scan.IsReserved(pool.back().outpoint));
     }
+    BOOST_CHECK(!batch.WritePaymasterProviderPool({}));
+    BOOST_REQUIRE(wallet.GetDatabase().MakeBatch()->Erase(DBKeys::PAYMASTER_PROVIDER_POOL));
     BOOST_REQUIRE(batch.WritePaymasterProviderPool({}));
     reservation.version = 0;
     BOOST_REQUIRE(wallet.GetDatabase().MakeBatch()->Write(
