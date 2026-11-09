@@ -7572,14 +7572,42 @@ BOOST_FIXTURE_TEST_CASE(provider_recovery_capacity_absence_rejects_but_read_fail
     database.m_records = intact;
 }
 
+static void AddPendingOperationalTarget(QuoteRequestProcessingSetup& setup)
+{
+    // Service fairness runs while a useful target is pending. The reserved
+    // quote's 2,000-satoshi input is below the configured target/fee minimum.
+    CMutableTransaction pending;
+    pending.vin.emplace_back(COutPoint{SecurityTestId(setup.seed, 195), 0});
+    pending.vout.emplace_back(setup.environment.policy.maximum_network_fee.value,
+                             setup.environment.identity.identity_script);
+    const auto transaction = MakeTransactionRef(pending);
+    LOCK(setup.wallet.cs_wallet);
+    BOOST_REQUIRE(setup.wallet.AddToWallet(transaction, TxStateInMempool{}));
+    WalletBatch batch{setup.wallet.GetDatabase()};
+    std::vector<ProviderPoolEntry> pool;
+    BOOST_REQUIRE(batch.ReadPaymasterProviderPool(pool));
+    ProviderPoolEntry entry;
+    entry.outpoint = COutPoint{transaction->GetHash(), 0};
+    entry.purpose = PoolPurpose::OPERATIONAL;
+    entry.script_pub_key = pending.vout.front().scriptPubKey;
+    entry.dgb_value = DGBSatoshis{pending.vout.front().nValue};
+    entry.updated_at = GetTime();
+    pool.push_back(entry);
+    BOOST_REQUIRE(batch.WritePaymasterProviderPool(pool));
+}
+
 BOOST_FIXTURE_TEST_CASE(automatic_recovery_rejection_allows_following_quote_and_submit,
                         QuoteRequestProcessingSetup)
 {
     environment.settings.operation_mode = ProviderOperationMode::AUTOMATIC;
     BOOST_REQUIRE(WalletBatch{wallet.GetDatabase()}.WritePaymasterSettings(environment.settings));
+    // This test expects confirmation waiting, so supply the same pending
+    // operational target as the other automatic-service fairness fixtures.
+    AddPendingOperationalTarget(*this);
     RunPaymasterProviderServiceCycle(context, wallet);
     const auto initial = manager.GetProviderServiceStatus(wallet.GetName());
-    BOOST_REQUIRE(initial.state == ProviderServiceState::WAITING_FOR_LIQUIDITY_CONFIRMATION);
+    BOOST_REQUIRE_MESSAGE(initial.state == ProviderServiceState::WAITING_FOR_LIQUIDITY_CONFIRMATION,
+        "state=" << static_cast<int>(initial.state) << " error=" << initial.last_error);
 
     const auto recovery = MakeRecoveryReadRequest(environment, seed, now);
     std::string error;
@@ -7693,30 +7721,6 @@ BOOST_FIXTURE_TEST_CASE(automatic_pending_setup_processes_valid_signed_payment, 
     RunPaymasterProviderServiceCycle(context, wallet);
     BOOST_REQUIRE(batch.ReadPaymasterProviderCommit(submit.commit_key, committed));
     BOOST_CHECK(SerializePaymasterSecurityObject(committed) == committed_bytes);
-}
-
-static void AddPendingOperationalTarget(QuoteRequestProcessingSetup& setup)
-{
-    // Service fairness runs while a useful target is pending. The reserved
-    // quote's 2,000-satoshi input is below the configured target/fee minimum.
-    CMutableTransaction pending;
-    pending.vin.emplace_back(COutPoint{SecurityTestId(setup.seed, 195), 0});
-    pending.vout.emplace_back(setup.environment.policy.maximum_network_fee.value,
-                             setup.environment.identity.identity_script);
-    const auto transaction = MakeTransactionRef(pending);
-    LOCK(setup.wallet.cs_wallet);
-    BOOST_REQUIRE(setup.wallet.AddToWallet(transaction, TxStateInMempool{}));
-    WalletBatch batch{setup.wallet.GetDatabase()};
-    std::vector<ProviderPoolEntry> pool;
-    BOOST_REQUIRE(batch.ReadPaymasterProviderPool(pool));
-    ProviderPoolEntry entry;
-    entry.outpoint = COutPoint{transaction->GetHash(), 0};
-    entry.purpose = PoolPurpose::OPERATIONAL;
-    entry.script_pub_key = pending.vout.front().scriptPubKey;
-    entry.dgb_value = DGBSatoshis{pending.vout.front().nValue};
-    entry.updated_at = GetTime();
-    pool.push_back(entry);
-    BOOST_REQUIRE(batch.WritePaymasterProviderPool(pool));
 }
 
 static void CheckAutomaticSubmitProgress(QuoteRequestProcessingSetup& setup, bool flood_recovery)
