@@ -5171,9 +5171,9 @@ void PaymasterWidgetTests::paymasterClientRecoveryExpiryIsFailClosed()
     warning.clear();
     QVERIFY(QMetaObject::invokeMethod(
         send_widget.findChild<PaymasterSendWidget*>(), "refreshPaymasterSessionState", Qt::DirectConnection));
-    QVERIFY(warning.contains(
-        QStringLiteral("inconsistent recovery expiry"),
-        Qt::CaseInsensitive));
+    QVERIFY(warning.isEmpty());
+    QCOMPARE(primary->text(), QStringLiteral("Check current status"));
+    QVERIFY(recover->isHidden());
 
     for (const auto* phase : {"user_signed", "final_committed"}) {
         signed_phase = phase;
@@ -5184,6 +5184,12 @@ void PaymasterWidgetTests::paymasterClientRecoveryExpiryIsFailClosed()
         QCOMPARE(primary->text(), QStringLiteral("Prepare return to this wallet…"));
         QVERIFY(primary->isEnabled());
     }
+    inconsistent_expiry = false; // Persisted cleanup cannot erase signed authority.
+    warning.clear();
+    QVERIFY(QMetaObject::invokeMethod(send_widget.findChild<PaymasterSendWidget*>(),
+        "refreshPaymasterSessionState", Qt::DirectConnection));
+    QVERIFY(warning.contains(QStringLiteral("inconsistent recovery expiry"), Qt::CaseInsensitive));
+
 }
 
 void PaymasterWidgetTests::paymasterClientDelayedCallbackIgnoresWalletClose()
@@ -17289,6 +17295,11 @@ void PaymasterWidgetTests::paymasterSendControllerClockAndEffects()
     QVERIFY(controller.receivePreparation(token, true));
     QVERIFY(!controller.receivePreparation(token, true));
     QCOMPARE(controller.advance({true, false}), Controller::Effect::CONTINUE);
+    const auto operation = controller.beginPoll({true, false});
+    QCOMPARE(operation.effect, Controller::Effect::CONTINUE);
+    QCOMPARE(operation.params.write(), params.write());
+    QVERIFY(controller.receiveContinuation(operation.token));
+    QVERIFY(!controller.receiveContinuation(operation.token));
     now += 110000;
     controller.historyWaiting(true);
     QCOMPARE(controller.advance({true, true}), Controller::Effect::WAIT_HISTORY);
@@ -17299,6 +17310,15 @@ void PaymasterWidgetTests::paymasterSendControllerClockAndEffects()
     QCOMPARE(controller.advance({true, false}), Controller::Effect::CLOSE_UNSIGNED);
     controller.stop();
     QCOMPARE(controller.advance({true, false}), Controller::Effect::OBSERVE);
+    QCOMPARE(controller.unsignedClosure(true, false).effect, Controller::ClosureEffect::OBSERVE);
+    snapshot.allowed_actions_known = true;
+    snapshot.allowed_actions = QStringList{QStringLiteral("refresh"), QStringLiteral("abandon_unsigned")};
+    QVERIFY(controller.applySnapshot(snapshot));
+    QCOMPARE(controller.unsignedClosure(true, true).effect, Controller::ClosureEffect::OBSERVE);
+    const auto closure = controller.unsignedClosure(true, false);
+    QCOMPARE(closure.effect, Controller::ClosureEffect::ABANDON);
+    QCOMPARE(closure.params[1].get_str(), std::string{"abandon_unsigned"});
+    QCOMPARE(closure.params[0].find_value("request_id").get_str(), snapshot.request_id.toStdString());
     QCOMPARE(controller.nextPoll(true), 1500);
     QCOMPARE(controller.nextPoll(false), 3000);
     for (int i = 0; i < 8; ++i) QVERIFY(controller.nextPoll(false) <= 15000);
@@ -17450,6 +17470,7 @@ void PaymasterWidgetTests::paymasterSendControllerRecoveryReview()
     UniValue recovery{UniValue::VOBJ};
     recovery.pushKV("expired", false);
     recovery.pushKV("phase", "request_ready");
+    recovery.pushKV("expires_at", selection.expires_at);
     UniValue reply{UniValue::VOBJ};
     reply.pushKV("recovery", recovery);
     QCOMPARE(controller.recoveryReply(reply, selection, 1000).effect, Controller::RecoveryEffect::REVIEW);
@@ -17472,6 +17493,11 @@ void PaymasterWidgetTests::paymasterSendControllerRecoveryReview()
     recovery.pushKV("phase", "response_validated");
     reply.pushKV("recovery", recovery);
     QCOMPARE(controller.recoveryReply(reply, selection, 2000).effect, Controller::RecoveryEffect::EXPIRED);
+    QVERIFY(!controller.view().recoveryActive);
+    QVERIFY(controller.view().activeRecoveryParams.isNull());
+    QVERIFY(controller.view().recoveryAuthorizationCommitment.isEmpty());
+    QCOMPARE(controller.advance({true, false}), Controller::Effect::OBSERVE);
+    QVERIFY(controller.nextPoll(true) > 0);
 }
 
 void PaymasterWidgetTests::paymasterSignedRecoverySurvivesQuoteExpiry()

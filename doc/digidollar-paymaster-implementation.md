@@ -496,11 +496,20 @@ Qt presents that rejection only after read-only confirmation that the request
 has no session, then lets the user explicitly select Own DGB and review again.
 An uncertain recovery reply clears live approvals and continuations and keeps
 polling the same request read-only; it never automatically repeats recovery.
+`SendController::beginPoll` binds the selected effect, exact parameters and reply
+generation. `unsignedClosure` selects safe cancellation only from a fresh Core
+capability; a lost cancellation reply leads to observation. The controller also
+owns recovery call construction and expiry-to-observation transitions; the widget
+executes these effects through the wallet-bound asynchronous bridge and presents
+dialogs. Wallet switching and unlock lifetimes remain enforced by that bridge.
 
 Provider processing has one native disposition: no message, processed, rejected
 or deferred. Delivery remains an optional separate observation. The RPC adapter
 maps the disposition to the existing `processed`, `rejected` and `deferred`
-fields; a signed negative payment result is distinct from local message rejection.
+fields. Native `HasMessage()` includes rejected and deferred messages; only the
+explicit disposition describes their processing outcome. These observations
+never acknowledge payment. A signed negative payment result is distinct from
+local message rejection.
 
 Provider processing distinguishes permanent peer errors from local uncertainty.
 An unknown recovery ID, mismatched binding, invalid submitted PSBT/signature or

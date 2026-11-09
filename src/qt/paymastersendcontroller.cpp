@@ -25,11 +25,30 @@ RecoveryStage ReadRecoveryStage(const UniValue& recovery)
     return RecoveryStage::UNKNOWN;
 }
 
-bool RecoveryExpiryMatches(RecoveryStage stage, bool expired, bool elapsed)
+struct RecoveryTiming {
+    RecoveryStage stage{RecoveryStage::UNKNOWN};
+    qint64 expires_at{-1};
+    bool unsigned_expired{false};
+    bool valid{false};
+};
+
+RecoveryTiming ReadRecoveryTiming(const UniValue& recovery, qint64 now)
 {
-    // Core expires only unsigned preparation. Signed artifacts retain their
-    // authority and remain observable after the original quote deadline.
-    return stage == RecoveryStage::SIGNED ? !expired : expired == elapsed;
+    RecoveryTiming timing;
+    timing.stage = ReadRecoveryStage(recovery);
+    const auto& expired = recovery.find_value("expired");
+    const auto& elapsed = recovery.find_value("deadline_elapsed");
+    if (timing.stage == RecoveryStage::UNKNOWN || !expired.isBool() ||
+        (!elapsed.isNull() && !elapsed.isBool()) ||
+        !ReadInt64(recovery, "expires_at", timing.expires_at) || timing.expires_at <= 0 ||
+        !QDateTime::fromSecsSinceEpoch(timing.expires_at).isValid() ||
+        (timing.stage == RecoveryStage::SIGNED && expired.isTrue())) return timing;
+    // 'expired' is persistent cleanup. Either clock may have crossed the
+    // deadline since that cleanup or the RPC snapshot. Neither grants signing.
+    timing.unsigned_expired = timing.stage == RecoveryStage::UNSIGNED &&
+        (expired.isTrue() || elapsed.isTrue() || timing.expires_at <= now);
+    timing.valid = true;
+    return timing;
 }
 
 UniValue DecodeResumeOrder(const UniValue& session)
@@ -182,6 +201,34 @@ int SendController::nextPoll(bool state_changed)
     else if (m_poll_scheduled) m_state.pollIntervalMs = std::min(15000, m_state.pollIntervalMs * 2);
     m_poll_scheduled = true;
     return m_state.pollIntervalMs;
+}
+
+SendController::PollOperation SendController::beginPoll(const PollEvent& event)
+{
+    const auto effect = advance(event);
+    if (effect == Effect::CONTINUE) return {effect, m_state.activeSendParams, beginContinuation()};
+    if (effect == Effect::RECOVER) return {effect, m_state.activeRecoveryParams, replyToken()};
+    if (effect == Effect::TIMED_OUT) observeOnly();
+    return {effect, {}, replyToken()};
+}
+
+SendController::ClosureOperation SendController::unsignedClosure(bool allow_cancel, bool privacy)
+{
+    if (m_state.unsignedClosed) return {ClosureEffect::CLOSED, {}};
+    if (IsTerminalPaymasterState(m_state.sessionState)) return {ClosureEffect::COMPLETE, {}};
+    if (!allow_cancel || privacy || !m_state.observationAvailable ||
+        m_state.artifact != QLatin1String("none") || !allows(QStringLiteral("abandon_unsigned")))
+        return {ClosureEffect::OBSERVE, {}};
+    // Only the capability from the just-applied observation selects a mutation.
+    // A lost mutation reply is followed by refresh, never another abandon.
+    observeOnly();
+    UniValue lookup{UniValue::VOBJ};
+    lookup.pushKV("request_id", m_state.requestId.toStdString());
+    UniValue params{UniValue::VARR};
+    params.push_back(std::move(lookup));
+    params.push_back("abandon_unsigned");
+    params.push_back(UniValue{UniValue::VOBJ});
+    return {ClosureEffect::ABANDON, std::move(params)};
 }
 
 bool SendController::allows(const QString& action) const
@@ -354,9 +401,19 @@ bool SendController::beginRecovery(qint64 maximum_fee)
     return true;
 }
 
-void SendController::startRecoveryCall(UniValue params)
+void SendController::startRecoveryCall()
 {
     invalidateClosure();
+    UniValue lookup{UniValue::VOBJ};
+    lookup.pushKV("request_id", m_state.requestId.toStdString());
+    UniValue options{UniValue::VOBJ};
+    options.pushKV("maximum_recovery_service_fee_cents", m_state.recoveryMaximumServiceFeeCents);
+    if (m_state.recoveryAuthorizationCommitment.isEmpty()) options.pushKV("prepare_only", true);
+    else options.pushKV("recovery_authorization_commitment", m_state.recoveryAuthorizationCommitment.toStdString());
+    UniValue params{UniValue::VARR};
+    params.push_back(std::move(lookup));
+    params.push_back("cancel_to_self");
+    params.push_back(std::move(options));
     m_state.activeRecoveryParams = std::move(params);
     if (!m_state.activeRecoveryStarted.isValid()) m_state.activeRecoveryStarted.start();
 }
@@ -365,6 +422,14 @@ void SendController::stopSendContinuation()
 {
     m_state.activeSendParams = UniValue{};
     m_state.activeSendStarted.invalidate();
+}
+
+void SendController::observeOnly()
+{
+    clearContinuations();
+    m_state.recoveryActive = false;
+    clearReview();
+    clearRecoveryReview();
 }
 
 void SendController::clearContinuations()
@@ -476,13 +541,16 @@ SendController::RecoveryDecision SendController::recoveryReply(
     if (!m_state.recoveryAuthorizationCommitment.isEmpty() &&
         selection.authorization_commitment != m_state.recoveryAuthorizationCommitment)
         return {RecoveryEffect::CHANGED_COMMITMENT};
-    const auto stage = ReadRecoveryStage(recovery);
+    const auto timing = ReadRecoveryTiming(recovery, now);
+    const auto stage = timing.stage;
     if (stage == RecoveryStage::UNKNOWN) return {RecoveryEffect::UNKNOWN_PHASE};
-    const auto& expired = recovery.find_value("expired");
-    if (!expired.isBool() || selection.expires_at <= 0 ||
-        !RecoveryExpiryMatches(stage, expired.get_bool(), selection.expires_at <= now))
-        return {RecoveryEffect::INVALID_EXPIRY};
-    if (expired.get_bool()) return {RecoveryEffect::EXPIRED};
+    if (!timing.valid || selection.expires_at != timing.expires_at) return {RecoveryEffect::INVALID_EXPIRY};
+    if (timing.unsigned_expired) {
+        observeOnly();
+        m_state.allowedActions.removeAll(QStringLiteral("recover"));
+        m_state.allowedActions.removeAll(QStringLiteral("cancel_to_self"));
+        return {RecoveryEffect::EXPIRED};
+    }
     const auto& accepted = recovery.find_value("authorization_accepted");
     if (!accepted.isNull() && !accepted.isBool()) return {RecoveryEffect::INVALID_ACCEPTANCE};
     if (stage == RecoveryStage::UNSIGNED && m_state.recoveryAuthorizationCommitment.isEmpty() && !selection.authorization_commitment.isEmpty())
@@ -844,29 +912,16 @@ bool SendController::decodeSnapshot(const UniValue& result,
                 error = QStringLiteral("unknown recovery phase");
                 return false;
             }
-            const UniValue& expired = recovery.find_value("expired");
-            qint64 recovery_expires_at{-1};
-            if (!expired.isBool() ||
-                !ReadInt64(recovery, "expires_at", recovery_expires_at) ||
-                recovery_expires_at <= 0 ||
-                !QDateTime::fromSecsSinceEpoch(recovery_expires_at).isValid()) {
-                error = QStringLiteral("invalid recovery expiry fields");
-                return false;
-            }
-            const bool elapsed = recovery_expires_at <=
-                QDateTime::currentSecsSinceEpoch();
-            if (!RecoveryExpiryMatches(stage, expired.get_bool(), elapsed)) {
+            const auto timing = ReadRecoveryTiming(recovery, QDateTime::currentSecsSinceEpoch());
+            if (!timing.valid) {
                 error = QStringLiteral("inconsistent recovery expiry fields");
                 return false;
             }
-            if (elapsed && stage == RecoveryStage::UNSIGNED) {
-                // Keep an expired recovery snapshot visible, but never expose
-                // an action that could advance it to wallet signing.
+            if (timing.unsigned_expired) {
                 snapshot.allowed_actions.removeAll(QStringLiteral("recover"));
-                snapshot.allowed_actions.removeAll(
-                    QStringLiteral("cancel_to_self"));
+                snapshot.allowed_actions.removeAll(QStringLiteral("cancel_to_self"));
             }
-            snapshot.recovery_expires_at = recovery_expires_at;
+            snapshot.recovery_expires_at = timing.expires_at;
             snapshot.recovery_signed = stage == RecoveryStage::SIGNED;
         }
 

@@ -764,8 +764,10 @@ UniValue AlternativeRecoveryToJSON(
         }
         result.pushKV("wtxid", recovery.expected_wtxid.GetHex());
     }
-    result.pushKV("expires_at",
-                  recovery.phase >= AlternativeRecoveryPhase::RESPONSE_VALIDATED ? recovery.recovery_response.expires_at : recovery.capacity_request.expires_at);
+    const int64_t expires_at = recovery.phase >= AlternativeRecoveryPhase::RESPONSE_VALIDATED ?
+        recovery.recovery_response.expires_at : recovery.capacity_request.expires_at;
+    result.pushKV("expires_at", expires_at);
+    result.pushKV("deadline_elapsed", expires_at > 0 && expires_at <= GetTime());
     return result;
 }
 
@@ -830,7 +832,7 @@ UniValue ToJSON(const PaymentResult& value)
 UniValue ToJSON(const ProviderProcessingResult& value)
 {
     PaymentResult payment;
-    payment.processed = value.IsProcessed();
+    payment.processed = value.HasMessage();
     payment.queued = value.queued;
     payment.broadcast = value.broadcast;
     payment.broadcast_error = value.broadcast_error;

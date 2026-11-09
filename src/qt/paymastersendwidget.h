@@ -199,7 +199,6 @@ private:
     void clearClosedPaymasterSession();
     void closeUnusablePaymasterOffer(const QString& reason, bool allow_cancel = true);
     void setPaymasterNotice(const QString& text, DigiDollarStatus::Kind kind = DigiDollarStatus::Kind::ACTION);
-    UniValue buildAlternativePaymasterRecoveryParams() const;
     void executeAlternativePaymasterRecovery(bool allow_unlock);
     PaymasterRecoveryConfirmationSelection paymasterRecoveryConfirmationSelection(
         const UniValue& recovery) const;

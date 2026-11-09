@@ -152,7 +152,9 @@ enum class ProviderProcessingDisposition {
 /** One processing outcome; delivery and signed payment status are separate observations. */
 struct ProviderProcessingResult {
     ProviderProcessingDisposition disposition{ProviderProcessingDisposition::NO_MESSAGE};
-    bool IsProcessed() const { return disposition != ProviderProcessingDisposition::NO_MESSAGE; }
+    /** A message was observed, including REJECTED/DEFERRED; consult disposition
+     * for processing outcome. This never acknowledges a payment or delivery. */
+    bool HasMessage() const { return disposition != ProviderProcessingDisposition::NO_MESSAGE; }
     bool IsRejected() const { return disposition == ProviderProcessingDisposition::REJECTED; }
     bool IsDeferred() const { return disposition == ProviderProcessingDisposition::DEFERRED; }
     std::optional<bool> queued;

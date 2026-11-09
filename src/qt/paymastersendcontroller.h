@@ -89,6 +89,11 @@ public:
     CompletionKind directCompletion(const UniValue& result);
     struct PollEvent { bool wallet_available; bool history_refreshing; };
     struct ReplyToken { uint64_t wallet; uint64_t request; QString request_id; };
+    struct PollOperation { Effect effect; UniValue params; ReplyToken token; };
+    PollOperation beginPoll(const PollEvent& event);
+    enum class ClosureEffect { CLOSED, COMPLETE, ABANDON, OBSERVE };
+    struct ClosureOperation { ClosureEffect effect; UniValue params; };
+    ClosureOperation unsignedClosure(bool allow_cancel, bool privacy);
     struct Continuation { UniValue params; Elapsed started; ReplyToken token; };
     Continuation savedContinuation() const;
     void restoreContinuation(const Continuation& continuation);
@@ -124,7 +129,8 @@ public:
     void stopRetry();
     bool beginRecovery(qint64 maximum_fee);
     void stopRecovery() { m_state.recoveryActive = false; }
-    void startRecoveryCall(UniValue params);
+    void startRecoveryCall();
+    void observeOnly();
     void finishCancellation() { m_state.preparationCancelRequested = false; }
     void markNoticeShown() { m_state.terminalNoticeShown = true; }
     void clearContinuations();

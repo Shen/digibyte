@@ -281,6 +281,15 @@ not reserved capacity: displayed offers can become unavailable earlier. Exact
 provider and fee are confirmed before authorization. Recipient/amount survive
 safe unsigned cancellation.
 
+Recovery `expired` records persisted unsigned cleanup, which can lag the clock.
+`expires_at` is the authorization deadline; `deadline_elapsed` observes that
+deadline at RPC encoding time. Adapters must also check their current clock.
+An elapsed unsigned deadline revokes approval/signing and retains read-only
+observation of the same session. It is valid to receive `expired=false` after
+the deadline. Saved `user_signed`/`final_committed` artifacts remain resumable;
+`expired=true` in a signed phase is inconsistent. Older responses without
+`deadline_elapsed` retain the same local-clock check.
+
 ## Structured execution failures
 
 Wallet application failures preserve the numeric RPC code and diagnostic

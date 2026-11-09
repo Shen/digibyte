@@ -3710,9 +3710,9 @@ bool PaymasterSendWidget::canContinueActivePaymasterSend() const
 void PaymasterSendWidget::pollPaymasterSession()
 {
     using Effect = PaymasterQt::SendController::Effect;
-    const Effect effect = m_send.advance({m_walletModel != nullptr,
+    const auto operation = m_send.beginPoll({m_walletModel != nullptr,
         m_walletModel && m_walletModel->digiDollarHistoryRefreshInProgress()});
-    switch (effect) {
+    switch (operation.effect) {
     case Effect::NONE:
         return;
     case Effect::RETRY:
@@ -3730,7 +3730,7 @@ void PaymasterSendWidget::pollPaymasterSession()
         return;
     case Effect::RECOVER:
         setPaymasterBusy(true);
-        executePaymasterRpcAsyncDetailed("resolvepaymastersession", m_send.view().activeRecoveryParams,
+        executePaymasterRpcAsyncDetailed("resolvepaymastersession", operation.params,
             [guard = QPointer<PaymasterSendWidget>(this)](UniValue result, PaymasterQt::RpcError error) {
                 if (guard) guard->handleAlternativePaymasterRecoveryResult(result, error);
             });
@@ -3738,11 +3738,11 @@ void PaymasterSendWidget::pollPaymasterSession()
     case Effect::CONTINUE: {
         // Execute the exact request selected by the controller. A timer never
         // supplies another authorization, UUID, fee limit or transport retry.
-        const UniValue params = m_send.view().activeSendParams;
+        const UniValue params = operation.params;
         const QString address = QString::fromStdString(params[0].get_str());
         const CAmount amount_cents = params[1].getInt<int64_t>();
         setPaymasterBusy(true);
-        const auto token = m_send.beginContinuation();
+        const auto token = operation.token;
         executePaymasterRpcAsyncDetailed("senddigidollar", params,
             [guard = QPointer<PaymasterSendWidget>(this), address, amount_cents, token](UniValue result, WalletModel::RpcError error) {
                 if (!guard || !guard->m_send.receiveContinuation(token)) return;
@@ -3791,7 +3791,7 @@ void PaymasterSendWidget::observePaymasterOutcome()
     // Stop transport/signing continuations, then observe the same durable session.
     // A timeout never grants authority to release inputs or create another spend.
     stopPaymasterPolling();
-    m_send.stopRecovery();
+    m_send.observeOnly();
     setPaymasterNotice(DigiDollarSendWidget::tr(
         "The outcome is still unclear. Status checks continue automatically; no new payment is sent. "
         "Your reserved funds remain protected. You can review a return to this wallet when Core offers it; "
@@ -4323,15 +4323,16 @@ void PaymasterSendWidget::closeUnusablePaymasterOffer(const QString& reason, boo
                 guard->setPaymasterBusy(false);
                 return;
             }
-            if (guard->m_send.view().unsignedClosed) {
+            const auto closure = guard->m_send.unsignedClosure(allow_cancel, guard->m_privacy);
+            using ClosureEffect = PaymasterQt::SendController::ClosureEffect;
+            if (closure.effect == ClosureEffect::CLOSED) {
                 guard->clearUnsignedPaymasterSession();
                 guard->m_paymasterClosureReason.clear();
                 guard->setPaymasterNotice(DigiDollarSendWidget::tr(
                     "Previous payment attempt: %1 The unsigned request is closed. No payment was sent and your wallet funds are available again. The provider may keep its offer reservation until expiry. Recipient and amount were kept; prepare a new offer when ready.").arg(reason));
                 return;
             }
-            if (guard->m_send.view().sessionState == QStringLiteral("CONFIRMED") ||
-                guard->m_send.view().sessionState == QStringLiteral("CANCELED_SAFE")) {
+            if (closure.effect == ClosureEffect::COMPLETE) {
                 guard->m_paymasterClosureReason.clear();
                 guard->setPaymasterNotice(QString{});
                 const auto completion_token = guard->m_send.replyToken();
@@ -4340,13 +4341,8 @@ void PaymasterSendWidget::closeUnusablePaymasterOffer(const QString& reason, boo
                 guard->setPaymasterBusy(false);
                 return;
             }
-            if (allow_cancel && !guard->m_privacy && guard->m_send.view().artifact == QStringLiteral("none") &&
-                guard->m_send.view().allowedActionsKnown && guard->m_send.view().allowedActions.contains(QStringLiteral("abandon_unsigned"))) {
-                UniValue cancel{UniValue::VARR};
-                cancel.push_back(lookup);
-                cancel.push_back("abandon_unsigned");
-                cancel.push_back(UniValue{UniValue::VOBJ});
-                guard->executePaymasterRpcAsync("resolvepaymastersession", std::move(cancel),
+            if (closure.effect == ClosureEffect::ABANDON) {
+                guard->executePaymasterRpcAsync("resolvepaymastersession", closure.params,
                     [guard, reason](UniValue, QString) {
                         if (!guard) return;
                         guard->setPaymasterBusy(false);
@@ -4394,26 +4390,6 @@ void PaymasterSendWidget::clearClosedPaymasterSession()
     setPaymasterBusy(false);
 }
 
-UniValue PaymasterSendWidget::buildAlternativePaymasterRecoveryParams() const
-{
-    UniValue lookup{UniValue::VOBJ};
-    lookup.pushKV("request_id", m_send.view().requestId.toStdString());
-    UniValue options{UniValue::VOBJ};
-    options.pushKV("maximum_recovery_service_fee_cents",
-                   m_send.view().recoveryMaximumServiceFeeCents);
-    if (m_send.view().recoveryAuthorizationCommitment.isEmpty()) {
-        options.pushKV("prepare_only", true);
-    } else {
-        options.pushKV("recovery_authorization_commitment",
-                       m_send.view().recoveryAuthorizationCommitment.toStdString());
-    }
-    UniValue params{UniValue::VARR};
-    params.push_back(std::move(lookup));
-    params.push_back("cancel_to_self");
-    params.push_back(std::move(options));
-    return params;
-}
-
 void PaymasterSendWidget::executeAlternativePaymasterRecovery(bool allow_unlock)
 {
     if (!m_walletModel || m_send.view().busy || !m_send.view().recoveryActive ||
@@ -4430,7 +4406,7 @@ void PaymasterSendWidget::executeAlternativePaymasterRecovery(bool allow_unlock)
         m_send.view().recoveryAuthorizationCommitment.isEmpty()
             ? DigiDollarSendWidget::tr("Preparing authenticated alternative recovery…")
             : DigiDollarSendWidget::tr("Submitting the exact confirmed recovery authorization…"));
-    m_send.startRecoveryCall(buildAlternativePaymasterRecoveryParams());
+    m_send.startRecoveryCall();
     executePaymasterRpcAsyncDetailed(
         "resolvepaymastersession", m_send.view().activeRecoveryParams,
         [guard = QPointer<PaymasterSendWidget>(this)](UniValue result, PaymasterQt::RpcError error) {
@@ -4671,10 +4647,11 @@ void PaymasterSendWidget::handleAlternativePaymasterRecoveryResult(
         return;
     }
     if (next.effect == RecoveryEffect::EXPIRED) {
-        blockAlternativePaymasterRecovery(
-            DigiDollarSendWidget::tr("Recovery authorization expired"),
-            DigiDollarSendWidget::tr("The exact alternative recovery authorization expired. Start a fresh "
-               "two-stage review; Qt will not reuse the old acceptance."));
+        setPaymasterBusy(false);
+        setPaymasterNotice(DigiDollarSendWidget::tr(
+            "The unsigned recovery authorization expired. Status checks continue; a new recovery requires a fresh review."));
+        applyPaymasterPrivacy();
+        schedulePaymasterPoll(/*state_changed=*/true);
         return;
     }
 
