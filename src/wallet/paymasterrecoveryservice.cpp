@@ -67,14 +67,6 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
     using namespace DigiDollar::Paymaster;
     std::string error;
     int64_t now{GetTime()};
-    bool completed{false};
-    if (!store.CompleteClientConfirmedFinal(session.request_id, now, completed, error))
-        throw ApplicationError(ErrorKind::WALLET, error);
-    if (completed) {
-        if (!store.GetSessionByRequestId(session.request_id, session))
-            throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SESSION_DATABASE_READ");
-        return CaptureClientSession(store, session, "cancel_to_self");
-    }
     if (!CheckPaymasterClientReadiness(wallet, context, error) ||
         !CheckPaymasterPrivacyReadiness(
             original_attempt.privacy_profile, context, error)) {
@@ -991,6 +983,16 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
             return make_result(recovery, RecoveryQueueState{}, broadcast,
                                broadcast_error);
         }
+        // Process/retain a received signed result before local completion can
+        // fail. Without a result, deep local evidence replaces transport retry.
+        bool completed{false};
+        if (!store.CompleteClientConfirmedFinal(session.request_id, now, completed, error))
+            throw ApplicationError(ErrorKind::WALLET, error);
+        if (completed) {
+            if (!store.GetSessionByRequestId(session.request_id, session))
+                throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SESSION_DATABASE_READ");
+            return CaptureClientSession(store, session, "cancel_to_self");
+        }
         RecoveryQueueState queue;
         if (!QueueRecoveryMessage(context, wallet, recovery, submit, now,
                                   queue, error)) {
@@ -1132,13 +1134,15 @@ ClientRecoveryResult ResolvePaymasterSession(WalletContext& context, CWallet& ta
             }
         }
     }
-    bool locally_completed{false};
-    std::string completion_error;
-    if (!store.CompleteClientConfirmedFinal(session.request_id, GetTime(), locally_completed, completion_error))
-        throw ApplicationError(ErrorKind::WALLET, completion_error);
-    if (locally_completed && !store.GetSessionByRequestId(session.request_id, session))
-        throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SESSION_DATABASE_READ");
-    if (action == "refresh" || locally_completed) return CaptureClientSession(store, session, action);
+    if (action == "refresh") {
+        bool locally_completed{false};
+        std::string completion_error;
+        if (!store.CompleteClientConfirmedFinal(session.request_id, GetTime(), locally_completed, completion_error))
+            throw ApplicationError(ErrorKind::WALLET, completion_error);
+        if (locally_completed && !store.GetSessionByRequestId(session.request_id, session))
+            throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SESSION_DATABASE_READ");
+        return CaptureClientSession(store, session, action);
+    }
     if (action == "abandon_unsigned") {
         std::string error;
         if (!store.AbandonUnsignedClientSession(
