@@ -1346,6 +1346,14 @@ BOOST_FIXTURE_TEST_CASE(maintenance_inventory_pruning_preserves_spends_releases_
     BOOST_REQUIRE(raw->Write(std::make_pair(std::string{"pmpoolhistory"}, released), uint16_t{ProviderPoolEntry::CURRENT_VERSION + 1}));
     BOOST_CHECK(!ReconcileProviderMaintenance(m_wallet, recovered, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_POOL_HISTORY_READ");
+    BOOST_REQUIRE(raw->Write(std::make_pair(std::string{"pmpoolhistory"}, released), history));
+    BOOST_REQUIRE(raw->Write(std::string{"pmpoolhistoryversion"}, uint16_t{2}));
+    const auto future_rows = GetMockableDatabase(m_wallet).m_records;
+    BOOST_CHECK(!batch.WritePaymasterProviderPool(pool));
+    BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == future_rows);
+    BOOST_CHECK(!ReconcileProviderMaintenance(m_wallet, recovered, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_POOL_HISTORY_READ");
+    BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == future_rows);
 }
 
 BOOST_FIXTURE_TEST_CASE(maintenance_history_never_recovers_an_ambiguous_match, WalletTestingSetup)

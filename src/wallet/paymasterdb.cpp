@@ -2036,6 +2036,8 @@ bool WalletBatch::WritePaymasterProviderPool(
     std::vector<ProviderPoolEntry> previous;
     const auto status = ReadPaymasterProviderPoolWithStatus(previous);
     if (status != DatabaseReadStatus::FOUND && status != DatabaseReadStatus::NOT_FOUND) return fail();
+    const auto history_status = ReadPaymasterPoolHistoryMarker();
+    if (history_status != DatabaseReadStatus::FOUND && history_status != DatabaseReadStatus::NOT_FOUND) return fail();
     for (const auto& old : previous) {
         if (std::any_of(entries.begin(), entries.end(), [&](const auto& entry) { return entry.outpoint == old.outpoint; })) continue;
         if (IsActiveProviderPoolState(old.state)) continue; // caller owns active transitions; pruning never removes them
@@ -2063,8 +2065,11 @@ DatabaseReadStatus WalletBatch::ReadPaymasterPoolHistoryWithStatus(
     const COutPoint& outpoint, DigiDollar::Paymaster::ProviderPoolEntry& entry)
 {
     using namespace DigiDollar::Paymaster;
+    const auto marker_status = ReadPaymasterPoolHistoryMarker();
+    if (marker_status != DatabaseReadStatus::FOUND && marker_status != DatabaseReadStatus::NOT_FOUND) return marker_status;
     const auto status = ReadPaymasterVersionedRecord(std::make_pair(std::string{"pmpoolhistory"}, outpoint), entry);
     if (status != DatabaseReadStatus::FOUND) return status;
+    if (marker_status != DatabaseReadStatus::FOUND) return DatabaseReadStatus::READ_ERROR;
     std::string error;
     if (entry.outpoint != outpoint || IsActiveProviderPoolState(entry.state) ||
         !ValidateProviderPoolEntries({entry}, error)) return DatabaseReadStatus::READ_ERROR;
