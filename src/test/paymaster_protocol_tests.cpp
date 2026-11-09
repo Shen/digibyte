@@ -483,4 +483,43 @@ BOOST_AUTO_TEST_CASE(optional_fields_round_trip_canonically)
     BOOST_CHECK(decoded.status == original.status);
 }
 
+BOOST_AUTO_TEST_CASE(wire_vector_counts_fail_before_element_allocation)
+{
+    for (const uint16_t version : {LEGACY_DIRECT_PROTOCOL_VERSION, DigiDollar::Paymaster::PROTOCOL_VERSION}) {
+        PaymasterCapacityProof original;
+        original.version = version;
+        original.funding_model = FundingModel::USER_PAID;
+        original.request_id = "550e8400-e29b-41d4-a716-446655440000";
+        original.liquidity_slots.resize(1);
+        original.identity_signature.resize(64);
+        CDataStream valid{SER_NETWORK, ::PROTOCOL_VERSION};
+        valid << original;
+        const std::vector<std::byte> bytes(valid.begin(), valid.end());
+        PaymasterCapacityProof decoded;
+        valid >> decoded;
+        CDataStream roundtrip{SER_NETWORK, ::PROTOCOL_VERSION};
+        roundtrip << decoded;
+        BOOST_CHECK(std::vector<std::byte>(roundtrip.begin(), roundtrip.end()) == bytes);
+        BOOST_CHECK_EQUAL(decoded.liquidity_slots.size(), 1U);
+        original.liquidity_slots.resize(25000);
+        CDataStream oversized{SER_NETWORK, ::PROTOCOL_VERSION};
+        oversized << original;
+        PaymasterCapacityProof rejected;
+        BOOST_CHECK_THROW(oversized >> rejected, std::ios_base::failure);
+        BOOST_CHECK_EQUAL(rejected.liquidity_slots.capacity(), 0U);
+    }
+    CDataStream inputs{SER_NETWORK, ::PROTOCOL_VERSION};
+    inputs << uint8_t{0}; // absent carrier
+    WriteCompactSize(inputs, MAX_CAPACITY_DGB_INPUTS + 1);
+    PaymasterLiquiditySlot slot;
+    BOOST_CHECK_THROW(inputs >> slot, std::ios_base::failure);
+    BOOST_CHECK_EQUAL(slot.dgb_inputs.capacity(), 0U);
+    CDataStream signature{SER_NETWORK, ::PROTOCOL_VERSION};
+    signature << uint256{} << int64_t{1};
+    WriteCompactSize(signature, 65);
+    CapacityControlProof proof;
+    BOOST_CHECK_THROW(signature >> proof, std::ios_base::failure);
+    BOOST_CHECK_EQUAL(proof.signature.capacity(), 0U);
+}
+
 BOOST_AUTO_TEST_SUITE_END()

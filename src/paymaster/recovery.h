@@ -82,11 +82,11 @@ struct AlternativeRecoveryManifest {
                   obj.offer_id, obj.policy_hash,
                   obj.original_commit_key, obj.original_template_commitment,
                   obj.capacity_snapshot_id, obj.capacity_resource_commitment,
-                  obj.user_dd_inputs, obj.wallet_returns,
-                  obj.recovery_provider_carrier_inputs,
-                  obj.recovery_provider_dgb_inputs,
-                  obj.recovery_provider_dd_scripts,
-                  obj.recovery_provider_dgb_change_scripts,
+                  Using<BoundedVectorFormatter<MAX_PAYMENT_INTENT_INPUTS>>(obj.user_dd_inputs), Using<BoundedVectorFormatter<MAX_PAYMENT_INTENT_INPUTS>>(obj.wallet_returns),
+                  Using<BoundedVectorFormatter<1>>(obj.recovery_provider_carrier_inputs),
+                  Using<BoundedVectorFormatter<MAX_CAPACITY_DGB_INPUTS>>(obj.recovery_provider_dgb_inputs),
+                  Using<BoundedVectorFormatter<1>>(obj.recovery_provider_dd_scripts),
+                  Using<BoundedVectorFormatter<1>>(obj.recovery_provider_dgb_change_scripts),
                   obj.maximum_service_fee, obj.service_fee, obj.network_fee,
                   obj.expires_at, obj.unsigned_txid,
                   obj.template_commitment);
@@ -182,8 +182,8 @@ struct RecoveryAuthorizationManifest {
                   obj.capacity_resource_commitment,
                   obj.recovery_request_hash, obj.recovery_commit_key,
                   obj.recovery_manifest_id,
-                  obj.recovery_template_commitment, obj.user_dd_inputs,
-                  obj.wallet_returns, obj.maximum_service_fee,
+                  obj.recovery_template_commitment, Using<BoundedVectorFormatter<MAX_PAYMENT_INTENT_INPUTS>>(obj.user_dd_inputs),
+                  Using<BoundedVectorFormatter<MAX_PAYMENT_INTENT_INPUTS>>(obj.wallet_returns), obj.maximum_service_fee,
                   obj.service_fee, obj.network_fee, obj.expires_at);
     }
 };
@@ -197,7 +197,7 @@ struct AlternativeRecoveryInputProof {
 
     SERIALIZE_METHODS(AlternativeRecoveryInputProof, obj)
     {
-        READWRITE(obj.outpoint, obj.signature);
+        READWRITE(obj.outpoint, Using<BoundedVectorFormatter<64>>(obj.signature));
     }
 };
 
@@ -240,10 +240,10 @@ struct AlternativeRecoveryRequest {
                   obj.original_template_commitment, obj.client_nonce,
                   obj.capacity_request,
                   obj.capacity_snapshot_id,
-                  obj.capacity_resource_commitment, obj.user_dd_inputs,
-                  obj.wallet_returns, obj.maximum_service_fee,
+                  obj.capacity_resource_commitment, Using<BoundedVectorFormatter<MAX_PAYMENT_INTENT_INPUTS>>(obj.user_dd_inputs),
+                  Using<BoundedVectorFormatter<MAX_PAYMENT_INTENT_INPUTS>>(obj.wallet_returns), obj.maximum_service_fee,
                   obj.service_fee, obj.created_at, obj.expires_at,
-                  obj.user_input_proofs);
+                  Using<BoundedVectorFormatter<MAX_PAYMENT_INTENT_INPUTS>>(obj.user_input_proofs));
     }
 };
 
@@ -272,8 +272,8 @@ struct AlternativeRecoveryResponse {
                   obj.session_id, obj.recovery_id,
                   obj.recovery_provider_id,
                   obj.recovery_request_hash, obj.recovery_commit_key,
-                  obj.manifest, obj.unsigned_psbt, obj.created_at,
-                  obj.expires_at, obj.identity_signature);
+                  obj.manifest, Using<BoundedVectorFormatter<MAX_DIRECT_PSBT_BYTES>>(obj.unsigned_psbt), obj.created_at,
+                  obj.expires_at, Using<BoundedVectorFormatter<64>>(obj.identity_signature));
     }
 };
 
@@ -298,7 +298,7 @@ struct AlternativeRecoverySubmit {
                   obj.session_id, obj.recovery_id,
                   obj.recovery_provider_id,
                   obj.recovery_request_hash, obj.recovery_commit_key,
-                  obj.template_commitment, obj.user_psbt);
+                  obj.template_commitment, Using<BoundedVectorFormatter<MAX_DIRECT_PSBT_BYTES>>(obj.user_psbt));
     }
 };
 

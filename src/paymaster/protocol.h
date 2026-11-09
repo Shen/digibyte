@@ -59,7 +59,7 @@ struct UserInputControlProof {
     COutPoint outpoint;
     std::vector<unsigned char> signature;
 
-    SERIALIZE_METHODS(UserInputControlProof, obj) { READWRITE(obj.outpoint, obj.signature); }
+    SERIALIZE_METHODS(UserInputControlProof, obj) { READWRITE(obj.outpoint, Using<BoundedVectorFormatter<64>>(obj.signature)); }
 };
 
 struct PaymentIntent {
@@ -93,13 +93,13 @@ struct PaymentIntent {
     SERIALIZE_METHODS(PaymentIntent, obj)
     {
         READWRITE(obj.version, obj.genesis_hash, obj.provider_id, LIMITED_STRING(obj.request_id, MAX_REQUEST_ID_LENGTH),
-                  obj.session_id, obj.client_nonce, obj.user_dd_inputs,
+                  obj.session_id, obj.client_nonce, Using<BoundedVectorFormatter<MAX_PAYMENT_INTENT_INPUTS>>(obj.user_dd_inputs),
                   obj.recipient_script, obj.recipient_amount,
                   obj.user_dd_change_script, obj.offer_id,
                   Using<EnumByteFormatter<static_cast<uint8_t>(FundingModel::SPONSORED)>>(obj.funding_model),
                   Using<EnumByteFormatter<static_cast<uint8_t>(SponsorshipScope::RESTRICTED)>>(obj.sponsorship_scope),
                   obj.policy_hash, obj.sponsorship_authorization_hash,
-                  obj.expires_at, obj.user_input_proofs,
+                  obj.expires_at, Using<BoundedVectorFormatter<MAX_PAYMENT_INTENT_INPUTS>>(obj.user_input_proofs),
                   obj.canonical_request_hash,
                   Using<EnumByteFormatter<static_cast<uint8_t>(FeeMode::AUTO)>>(obj.requested_fee_mode),
                   Using<EnumByteFormatter<static_cast<uint8_t>(PrivacyProfile::HIGH)>>(obj.privacy_profile),
@@ -161,13 +161,13 @@ struct PaymasterQuote {
                   obj.sponsorship_authorization_hash, obj.fee_rate_bps,
                   obj.service_fee,
                   Using<OptionalFieldFormatter<VerifiedDDCarrier>>(obj.reserved_carrier),
-                  obj.reserved_dgb_inputs,
+                  Using<BoundedVectorFormatter<MAX_PAYMENT_INTENT_INPUTS>>(obj.reserved_dgb_inputs),
                   Using<OptionalFieldFormatter<CScript>>(obj.carrier_return_script),
                   Using<OptionalFieldFormatter<CScript>>(obj.provider_fee_script),
                   Using<OptionalFieldFormatter<CScript>>(obj.dgb_change_script),
                   obj.network_fee, obj.created_at, obj.expires_at, obj.retry_until,
                   obj.unsigned_transaction, obj.unsigned_txid,
-                  obj.template_commitment, obj.identity_signature);
+                  obj.template_commitment, Using<BoundedVectorFormatter<64>>(obj.identity_signature));
     }
 };
 
@@ -268,7 +268,7 @@ struct PaymasterResult {
                   Using<OptionalFieldFormatter<uint256>>(obj.txid),
                   Using<OptionalFieldFormatter<uint256>>(obj.raw_transaction_hash),
                   Using<OptionalFieldFormatter<CMutableTransaction>>(obj.final_transaction),
-                  obj.updated_at, obj.identity_signature);
+                  obj.updated_at, Using<BoundedVectorFormatter<64>>(obj.identity_signature));
     }
 };
 

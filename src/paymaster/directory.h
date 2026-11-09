@@ -60,9 +60,9 @@ struct AdmissionSlotProof {
 
     SERIALIZE_METHODS(AdmissionSlotProof, obj)
     {
-        READWRITE(obj.dgb_outpoint, obj.dgb_creating_tx, obj.dgb_value, obj.dgb_control_signature,
+        READWRITE(obj.dgb_outpoint, obj.dgb_creating_tx, obj.dgb_value, Using<BoundedVectorFormatter<64>>(obj.dgb_control_signature),
                   obj.carrier_outpoint, obj.carrier_creating_tx, obj.carrier_value,
-                  obj.carrier_control_signature, obj.reference_block, obj.expires_at);
+                  Using<BoundedVectorFormatter<64>>(obj.carrier_control_signature), obj.reference_block, obj.expires_at);
     }
 };
 
@@ -85,14 +85,14 @@ struct Announcement {
     {
         READWRITE(obj.version, obj.genesis_hash, obj.identity_key, obj.display_name,
                   obj.sequence, obj.created_at, obj.expires_at,
-                  WithParams(CNetAddr::V2, obj.endpoint), obj.offers,
-                  obj.min_confirmations, obj.capability_flags, obj.admission_slots);
+                  WithParams(CNetAddr::V2, obj.endpoint), Using<BoundedVectorFormatter<MAX_ANNOUNCEMENT_OFFERS>>(obj.offers),
+                  obj.min_confirmations, obj.capability_flags, Using<BoundedVectorFormatter<REQUIRED_ADMISSION_SLOTS>>(obj.admission_slots));
         if (obj.version >= 6) {
             for (auto& offer : obj.offers) {
                 READWRITE(offer.maximum_user_paid_service_fee);
             }
         }
-        READWRITE(obj.identity_signature);
+        READWRITE(Using<BoundedVectorFormatter<64>>(obj.identity_signature));
     }
 };
 

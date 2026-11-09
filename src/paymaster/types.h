@@ -23,6 +23,31 @@ class CService;
 
 namespace DigiDollar::Paymaster {
 
+/** Preserve vector wire bytes while rejecting a domain count before any
+ * element allocation. Envelope validation still checks shape and authority. */
+template <size_t Limit>
+struct BoundedVectorFormatter {
+    template <typename Stream, typename V>
+    void Unser(Stream& stream, V& values)
+    {
+        values.clear();
+        const auto size = ReadCompactSize(stream);
+        if (size > Limit) throw std::ios_base::failure("Paymaster vector count exceeds limit");
+        if constexpr (std::is_same_v<typename V::value_type, unsigned char>) {
+            values.resize(size);
+            stream.read(AsWritableBytes(Span{values}));
+            return;
+        }
+        values.reserve(size);
+        for (size_t i{0}; i < size; ++i) {
+            values.emplace_back();
+            ::Unserialize(stream, values.back());
+        }
+    }
+    template <typename Stream, typename V>
+    void Ser(Stream& stream, const V& values) { ::Serialize(stream, values); }
+};
+
 // Version 2 makes the provider-authenticated capacity handshake mandatory
 // before payment intents or restricted capabilities may be disclosed.
 // Version 3 adds the authenticated alternative-provider recovery exchange.
