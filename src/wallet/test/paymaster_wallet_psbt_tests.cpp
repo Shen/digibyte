@@ -197,6 +197,23 @@ BOOST_AUTO_TEST_CASE(wallet_with_both_keys_signs_only_requested_role)
         BOOST_CHECK_EQUAL(signing_error, "PAYMASTER_SIGNING_AUTHORIZATION_EXPIRED");
         BOOST_CHECK(SerializePaymasterTestArtifact(psbt) == SerializePaymasterTestArtifact(trusted.psbt));
     }
+    // A manual lock installed after preparation is a veto for every new USER
+    // signature, including this generic USER_DGB fixture.
+    const auto user_input = psbt.tx->vin.front().prevout;
+    {
+        LOCK(m_wallet.cs_wallet);
+        BOOST_REQUIRE(m_wallet.LockCoin(user_input));
+    }
+    const auto before_user_veto = SerializePaymasterTestArtifact(psbt);
+    BOOST_CHECK(!SignCollaborativePSBTForParty(m_wallet, psbt, trusted, SigningParty::USER, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_CLIENT_INPUT_LOCKED");
+    BOOST_CHECK(SerializePaymasterTestArtifact(psbt) == before_user_veto);
+    {
+        LOCK(m_wallet.cs_wallet);
+        BOOST_REQUIRE(m_wallet.UnlockCoin(user_input));
+        BOOST_CHECK(!m_wallet.IsLockedCoin(user_input));
+        BOOST_CHECK(!m_wallet.IsManuallyLockedCoin(user_input));
+    }
     BOOST_REQUIRE(SignCollaborativePSBTForParty(m_wallet, psbt, trusted, SigningParty::USER, error));
     BOOST_CHECK(PSBTInputSigned(psbt.inputs[0]));
     BOOST_CHECK(!PSBTInputSigned(psbt.inputs[1]));
@@ -989,8 +1006,24 @@ void CheckProviderExecutionFirewall(WalletTestingSetup& fixture, uint16_t versio
                           error);
 
     PartiallySignedTransaction signed_psbt{trusted.psbt};
-    BOOST_REQUIRE(SignCollaborativePSBTForParty(
+    const auto user_input = signed_psbt.tx->vin.front().prevout;
+    {
+        LOCK(m_wallet.cs_wallet);
+        BOOST_REQUIRE(m_wallet.LockDigiDollarCoin(user_input));
+        BOOST_REQUIRE(m_wallet.LockCoin(user_input));
+    }
+    BOOST_CHECK(!SignCollaborativePSBTForParty(
         m_wallet, signed_psbt, trusted, SigningParty::USER, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_CLIENT_INPUT_LOCKED");
+    BOOST_CHECK(SerializePaymasterTestArtifact(signed_psbt) == SerializePaymasterTestArtifact(trusted.psbt));
+    {
+        LOCK(m_wallet.cs_wallet);
+        BOOST_REQUIRE(m_wallet.UnlockCoin(user_input));
+        BOOST_CHECK(m_wallet.IsDigiDollarLockedCoin(user_input));
+        BOOST_CHECK(m_wallet.IsLockedCoin(user_input));
+    }
+    BOOST_REQUIRE_MESSAGE(SignCollaborativePSBTForParty(
+        m_wallet, signed_psbt, trusted, SigningParty::USER, error), error);
     // Core property after the client signature: the signed transaction still
     // consumes exactly the DD inputs and authorizes exactly the asset outflows
     // captured by the local client manifest.
@@ -1328,6 +1361,34 @@ void CheckProviderExecutionFirewall(WalletTestingSetup& fixture, uint16_t versio
 }
 
 } // namespace
+
+BOOST_AUTO_TEST_CASE(new_signature_locks_follow_validated_asset_roles)
+{
+    using namespace DigiDollar::Paymaster;
+    const COutPoint input{uint256::ONE, 50};
+    std::string error;
+    LOCK(m_wallet.cs_wallet);
+    BOOST_REQUIRE(m_wallet.LockDigiDollarCoin(input));
+    m_wallet.LockPaymasterCoin(input);
+    for (const auto role : {InputRole::USER_DD, InputRole::PROVIDER_CARRIER}) {
+        BOOST_CHECK(CheckPaymasterNewSignatureInputs(m_wallet, {input}, error, role));
+    }
+    for (const auto role : {InputRole::USER_DGB, InputRole::PROVIDER_DGB}) {
+        BOOST_CHECK(!CheckPaymasterNewSignatureInputs(m_wallet, {input}, error, role));
+    }
+    BOOST_REQUIRE(m_wallet.LockCoin(input));
+    for (const auto role : {InputRole::USER_DD, InputRole::USER_DGB, InputRole::PROVIDER_CARRIER, InputRole::PROVIDER_DGB}) {
+        BOOST_CHECK(!CheckPaymasterNewSignatureInputs(m_wallet, {input}, error, role));
+        BOOST_CHECK_EQUAL(error, role == InputRole::USER_DD || role == InputRole::USER_DGB
+            ? "PAYMASTER_CLIENT_INPUT_LOCKED" : "PAYMASTER_PROVIDER_INPUT_LOCKED");
+    }
+    BOOST_REQUIRE(m_wallet.UnlockCoin(input));
+    BOOST_CHECK(CheckPaymasterNewSignatureInputs(m_wallet, {input}, error, InputRole::PROVIDER_CARRIER));
+    BOOST_CHECK(!CheckPaymasterNewSignatureInputs(m_wallet, {input}, error));
+    BOOST_CHECK(m_wallet.IsDigiDollarLockedCoin(input));
+    BOOST_REQUIRE(m_wallet.UnlockDigiDollarCoin(input));
+    BOOST_CHECK(m_wallet.IsLockedCoin(input));
+}
 
 BOOST_AUTO_TEST_CASE(provider_execution_firewall_revalidates_durable_authority)
 {

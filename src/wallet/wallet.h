@@ -646,8 +646,13 @@ public:
     bool IsLockedCoin(const COutPoint& output) const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
     /** Ordinary/manual and DD locks, excluding Paymaster's own reservation reason. */
     bool IsOrdinaryLockedCoin(const COutPoint& output) const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+    /** Explicit manual ownership, including conservatively retained legacy locks. */
+    bool IsManuallyLockedCoin(const COutPoint& output) const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+    bool IsDigiDollarLockedCoin(const COutPoint& output) const EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
     bool LockCoin(const COutPoint& output, WalletBatch* batch = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
     bool UnlockCoin(const COutPoint& output, WalletBatch* batch = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+    bool LockDigiDollarCoin(const COutPoint& output, WalletBatch* batch = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
+    bool UnlockDigiDollarCoin(const COutPoint& output, WalletBatch* batch = nullptr) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
     /** Publish the Paymaster lock reason only after its database transaction commits. */
     void LockPaymasterCoin(const COutPoint& output) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
     void UnlockPaymasterCoin(const COutPoint& output) EXCLUSIVE_LOCKS_REQUIRED(cs_wallet);
@@ -1190,6 +1195,9 @@ private:
     /** Separate ownership so ending a Paymaster reservation cannot remove a
      * manual or DigiDollar lock installed while the reservation was active. */
     std::set<COutPoint> m_paymaster_locked_coins GUARDED_BY(cs_wallet);
+    /** DD protection is independent of operator locks. DD transfers may spend
+     * token outputs with this reason; ordinary DGB selection may not. */
+    std::set<COutPoint> m_digidollar_locked_coins GUARDED_BY(cs_wallet);
 };
 
 /**

@@ -928,6 +928,45 @@ BOOST_AUTO_TEST_CASE(w17_06_lifecycle_conserves_dd_balance)
     BOOST_CHECK(dd_wallet.GetDDUTXOs().empty());
 }
 
+BOOST_AUTO_TEST_CASE(dd_selection_distinguishes_internal_protection_and_manual_veto)
+{
+    DigiDollarWallet dd_wallet{&m_wallet};
+    const auto transaction = MakeMintLikeTx();
+    AddConfirmedWalletTx(*this, m_wallet, transaction);
+    const COutPoint input{transaction->GetHash(), 1};
+    dd_wallet.AddDDUTXO(input, 1000);
+    {
+        LOCK(m_wallet.cs_wallet);
+        WalletBatch batch{m_wallet.GetDatabase()};
+        BOOST_REQUIRE(m_wallet.LockDigiDollarCoin(input, &batch));
+    }
+    std::vector<COutPoint> selected;
+    const std::vector<COutPoint> preset{input};
+    CAmount total{0};
+    std::string error;
+    BOOST_REQUIRE(dd_wallet.SelectDDCoins(100, preset, selected, total, nullptr, &error));
+    BOOST_CHECK_EQUAL(dd_wallet.GetSpendableDDBalance(), 1000);
+    {
+        LOCK(m_wallet.cs_wallet);
+        WalletBatch batch{m_wallet.GetDatabase()};
+        BOOST_REQUIRE(m_wallet.LockCoin(input, &batch));
+    }
+    BOOST_CHECK_EQUAL(dd_wallet.GetTotalDDBalance(), 1000);
+    BOOST_CHECK_EQUAL(dd_wallet.GetSpendableDDBalance(), 0);
+    BOOST_CHECK(dd_wallet.GetDDUTXOs().empty());
+    BOOST_CHECK(!dd_wallet.SelectDDCoins(100, preset, selected, total, nullptr, &error));
+    BOOST_CHECK(selected.empty());
+    BOOST_CHECK(!dd_wallet.SelectAllSpendableDDCoins(1000, selected, total, nullptr, error));
+    {
+        LOCK(m_wallet.cs_wallet);
+        WalletBatch batch{m_wallet.GetDatabase()};
+        BOOST_REQUIRE(m_wallet.UnlockCoin(input, &batch));
+        BOOST_CHECK(m_wallet.IsDigiDollarLockedCoin(input));
+    }
+    BOOST_REQUIRE(dd_wallet.SelectAllSpendableDDCoins(1000, selected, total, nullptr, error));
+    BOOST_CHECK_EQUAL(total, 1000);
+}
+
 BOOST_AUTO_TEST_SUITE_END()
 
 } // namespace wallet

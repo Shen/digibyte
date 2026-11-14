@@ -1131,7 +1131,11 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
 ### src/wallet/wallet.h / src/wallet/wallet.cpp
 - ⚠️ `CWallet::GetDDWallet()` → returns `DigiDollarWallet*` accessor
 - ⚠️ `SyncTransaction` → calls `ProcessDDTxForRescan()` and `ProcessIncomingDDTransaction()` on DD transactions
-- ⚠️ `UnlockAllCoins` → respects `IsLockedByDD()` to protect DD locks
+- `LockDigiDollarCoin` / `UnlockDigiDollarCoin` → own DD protection independently
+  of manual `LockCoin` / `UnlockCoin` and Paymaster reservations; generic DGB
+  selection sees the union. Client DD spends still respect manual ownership.
+- ⚠️ `UnlockAllCoins` → retains DD ownership and conservatively preserves
+  unseparated legacy DD locks.
 
 ### src/wallet/walletdb.h / src/wallet/walletdb.cpp
 - ⚠️ `WalletBatch` DD persistence methods: `WriteDDBalance()`, `WriteDDTimeLock()`, `ReadDDTimeLock()`, `WriteDDTransaction()`, `WriteDDOwnerKey()`, `WriteDDAddressKey()`, `EraseDDTimeLock()` (74 references)

@@ -78,10 +78,20 @@ void CopySignatures(const PSBTInput& source, PSBTInput& destination)
 bool CheckPaymasterNewSignatureInputs(
     const CWallet& wallet, const std::vector<COutPoint>& inputs, std::string& error)
 {
+    return CheckPaymasterNewSignatureInputs(wallet, inputs, error, DigiDollar::Paymaster::InputRole::PROVIDER_DGB);
+}
+
+bool CheckPaymasterNewSignatureInputs(
+    const CWallet& wallet, const std::vector<COutPoint>& inputs, std::string& error,
+    DigiDollar::Paymaster::InputRole role)
+{
+    using namespace DigiDollar::Paymaster;
     LOCK(wallet.cs_wallet);
+    const bool dd = role == InputRole::USER_DD || role == InputRole::PROVIDER_CARRIER;
+    const bool client = role == InputRole::USER_DD || role == InputRole::USER_DGB;
     for (const auto& input : inputs) {
-        if (wallet.IsOrdinaryLockedCoin(input)) {
-            error = "PAYMASTER_PROVIDER_INPUT_LOCKED";
+        if (dd ? wallet.IsManuallyLockedCoin(input) : wallet.IsOrdinaryLockedCoin(input)) {
+            error = client ? "PAYMASTER_CLIENT_INPUT_LOCKED" : "PAYMASTER_PROVIDER_INPUT_LOCKED";
             return false;
         }
     }
@@ -184,12 +194,13 @@ bool SignCollaborativePSBTForParty(
 
     // This entry point creates a new signature. Exact durable provider replay
     // uses its saved bytes instead; our own reservation reason is not a veto.
-    if (party == SigningParty::PROVIDER) {
-        std::vector<COutPoint> provider_inputs;
+    for (const InputRole role : {InputRole::USER_DD, InputRole::USER_DGB, InputRole::PROVIDER_CARRIER, InputRole::PROVIDER_DGB}) {
+        if (!IsInputOwnedBy(role, party)) continue;
+        std::vector<COutPoint> owned_inputs;
         for (size_t index = 0; index < psbt.inputs.size(); ++index) {
-            if (IsInputOwnedBy(trusted_template.input_roles[index], party)) provider_inputs.push_back(psbt.tx->vin[index].prevout);
+            if (trusted_template.input_roles[index] == role) owned_inputs.push_back(psbt.tx->vin[index].prevout);
         }
-        if (!CheckPaymasterNewSignatureInputs(wallet, provider_inputs, error)) return false;
+        if (!CheckPaymasterNewSignatureInputs(wallet, owned_inputs, error, role)) return false;
     }
 
     PartiallySignedTransaction working{psbt};

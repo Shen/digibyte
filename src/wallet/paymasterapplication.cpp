@@ -2027,9 +2027,8 @@ bool ExecuteProviderMaintenanceTransactions(
             const auto& dd = std::get<DDMaintenanceTransfer>(transfer);
             auto* dd_wallet = wallet.GetDDWallet();
             if (!dd_wallet) { error = "PAYMASTER_DD_WALLET_UNAVAILABLE"; return false; }
-            auto inputs = dd.plan.dd_utxos;
-            inputs.insert(inputs.end(), dd.plan.fee_utxos.begin(), dd.plan.fee_utxos.end());
-            if (!CheckPaymasterNewSignatureInputs(wallet, inputs, error)) return false;
+            if (!CheckPaymasterNewSignatureInputs(wallet, dd.plan.dd_utxos, error, InputRole::PROVIDER_CARRIER) ||
+                !CheckPaymasterNewSignatureInputs(wallet, dd.plan.fee_utxos, error)) return false;
             CMutableTransaction transaction;
             if (!dd_wallet->BuildDigiDollarTransfer(dd.plan, transaction, error, pool_inputs)) {
                 error = MaintenanceBuildFailure(authority, true, error);

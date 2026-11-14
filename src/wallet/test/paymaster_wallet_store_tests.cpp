@@ -8258,6 +8258,77 @@ BOOST_AUTO_TEST_CASE(manual_unlock_does_not_remove_active_reservation_lock)
     BOOST_CHECK(!restarted.IsLockedCoin(failed_input));
 }
 
+BOOST_AUTO_TEST_CASE(digidollar_manual_and_paymaster_locks_preserve_each_owner)
+{
+    const COutPoint input{uint256S("ddf1"), 1};
+    {
+        LOCK(m_wallet.cs_wallet);
+        WalletBatch batch{m_wallet.GetDatabase()};
+        BOOST_REQUIRE(m_wallet.LockDigiDollarCoin(input, &batch));
+        BOOST_REQUIRE(batch.WritePaymasterLockedUTXO(input));
+        m_wallet.LockPaymasterCoin(input);
+        BOOST_REQUIRE(m_wallet.LockCoin(input, &batch));
+    }
+    wallet::CWallet restarted{m_node.chain.get(), "three-lock-owners",
+        DuplicateMockDatabase(m_wallet.GetDatabase())};
+    BOOST_REQUIRE(restarted.LoadWallet() == DBErrors::LOAD_OK);
+    {
+        LOCK(restarted.cs_wallet);
+        WalletBatch batch{restarted.GetDatabase()};
+        BOOST_CHECK(restarted.IsManuallyLockedCoin(input));
+        BOOST_CHECK(restarted.IsDigiDollarLockedCoin(input));
+        BOOST_REQUIRE(restarted.UnlockCoin(input, &batch));
+        BOOST_CHECK(!restarted.IsManuallyLockedCoin(input));
+        BOOST_CHECK(restarted.IsDigiDollarLockedCoin(input));
+        BOOST_CHECK(restarted.IsLockedCoin(input));
+        BOOST_REQUIRE(batch.ErasePaymasterLockedUTXO(input));
+        restarted.UnlockPaymasterCoin(input);
+        BOOST_CHECK(restarted.IsLockedCoin(input));
+    }
+    wallet::CWallet internal_only{m_node.chain.get(), "internal-dd-lock-only",
+        DuplicateMockDatabase(restarted.GetDatabase())};
+    BOOST_REQUIRE(internal_only.LoadWallet() == DBErrors::LOAD_OK);
+    LOCK(internal_only.cs_wallet);
+    BOOST_CHECK(internal_only.IsDigiDollarLockedCoin(input));
+    BOOST_CHECK(!internal_only.IsManuallyLockedCoin(input));
+    BOOST_REQUIRE(internal_only.UnlockAllCoins());
+    BOOST_CHECK(internal_only.IsLockedCoin(input));
+    WalletBatch batch{internal_only.GetDatabase()};
+    BOOST_REQUIRE(internal_only.UnlockDigiDollarCoin(input, &batch));
+    BOOST_CHECK(!internal_only.IsLockedCoin(input));
+}
+
+BOOST_AUTO_TEST_CASE(client_reservation_distinguishes_internal_and_manual_dd_locks)
+{
+    ScopedRecoveryMockTime mock_time{100};
+    PaymasterStore store{m_wallet};
+    PaymentSession session;
+    std::string error;
+    const COutPoint input{uint256S("ddf2"), 1};
+    const std::string request_id{"550e8400-e29b-41d4-a716-446655449010"};
+    BOOST_REQUIRE(store.CreateOrJoinSession(request_id, uint256S("ddf3"),
+        FeeMode::PAYMASTER, 100, session, error) == CreatePaymasterSessionResult::CREATED);
+    {
+        LOCK(m_wallet.cs_wallet);
+        WalletBatch batch{m_wallet.GetDatabase()};
+        BOOST_REQUIRE(m_wallet.LockDigiDollarCoin(input, &batch));
+        BOOST_REQUIRE(m_wallet.LockCoin(input, &batch));
+    }
+    BOOST_CHECK(!store.ReserveInputs(request_id, {{input, ReservationRole::USER_DD}}, FeeMode::PAYMASTER, 101, error));
+    {
+        LOCK(m_wallet.cs_wallet);
+        WalletBatch batch{m_wallet.GetDatabase()};
+        BOOST_REQUIRE(m_wallet.UnlockCoin(input, &batch));
+    }
+    BOOST_REQUIRE_MESSAGE(store.ReserveInputs(request_id, {{input, ReservationRole::USER_DD}},
+        FeeMode::PAYMASTER, 101, error), error);
+    BOOST_REQUIRE(store.AbandonUnsignedClientSession(request_id, 102, error));
+    BOOST_CHECK(!IsPaymasterInputReserved(m_wallet, input));
+    LOCK(m_wallet.cs_wallet);
+    BOOST_CHECK(m_wallet.IsDigiDollarLockedCoin(input));
+    BOOST_CHECK(m_wallet.IsLockedCoin(input));
+}
+
 BOOST_AUTO_TEST_CASE(legacy_ambiguous_lock_record_is_preserved_as_manual)
 {
     ScopedRecoveryMockTime mock_time{100};

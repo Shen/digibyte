@@ -538,6 +538,10 @@ CarrierWithdrawalResult WithdrawPaymasterCarrier(WalletContext& context, CWallet
             result.estimated_network_fee_satoshis = existing->actual_fee.value;
             return result;
         }
+        std::string lock_error;
+        if (!CheckPaymasterNewSignatureInputs(*wallet, plan.source_carriers, lock_error, InputRole::PROVIDER_CARRIER)) {
+            throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_CARRIER_WITHDRAWAL_FAILED: " + lock_error);
+        }
     }
 
     std::vector<std::pair<CDigiDollarAddress, CAmount>> recipients;
@@ -624,7 +628,7 @@ CarrierWithdrawalResult WithdrawPaymasterCarrier(WalletContext& context, CWallet
         operation.maximum_fee =
             current_policy
                 .maximum_maintenance_fee_per_transaction;
-        if (!CheckPaymasterNewSignatureInputs(*wallet, plan.source_carriers, transfer_error)) {
+        if (!CheckPaymasterNewSignatureInputs(*wallet, plan.source_carriers, transfer_error, InputRole::PROVIDER_CARRIER)) {
             throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_CARRIER_WITHDRAWAL_FAILED: " + transfer_error);
         }
         if (!ReserveProviderMaintenanceBudget(
@@ -1427,9 +1431,11 @@ PoolRebalanceResult RebalancePaymasterPool(WalletContext& context, CWallet& wall
     {
         std::vector<COutPoint> sources;
         for (const auto* entry : retire_dgb) sources.push_back(entry->outpoint);
-        for (const auto* entry : retire_dd) sources.push_back(entry->outpoint);
         std::string error;
         if (!CheckPaymasterNewSignatureInputs(*wallet, sources, error)) throw ApplicationError(ErrorKind::WALLET, error);
+        sources.clear();
+        for (const auto* entry : retire_dd) sources.push_back(entry->outpoint);
+        if (!CheckPaymasterNewSignatureInputs(*wallet, sources, error, InputRole::PROVIDER_CARRIER)) throw ApplicationError(ErrorKind::WALLET, error);
     }
     PoolRetirementMaintenanceAuthority authority;
     authority.provider_id = identity.provider_id;

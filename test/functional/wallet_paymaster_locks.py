@@ -46,9 +46,8 @@ class PaymasterLocksTest(DigiByteTestFramework):
             assert provider.lockunspent(True, [dgb])
             assert_equal(provider.getpaymasterpoolinfo()["complete_operational_slots"], 1)
 
-        # Ordinary RPC deliberately cannot unlock DD tokens. A transient carrier
-        # lock clears on reload; persistent carrier locks are checked below and
-        # remain protected by that existing DigiDollar guard.
+        # A transient manual carrier veto clears on reload. Paymaster's
+        # independent pool protection remains; persistent vetoes are tested below.
         assert provider.lockunspent(False, [carrier])
         assert_equal(provider.getpaymasterpoolinfo()["complete_operational_slots"], 0)
         assert_equal(provider.getpaymasterinfo()["ready"], False)
@@ -102,8 +101,6 @@ class PaymasterLocksTest(DigiByteTestFramework):
         assert provider.lockunspent(False, [carrier], True)
         assert_raises_rpc_error(-4, "PAYMASTER_PROVIDER_INPUT_LOCKED",
                                 provider.submitpaymasterdigidollar, authorized["psbt"])
-        assert_raises_rpc_error(-4, "Cannot unlock DigiDollar-locked output",
-                                provider.lockunspent, True, [carrier])
         self.nodes[0].unloadwallet(harness.provider_wallet_name)
         self.nodes[0].loadwallet(harness.provider_wallet_name)
         assert carrier in provider.listlockunspent()
@@ -112,6 +109,13 @@ class PaymasterLocksTest(DigiByteTestFramework):
         reserved = [entry for entry in provider.getpaymasterpoolinfo()["pool"]
                     if dict(txid=entry["txid"], vout=entry["vout"]) == carrier]
         assert_equal(len(reserved), 1)
+        assert_equal(reserved[0]["state"], "reserved")
+        # Removing the explicit manual veto never releases Paymaster's own
+        # reservation. The exact authorized transaction can then continue.
+        assert provider.lockunspent(True, [carrier])
+        assert carrier in provider.listlockunspent()
+        reserved = [entry for entry in provider.getpaymasterpoolinfo()["pool"]
+                    if dict(txid=entry["txid"], vout=entry["vout"]) == carrier]
         assert_equal(reserved[0]["state"], "reserved")
 
 

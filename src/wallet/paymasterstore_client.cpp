@@ -539,7 +539,9 @@ bool PaymasterStore::ReserveInputs(
         }
         const bool occupied = reservation_status == DatabaseReadStatus::FOUND;
         const bool ours = occupied && existing.session_id == session.session_id;
-        if ((occupied && !ours) || (m_wallet.IsLockedCoin(outpoint) && !ours)) {
+        const bool ordinary_lock = role == ReservationRole::USER_DD
+            ? m_wallet.IsManuallyLockedCoin(outpoint) : m_wallet.IsOrdinaryLockedCoin(outpoint);
+        if ((occupied && !ours) || ordinary_lock || (!ours && IsPaymasterInputReserved(m_wallet, outpoint))) {
             error = "PAYMASTER_INPUT_ALREADY_RESERVED";
             return false;
         }
@@ -777,7 +779,8 @@ bool PaymasterStore::PreparePaymentIntent(const std::string& request_id,
         const bool is_occupied = batch.ReadPaymasterReservation(outpoint, occupied);
         const bool ours = is_occupied && occupied.session_id == session.session_id &&
                           occupied.role == ReservationRole::USER_DD;
-        if ((is_occupied && !ours) || (m_wallet.IsLockedCoin(outpoint) && !ours)) {
+        if ((is_occupied && !ours) || m_wallet.IsManuallyLockedCoin(outpoint) ||
+            (!ours && IsPaymasterInputReserved(m_wallet, outpoint))) {
             error = "PAYMASTER_INPUT_ALREADY_RESERVED";
             return false;
         }

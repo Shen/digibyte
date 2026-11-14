@@ -88,8 +88,8 @@ static uint256 AddUnconfirmedMint(CWallet& wallet, DigiDollarWallet& dd_wallet, 
     {
         LOCK(wallet.cs_wallet);
         BOOST_REQUIRE(wallet.AddToWallet(mint_tx, TxStateInactive{}));
-        BOOST_CHECK(wallet.LockCoin(COutPoint(position_id, 0)));
-        BOOST_CHECK(wallet.LockCoin(COutPoint(position_id, 1)));
+        BOOST_CHECK(wallet.LockDigiDollarCoin(COutPoint(position_id, 0)));
+        BOOST_CHECK(wallet.LockDigiDollarCoin(COutPoint(position_id, 1)));
         wallet.SetLastBlockProcessed(last_block_height, block_hash);
     }
     return position_id;

@@ -390,13 +390,13 @@ size_t DigiDollarWallet::LoadFromDatabase()
                         ddTokenOutpoint = COutPoint(pos.dd_timelock_id, mint_outputs.dd_token_index);
                     }
                 }
-                if (!m_wallet->IsLockedCoin(collateralOutpoint)) {
-                    if (m_wallet->LockCoin(collateralOutpoint, &lock_batch)) {
+                if (!m_wallet->IsDigiDollarLockedCoin(collateralOutpoint)) {
+                    if (m_wallet->LockDigiDollarCoin(collateralOutpoint, &lock_batch)) {
                         locked_count++;
                     }
                 }
-                if (!m_wallet->IsLockedCoin(ddTokenOutpoint)) {
-                    if (m_wallet->LockCoin(ddTokenOutpoint, &lock_batch)) {
+                if (!m_wallet->IsDigiDollarLockedCoin(ddTokenOutpoint)) {
+                    if (m_wallet->LockDigiDollarCoin(ddTokenOutpoint, &lock_batch)) {
                         locked_count++;
                     }
                 }
@@ -3110,13 +3110,13 @@ void DigiDollarWallet::ProcessDDTxForRescan(const CTransactionRef& ptx, int bloc
                 COutPoint collateralOutpoint(tx.GetHash(), mint_outputs.collateral_index);
                 COutPoint ddTokenOutpoint(tx.GetHash(), mint_outputs.dd_token_index);
                 wallet::WalletBatch lock_batch(m_wallet->GetDatabase());
-                if (!m_wallet->IsLockedCoin(collateralOutpoint)) {
-                    m_wallet->LockCoin(collateralOutpoint, &lock_batch);
+                if (!m_wallet->IsDigiDollarLockedCoin(collateralOutpoint)) {
+                    m_wallet->LockDigiDollarCoin(collateralOutpoint, &lock_batch);
                     LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Locked collateral UTXO %s:%u during rescan\n",
                               tx.GetHash().GetHex().substr(0, 16).c_str(), mint_outputs.collateral_index);
                 }
-                if (!m_wallet->IsLockedCoin(ddTokenOutpoint)) {
-                    m_wallet->LockCoin(ddTokenOutpoint, &lock_batch);
+                if (!m_wallet->IsDigiDollarLockedCoin(ddTokenOutpoint)) {
+                    m_wallet->LockDigiDollarCoin(ddTokenOutpoint, &lock_batch);
                     LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Locked DD token UTXO %s:%u during rescan\n",
                               tx.GetHash().GetHex().substr(0, 16).c_str(), mint_outputs.dd_token_index);
                 }
@@ -4434,7 +4434,7 @@ DigiDollarBalanceSummary DigiDollarWallet::GetDDBalanceSummary() const
             summary.availability_known = false;
         } else if (reservation_status == wallet::DatabaseReadStatus::FOUND) {
             summary.paymaster_reserved += dd_amount;
-        } else {
+        } else if (!m_wallet->IsManuallyLockedCoin(outpoint)) {
             summary.spendable += dd_amount;
         }
     }
@@ -4538,7 +4538,7 @@ std::vector<DDUtxo> DigiDollarWallet::GetDDUTXOs(bool include_unconfirmed) const
 
     // FIX #1: Use actual tracked UTXOs instead of assuming positions
     for (const auto& [outpoint, dd_amount] : dd_utxos) {
-        if (m_wallet && paymaster_inputs.IsReserved(outpoint)) {
+        if (m_wallet && (paymaster_inputs.IsReserved(outpoint) || m_wallet->IsManuallyLockedCoin(outpoint))) {
             continue;
         }
         // Verify UTXO is still unspent in wallet
@@ -4915,7 +4915,7 @@ bool DigiDollarWallet::ReleaseMintAttempt(const uint256& dd_timelock_id, std::st
             // file can never hold one without the other.
             std::vector<COutPoint> locks_to_remove;
             for (const COutPoint& locked_coin : {collateral_outpoint, dd_token_outpoint}) {
-                if (m_wallet->IsLockedCoin(locked_coin)) {
+                if (m_wallet->IsDigiDollarLockedCoin(locked_coin)) {
                     locks_to_remove.push_back(locked_coin);
                 }
             }
@@ -4933,7 +4933,7 @@ bool DigiDollarWallet::ReleaseMintAttempt(const uint256& dd_timelock_id, std::st
             }
             for (const COutPoint& locked_coin : locks_to_remove) {
                 if (refused != nullptr) break;
-                if (!batch.EraseLockedUTXO(locked_coin)) {
+                if (!batch.EraseDigiDollarLockedUTXO(locked_coin)) {
                     refused = "a coin lock";
                 }
             }
@@ -4959,7 +4959,7 @@ bool DigiDollarWallet::ReleaseMintAttempt(const uint256& dd_timelock_id, std::st
                 transaction_history.end());
             collateral_positions.erase(pos_it);
             for (const COutPoint& locked_coin : locks_to_remove) {
-                m_wallet->UnlockCoin(locked_coin);
+                m_wallet->UnlockDigiDollarCoin(locked_coin);
             }
             RecalculateTotals();
             return true;
@@ -5036,12 +5036,12 @@ bool DigiDollarWallet::ReleaseMintAttempt(const uint256& dd_timelock_id, std::st
 
         // 3. Remove the coin locks that were protecting the collateral and token.
         for (const COutPoint& locked_coin : {collateral_outpoint, dd_token_outpoint}) {
-            if (!m_wallet->IsLockedCoin(locked_coin)) continue;
-            if (!batch.EraseLockedUTXO(locked_coin)) {
+            if (!m_wallet->IsDigiDollarLockedCoin(locked_coin)) continue;
+            if (!batch.EraseDigiDollarLockedUTXO(locked_coin)) {
                 error = "could not remove a coin lock from the wallet database";
                 return false;
             }
-            m_wallet->UnlockCoin(locked_coin);
+            m_wallet->UnlockDigiDollarCoin(locked_coin);
         }
 
         // 4. The position stays on record but is no longer active. The owner key
@@ -5955,11 +5955,11 @@ bool DigiDollarWallet::ProcessTransactionForDD(const CTransaction& tx, const uin
                         if (FindMintOutputIndexes(tx, mint_outputs)) {
                             wallet::WalletBatch lock_batch(m_wallet->GetDatabase());
                             const COutPoint collateral_outpoint(txid, mint_outputs.collateral_index);
-                            if (!m_wallet->IsLockedCoin(collateral_outpoint)) {
-                                m_wallet->LockCoin(collateral_outpoint, &lock_batch);
+                            if (!m_wallet->IsDigiDollarLockedCoin(collateral_outpoint)) {
+                                m_wallet->LockDigiDollarCoin(collateral_outpoint, &lock_batch);
                             }
-                            if (!m_wallet->IsLockedCoin(outpoint)) {
-                                m_wallet->LockCoin(outpoint, &lock_batch);
+                            if (!m_wallet->IsDigiDollarLockedCoin(outpoint)) {
+                                m_wallet->LockDigiDollarCoin(outpoint, &lock_batch);
                             }
                         }
                     }
@@ -7223,6 +7223,9 @@ bool DigiDollarWallet::SelectDDCoins(const CAmount& target_amount,
     for (const COutPoint& outpoint : preset_inputs) {
         if (!seen.insert(outpoint).second) {
             return fail(strprintf("Duplicate selected DD input: %s:%u", outpoint.hash.ToString(), outpoint.n));
+        }
+        if (m_wallet && m_wallet->IsManuallyLockedCoin(outpoint)) {
+            return fail("Selected DD input is manually locked");
         }
         if (m_wallet && paymaster_inputs.IsReserved(outpoint) &&
             !allow_paymaster_pool_inputs) {

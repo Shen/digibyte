@@ -1875,7 +1875,7 @@ void CWallet::blockDisconnected(const interfaces::BlockInfo& block)
                 if (reactivated_position || dd_wallet->IsLockedByDD(txin.prevout)) {
                     // This input was DD collateral that got spent in a now-reorged block
                     // Re-lock it since the redemption is being undone
-                    LockCoin(txin.prevout);
+                    LockDigiDollarCoin(txin.prevout);
                     LogPrintf("DigiDollar: Re-locked collateral %s after reorg at height %d\n",
                               txin.prevout.ToString(), block.height);
                 }
@@ -3201,6 +3201,22 @@ bool CWallet::UnlockCoin(const COutPoint& output, WalletBatch* batch)
     return true;
 }
 
+bool CWallet::LockDigiDollarCoin(const COutPoint& output, WalletBatch* batch)
+{
+    AssertLockHeld(cs_wallet);
+    if (batch && !batch->WriteDigiDollarLockedUTXO(output)) return false;
+    m_digidollar_locked_coins.insert(output);
+    return true;
+}
+
+bool CWallet::UnlockDigiDollarCoin(const COutPoint& output, WalletBatch* batch)
+{
+    AssertLockHeld(cs_wallet);
+    if (batch && m_digidollar_locked_coins.count(output) && !batch->EraseDigiDollarLockedUTXO(output)) return false;
+    m_digidollar_locked_coins.erase(output);
+    return true;
+}
+
 void CWallet::LockPaymasterCoin(const COutPoint& output)
 {
     AssertLockHeld(cs_wallet);
@@ -3226,7 +3242,9 @@ bool CWallet::UnlockAllCoins()
     std::set<COutPoint> preserved_locks;
 
     for (const auto& outpoint : setLockedCoins) {
-        if (dd_wallet && dd_wallet->IsLockedByDD(outpoint)) {
+        if (dd_wallet && dd_wallet->IsLockedByDD(outpoint) && !IsDigiDollarLockedCoin(outpoint)) {
+            // Legacy records cannot prove a separate DD safety owner. Preserve
+            // them until an explicit per-output unlock; never infer ownership.
             preserved_locks.insert(outpoint);
             LogPrint(BCLog::DIGIDOLLAR, "UnlockAllCoins: Preserving DD lock on %s\n", outpoint.ToString());
         } else {
@@ -3249,15 +3267,28 @@ bool CWallet::IsLockedCoin(const COutPoint& output) const
 bool CWallet::IsOrdinaryLockedCoin(const COutPoint& output) const
 {
     AssertLockHeld(cs_wallet);
+    return IsManuallyLockedCoin(output) || IsDigiDollarLockedCoin(output);
+}
+
+bool CWallet::IsManuallyLockedCoin(const COutPoint& output) const
+{
+    AssertLockHeld(cs_wallet);
     return setLockedCoins.count(output) > 0;
+}
+
+bool CWallet::IsDigiDollarLockedCoin(const COutPoint& output) const
+{
+    AssertLockHeld(cs_wallet);
+    return m_digidollar_locked_coins.count(output) > 0;
 }
 
 void CWallet::ListLockedCoins(std::vector<COutPoint>& vOutpts) const
 {
     AssertLockHeld(cs_wallet);
-    std::set_union(setLockedCoins.begin(), setLockedCoins.end(),
-                   m_paymaster_locked_coins.begin(), m_paymaster_locked_coins.end(),
-                   std::back_inserter(vOutpts));
+    std::set<COutPoint> locked{setLockedCoins};
+    locked.insert(m_digidollar_locked_coins.begin(), m_digidollar_locked_coins.end());
+    locked.insert(m_paymaster_locked_coins.begin(), m_paymaster_locked_coins.end());
+    vOutpts.insert(vOutpts.end(), locked.begin(), locked.end());
 }
 
 /** @} */ // end of Actions

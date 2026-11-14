@@ -2220,7 +2220,8 @@ ProviderPoolReadiness GetPaymasterProviderPoolReadiness(
         return result;
     }
     for (const ProviderPoolEntry& entry : entries) {
-        if (wallet.IsOrdinaryLockedCoin(entry.outpoint)) unavailable_inputs.insert(entry.outpoint);
+        if (entry.asset == PoolAsset::DD_CARRIER ? wallet.IsManuallyLockedCoin(entry.outpoint) : wallet.IsOrdinaryLockedCoin(entry.outpoint))
+            unavailable_inputs.insert(entry.outpoint);
     }
     return EvaluateProviderPoolReadiness(entries, policy, tip_height,
                                          minimum_confirmations, unavailable_inputs);
@@ -2281,7 +2282,7 @@ bool ReservePaymasterOperationalSlot(CWallet& wallet,
     const auto confirmed_available = [&](const ProviderPoolEntry& entry) {
         return entry.purpose == PoolPurpose::OPERATIONAL &&
                maintenance_sources.count(entry.outpoint) == 0 &&
-               !wallet.IsOrdinaryLockedCoin(entry.outpoint) &&
+               !(entry.asset == PoolAsset::DD_CARRIER ? wallet.IsManuallyLockedCoin(entry.outpoint) : wallet.IsOrdinaryLockedCoin(entry.outpoint)) &&
                entry.state == PoolEntryState::AVAILABLE && entry.confirmation_height > 0 &&
                tip_height - entry.confirmation_height + 1 >= minimum_confirmations;
     };
@@ -2630,7 +2631,7 @@ bool ReserveAndBuildPaymasterCapacityProof(
         if (entry.purpose != PoolPurpose::OPERATIONAL ||
             entry.state != PoolEntryState::AVAILABLE || !confirmed ||
             maintenance_sources.count(entry.outpoint) != 0 ||
-            wallet.IsOrdinaryLockedCoin(entry.outpoint)) {
+            (entry.asset == PoolAsset::DD_CARRIER ? wallet.IsManuallyLockedCoin(entry.outpoint) : wallet.IsOrdinaryLockedCoin(entry.outpoint))) {
             continue;
         }
         if (!dgb_index && entry.asset == PoolAsset::DGB &&

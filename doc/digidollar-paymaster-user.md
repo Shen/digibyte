@@ -116,6 +116,10 @@ simple undo: the original and a recovery transaction may compete for confirmatio
 Manual coin locks are independent: cancelling preparation or expiring an offer
 does not remove a manual lock set during preparation. Persistent manual locks
 also survive wallet restart.
+New payment signatures also respect a manual lock added after preparation.
+Removing that explicit lock does not remove the payment reservation or internal
+DD protection. Ambiguous locks from older wallets remain conservative until an
+explicit per-output unlock; they are not silently converted into internal locks.
 
 ## If something appears stuck
 

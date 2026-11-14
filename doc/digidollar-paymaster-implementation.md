@@ -276,20 +276,29 @@ checks remain mandatory.
 ## Wallet lifecycle
 
 Protected DGB/DD reserves are excluded from ordinary coin selection and shown
-separately from available funds; wallet total includes them. Manual locks and
-DD collateral remain distinct. A reservation adds its own coin-lock reason;
+separately from available funds; wallet total includes them. Manual locks,
+internal DD collateral/token protection and Paymaster reservations have separate
+owners. A reservation adds its own coin-lock reason;
 cancel, expiry and pruning remove only that reason after a successful commit.
 An explicit manual lock set during the reservation survives cleanup, including
-wallet reload when persistent. Ordinary unlock removes only ordinary ownership.
-Provider readiness and new operational-slot selection exclude ordinary/manual
-locks. The signing boundary checks them again before creating a provider signature;
-its own Paymaster reservation lock does not veto that signature. Exact durable
-signature replay remains available without creating new authority.
-The existing `lockedutxo` key retains `'1'` for ordinary locks; `'P'` and `'B'`
-represent Paymaster and shared ownership. Legacy ambiguous `'1'` rows remain
-conservatively locked until explicitly unlocked. Invalid values fail wallet load
-and cannot be rewritten by cleanup. Finite setup and recurring refill have separate
-approvals. Refill may fund fewer complete slots, never deliberately partial
+wallet reload when persistent. `lockunspent` changes only manual ownership:
+it can add a veto over an existing DD/Paymaster lock, and explicit DD-token
+manual unlock removes neither DD protection nor a Paymaster reservation.
+`CheckPaymasterNewSignatureInputs` uses validated `InputRole`: `USER_DD` and
+`PROVIDER_CARRIER` veto manual locks while allowing internal DD protection;
+`USER_DGB` and `PROVIDER_DGB` veto both manual and internal DD locks. Provider
+readiness and new slot selection follow the same distinction. Every new client
+or provider signature checks again under the final wallet lock. Exact
+durable signature replay remains available without creating new authority.
+The `lockedutxo` key retains `'1'` for manual/ambiguous legacy locks; `'P'` and
+`'B'` represent Paymaster and manual/Paymaster ownership. `'D'`, `'M'`, `'Q'` and
+`'A'` add independent DD ownership (DD only, manual/DD, Paymaster/DD and all three).
+Legacy ambiguous rows are never reclassified automatically. A per-output manual
+unlock can clear that reason while DD protection remains; unlock-all preserves
+unseparated legacy DD locks. Older Paymaster readers reject new owner bytes;
+readers that ignore lock values continue to lock the outputs. Invalid values fail
+wallet load and cannot be rewritten by cleanup. Finite setup and recurring refill
+have separate approvals. Refill may fund fewer complete slots, never deliberately partial
 slots, and confirmed free capacity remains usable below the refill target.
 `ProviderSetupAuthorization` retains a monotone setup generation and revocation
 independently of prunable maintenance history. Journal V2 requires that intact
@@ -311,10 +320,11 @@ inputs; a different free input cannot make a stale selection spendable. The
 explicit retirement exception applies to DD pool inputs, never manual DGB locks.
 Finite setup, recurring refill, carrier withdrawal and retirement execute through
 `ExecuteProviderMaintenanceTransactions`. Its typed authority reloads current
-approval and exact outputs under `cs_wallet`; every explicit DD and DGB source
-must pass the same ordinary-lock veto before a new signature. Retirement builds
-both legs and checks fees before opening the checkpoint. The common operation
-owns commit, DD tracking/history and journal/budget/pool accounting; a possible
+approval and exact outputs under `cs_wallet`; explicit DD sources use the shared
+`PROVIDER_CARRIER` lock rule, and DGB sources use `PROVIDER_DGB` before a new
+signature. Retirement builds both legs and checks fees before opening the
+checkpoint. The common operation owns commit, DD tracking/history and
+journal/budget/pool accounting; a possible
 partial commit retains its fence. Ordinary explicit coin-control semantics are
 unchanged. Payment, recovery and provider control proofs reuse
 `SignPaymasterBip86Control` for ownership, BIP86 tweak and digest signing; callers

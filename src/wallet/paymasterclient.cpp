@@ -195,7 +195,7 @@ bool SelectCreatedClientPaymentInputs(
         return fail("PAYMASTER_CLIENT_ORDER_INPUT_STATE");
     }
     for (const auto& input : original_inputs) {
-        if (wallet.IsLockedCoin(input)) return fail("PAYMASTER_INPUT_LOCKED");
+        if (wallet.IsManuallyLockedCoin(input)) return fail("PAYMASTER_INPUT_LOCKED");
     }
     // A saved order constrains selection, never reservation authority. Ordinary
     // DD selection rechecks ownership, confirmation, spentness and reservations.

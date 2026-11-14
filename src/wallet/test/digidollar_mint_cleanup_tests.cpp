@@ -25,6 +25,8 @@
 #include <key.h>
 #include <primitives/transaction.h>
 #include <random.h>
+#include <rpc/request.h>
+#include <rpc/util.h>
 #include <script/script.h>
 #include <serialize.h>
 #include <span.h>
@@ -34,6 +36,7 @@
 #include <test/util/setup_common.h>
 #include <uint256.h>
 #include <wallet/digidollarwallet.h>
+#include <wallet/context.h>
 #include <wallet/test/util.h>
 #include <wallet/test/wallet_test_fixture.h>
 #include <wallet/wallet.h>
@@ -46,6 +49,7 @@
 #include <vector>
 
 namespace wallet {
+RPCHelpMan lockunspent();
 namespace {
 
 //! A transaction with the shape of a DigiDollar mint: a collateral output the
@@ -123,8 +127,8 @@ static uint256 AddUnconfirmedMint(CWallet& wallet, DigiDollarWallet& dd_wallet, 
     {
         LOCK(wallet.cs_wallet);
         BOOST_REQUIRE(wallet.AddToWallet(mint_tx, TxStateInactive{}));
-        BOOST_REQUIRE(wallet.LockCoin(COutPoint(position_id, 0)));
-        BOOST_REQUIRE(wallet.LockCoin(COutPoint(position_id, 1)));
+        BOOST_REQUIRE(wallet.LockDigiDollarCoin(COutPoint(position_id, 0)));
+        BOOST_REQUIRE(wallet.LockDigiDollarCoin(COutPoint(position_id, 1)));
         wallet.SetLastBlockProcessed(last_block_height, block_hash);
     }
     return position_id;
@@ -674,8 +678,8 @@ BOOST_AUTO_TEST_CASE(a_disconnect_while_the_mint_is_abandoned_keeps_what_protect
     }
     // There is nothing to check in the file here, and asserting there was is why
     // this case failed when it was written. The helper that sets this mint up
-    // locks the two coins with no batch, and LockCoin writes a row only when it
-    // is given one, so these locks are in memory only and the file never held
+    // locks the two coins with no batch. LockDigiDollarCoin writes a row only
+    // when given one, so these locks are in memory only and the file never held
     // them. The other cases in this file do check the file, because they reopen
     // the wallet first and reopening is what writes the lock rows. What proves
     // the vault survived here is the reload below.
@@ -811,7 +815,7 @@ BOOST_AUTO_TEST_CASE(pending_balance_excludes_expired_mints_without_position_rec
         LOCK(m_wallet.cs_wallet);
         BOOST_REQUIRE(m_wallet.AddToWallet(mint, TxStateInactive{}));
         m_wallet.SetLastBlockProcessed(759, uint256::ONE);
-        BOOST_REQUIRE(m_wallet.LockCoin(token));
+        BOOST_REQUIRE(m_wallet.LockDigiDollarCoin(token));
     }
     dd_wallet.AddDDUTXO(token, 10000);
     BOOST_REQUIRE(dd_wallet.GetDDTimeLocks(false).empty());
@@ -887,6 +891,137 @@ BOOST_AUTO_TEST_CASE(pending_balance_excludes_expired_mints_without_position_rec
     }
     BOOST_CHECK_EQUAL(dd_wallet.GetPendingDDBalance(), 2500);
     BOOST_CHECK_EQUAL(dd_wallet.GetDDBalanceSummary().pending, 2500);
+}
+
+BOOST_AUTO_TEST_CASE(mint_cleanup_preserves_independent_manual_and_legacy_lock_ownership)
+{
+    m_wallet.EnsureDDWallet();
+    auto& dd_wallet = *m_wallet.GetDDWallet();
+    for (const bool unsent : {false, true}) {
+        BOOST_TEST_CONTEXT("unsent mint " << unsent) {
+            const uint256 position_id = unsent
+                ? AddSavedButUnsentMint(m_wallet, dd_wallet)
+                : AddUnconfirmedMint(m_wallet, dd_wallet, 500);
+            const COutPoint collateral{position_id, 0};
+            const COutPoint token{position_id, 1};
+            {
+                LOCK(m_wallet.cs_wallet);
+                WalletBatch batch{m_wallet.GetDatabase()};
+                // Current records carry independently owned DD protection
+                // and an operator veto on the same collateral output.
+                BOOST_REQUIRE(m_wallet.LockDigiDollarCoin(collateral, &batch));
+                BOOST_REQUIRE(m_wallet.LockCoin(collateral, &batch));
+                // A legacy '1' cannot prove whether the operator also
+                // installed a veto. Preserve it as manual ownership.
+                BOOST_REQUIRE(m_wallet.LockCoin(token, &batch));
+                BOOST_REQUIRE(m_wallet.UnlockDigiDollarCoin(token, &batch));
+            }
+            std::string error;
+            BOOST_REQUIRE_MESSAGE(dd_wallet.ReleaseMintAttempt(position_id, error), error);
+            BOOST_CHECK(!dd_wallet.HasDDUTXO(token));
+            {
+                LOCK(m_wallet.cs_wallet);
+                BOOST_CHECK(m_wallet.IsManuallyLockedCoin(collateral));
+                BOOST_CHECK(m_wallet.IsManuallyLockedCoin(token));
+                BOOST_CHECK(!m_wallet.IsDigiDollarLockedCoin(collateral));
+                BOOST_CHECK(!m_wallet.IsDigiDollarLockedCoin(token));
+                BOOST_CHECK(m_wallet.IsLockedCoin(collateral));
+                BOOST_CHECK(m_wallet.IsLockedCoin(token));
+                if (!unsent) {
+                    const auto* mint = m_wallet.GetWalletTx(position_id);
+                    BOOST_REQUIRE(mint);
+                    BOOST_CHECK(mint->isAbandoned());
+                }
+            }
+            BOOST_CHECK(FileHoldsCoinLock(m_wallet, collateral));
+            BOOST_CHECK(FileHoldsCoinLock(m_wallet, token));
+            CWallet reopened{m_node.chain.get(), "mint-lock-ownership", DuplicateMockDatabase(m_wallet.GetDatabase())};
+            BOOST_REQUIRE(reopened.LoadWallet() == DBErrors::LOAD_OK);
+            {
+                LOCK(reopened.cs_wallet);
+                BOOST_CHECK(reopened.IsManuallyLockedCoin(collateral));
+                BOOST_CHECK(reopened.IsManuallyLockedCoin(token));
+                BOOST_CHECK(!reopened.IsDigiDollarLockedCoin(collateral));
+                BOOST_CHECK(!reopened.IsDigiDollarLockedCoin(token));
+            }
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(unlock_all_removes_manual_veto_without_removing_internal_dd_protection)
+{
+    m_wallet.EnsureDDWallet();
+    auto& dd_wallet = *m_wallet.GetDDWallet();
+    const uint256 position_id = AddUnconfirmedMint(m_wallet, dd_wallet, 500);
+    const COutPoint collateral{position_id, 0};
+    const COutPoint token{position_id, 1};
+    {
+        LOCK(m_wallet.cs_wallet);
+        WalletBatch batch{m_wallet.GetDatabase()};
+        for (const auto& input : {collateral, token}) {
+            BOOST_REQUIRE(dd_wallet.IsLockedByDD(input));
+            BOOST_REQUIRE(m_wallet.LockDigiDollarCoin(input, &batch));
+            BOOST_REQUIRE(m_wallet.LockCoin(input, &batch));
+        }
+        BOOST_REQUIRE(m_wallet.UnlockAllCoins());
+        for (const auto& input : {collateral, token}) {
+            BOOST_CHECK(!m_wallet.IsManuallyLockedCoin(input));
+            BOOST_CHECK(m_wallet.IsDigiDollarLockedCoin(input));
+            BOOST_CHECK(m_wallet.IsLockedCoin(input));
+        }
+    }
+    CWallet reopened{m_node.chain.get(), "unlock-all-dd-ownership", DuplicateMockDatabase(m_wallet.GetDatabase())};
+    BOOST_REQUIRE(reopened.LoadWallet() == DBErrors::LOAD_OK);
+    LOCK(reopened.cs_wallet);
+    for (const auto& input : {collateral, token}) {
+        BOOST_CHECK(!reopened.IsManuallyLockedCoin(input));
+        BOOST_CHECK(reopened.IsDigiDollarLockedCoin(input));
+        BOOST_CHECK(reopened.IsLockedCoin(input));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(lockunspent_rpc_changes_only_manual_dd_lock_ownership)
+{
+    m_wallet.EnsureDDWallet();
+    auto& dd_wallet = *m_wallet.GetDDWallet();
+    const uint256 position_id = AddUnconfirmedMint(m_wallet, dd_wallet, 500);
+    const COutPoint token{position_id, 1};
+    {
+        LOCK(m_wallet.cs_wallet);
+        WalletBatch batch{m_wallet.GetDatabase()};
+        BOOST_REQUIRE(m_wallet.LockDigiDollarCoin(token, &batch));
+    }
+    WalletContext context;
+    context.chain = m_node.chain.get();
+    context.args = m_node.args;
+    context.wallets.emplace_back(&m_wallet, [](CWallet*) {});
+    const auto call = [&](bool unlock, bool all) {
+        JSONRPCRequest request;
+        request.context = &context;
+        request.params = UniValue{UniValue::VARR};
+        request.params.push_back(unlock);
+        if (!all) {
+            UniValue input{UniValue::VOBJ}, inputs{UniValue::VARR};
+            input.pushKV("txid", token.hash.GetHex());
+            input.pushKV("vout", token.n);
+            inputs.push_back(std::move(input));
+            request.params.push_back(std::move(inputs));
+            request.params.push_back(true);
+        }
+        BOOST_REQUIRE(lockunspent().HandleRequest(request).isTrue());
+    };
+    for (const bool all : {false, true}) {
+        call(false, false);
+        {
+            LOCK(m_wallet.cs_wallet);
+            BOOST_CHECK(m_wallet.IsManuallyLockedCoin(token));
+        }
+        call(true, all);
+        LOCK(m_wallet.cs_wallet);
+        BOOST_CHECK(!m_wallet.IsManuallyLockedCoin(token));
+        BOOST_CHECK(m_wallet.IsDigiDollarLockedCoin(token));
+        BOOST_CHECK(m_wallet.IsLockedCoin(token));
+    }
 }
 
 BOOST_AUTO_TEST_SUITE_END()

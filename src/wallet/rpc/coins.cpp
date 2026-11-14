@@ -261,7 +261,8 @@ RPCHelpMan lockunspent()
     return RPCHelpMan{"lockunspent",
                 "\nUpdates list of temporarily unspendable outputs.\n"
                 "Temporarily lock (unlock=false) or unlock (unlock=true) specified transaction outputs.\n"
-                "If no transaction outputs are specified when unlocking then all current locked transaction outputs are unlocked.\n"
+                "If no transaction outputs are specified when unlocking then manual locks are cleared.\n"
+                "Internal DigiDollar protection and Paymaster reservations remain. Legacy DigiDollar locks without a separate internal owner are retained by bulk unlock.\n"
                 "A locked transaction output will not be chosen by automatic coin selection, when spending digibytes.\n"
                 "Manually selected coins are automatically unlocked.\n"
                 "Locks are stored in memory only, unless persistent=true, in which case they will be written to the\n"
@@ -361,7 +362,9 @@ RPCHelpMan lockunspent()
             throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, expected unspent output");
         }
 
-        const bool is_locked = pwallet->IsLockedCoin(outpt);
+        // This RPC owns only the manual reason. An internal DD lock or a
+        // Paymaster reservation must not prevent adding a separate veto.
+        const bool is_locked = pwallet->IsManuallyLockedCoin(outpt);
 
         if (fUnlock && !is_locked) {
             throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid parameter, expected locked output");
@@ -381,13 +384,8 @@ RPCHelpMan lockunspent()
     // Atomically set (un)locked status for the outputs.
     for (const COutPoint& outpt : outputs) {
         if (fUnlock) {
-            // SECURITY: Prevent unlocking DigiDollar collateral/token UTXOs via RPC.
-            // Use redeemdigidollar to properly redeem DD and release collateral.
-            DigiDollarWallet* dd_wallet = pwallet->GetDDWallet();
-            if (dd_wallet && dd_wallet->IsLockedByDD(outpt)) {
-                throw JSONRPCError(RPC_WALLET_ERROR,
-                    strprintf("Cannot unlock DigiDollar-locked output %s. Use redeemdigidollar to properly redeem.", outpt.ToString()));
-            }
+            // UnlockCoin removes only manual ownership. Persisted DD and
+            // Paymaster reasons remain locked, as do ordinary DD spend guards.
             if (!pwallet->UnlockCoin(outpt, batch.get())) throw JSONRPCError(RPC_WALLET_ERROR, "Unlocking coin failed");
         } else {
             if (!pwallet->LockCoin(outpt, batch.get())) throw JSONRPCError(RPC_WALLET_ERROR, "Locking coin failed");

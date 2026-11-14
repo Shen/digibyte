@@ -606,8 +606,8 @@ BOOST_AUTO_TEST_CASE(pending_mint_record_reports_failure_and_release_keeps_recov
         LOCK(m_wallet.cs_wallet);
         m_wallet.SetLastBlockProcessed(500, chain_tip);
         BOOST_REQUIRE(m_wallet.AddToWallet(mint_tx, TxStateInactive{}));
-        BOOST_CHECK(m_wallet.LockCoin(collateral));
-        BOOST_CHECK(m_wallet.LockCoin(token));
+        BOOST_CHECK(m_wallet.LockDigiDollarCoin(collateral));
+        BOOST_CHECK(m_wallet.LockDigiDollarCoin(token));
     }
     BOOST_CHECK(dd_wallet.GetMintAttemptState(pos_id) == DigiDollarWallet::MintAttemptState::Local);
 

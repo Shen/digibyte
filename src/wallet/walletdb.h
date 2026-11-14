@@ -309,7 +309,7 @@ void PaymasterWalletTransactionEnd(const WalletBatch* owner, bool committed = fa
 class WalletBatch
 {
 private:
-    enum class CoinLockReason { ORDINARY, PAYMASTER };
+    enum class CoinLockReason { ORDINARY, PAYMASTER, DIGIDOLLAR };
     bool UpdateLockedUTXO(const COutPoint& output, CoinLockReason reason, bool locked);
 
     // Defined in paymasterdb.cpp; ordinary wallet codecs keep WriteIC/EraseIC.
@@ -400,6 +400,8 @@ public:
     bool EraseLockedUTXO(const COutPoint& output);
     bool WritePaymasterLockedUTXO(const COutPoint& output);
     bool ErasePaymasterLockedUTXO(const COutPoint& output);
+    bool WriteDigiDollarLockedUTXO(const COutPoint& output);
+    bool EraseDigiDollarLockedUTXO(const COutPoint& output);
 
     // DigiDollar UTXO persistence methods (Fix #5)
     bool WriteDDUTXO(const COutPoint& outpoint, const CAmount& dd_amount);

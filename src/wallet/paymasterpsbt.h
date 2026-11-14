@@ -19,10 +19,14 @@ namespace wallet {
 
 class CWallet;
 
-/** A new provider signature must respect ordinary/manual lock ownership.
+/** A new signature must respect manual ownership. Typed DD spends may use
+ * internally protected tokens; DGB inputs retain ordinary DD protection.
  * Paymaster's own reservation reason is checked by the calling operation. */
 bool CheckPaymasterNewSignatureInputs(
     const CWallet& wallet, const std::vector<COutPoint>& inputs, std::string& error);
+bool CheckPaymasterNewSignatureInputs(
+    const CWallet& wallet, const std::vector<COutPoint>& inputs, std::string& error,
+    DigiDollar::Paymaster::InputRole role);
 
 enum class Bip86ControlSigningError {
     NONE,
