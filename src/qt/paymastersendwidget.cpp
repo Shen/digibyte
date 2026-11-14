@@ -235,14 +235,37 @@ PaymasterSendWidget::PaymasterSendWidget(DigiDollarSendWidget& form)
 
 void PaymasterSendWidget::amountChanged(bool setting_sweep)
 {
-    if (!setting_sweep) m_sendAllSpendableDD = false;
+    if (!setting_sweep) setComposeInputIntent(ComposeInputIntent::AMOUNT);
     invalidatePaymasterOfferPreview();
 }
 
-void PaymasterSendWidget::beginSweep()
+bool PaymasterSendWidget::setComposeInputIntent(ComposeInputIntent intent)
 {
+    if (!m_send.view().requestId.isEmpty()) return false;
+    if (intent == ComposeInputIntent::ALL_SPENDABLE && !m_form.paymentInput().selected_inputs.empty()) return false;
+    m_composeInputIntent = intent;
+    invalidatePaymasterOfferPreview();
+    return true;
+}
+
+bool PaymasterSendWidget::beginSweep()
+{
+    if (!setComposeInputIntent(paymasterModeSelected() ? ComposeInputIntent::ALL_SPENDABLE : ComposeInputIntent::AMOUNT)) return false;
     if (paymasterModeSelected()) m_subtractPaymasterFeeCheck->setChecked(true);
-    m_sendAllSpendableDD = paymasterModeSelected();
+    return true;
+}
+
+void PaymasterSendWidget::selectedInputsChanged()
+{
+    const bool was_sweep = sendsAllSpendableDD();
+    if (!setComposeInputIntent(ComposeInputIntent::AMOUNT)) return;
+    if (was_sweep) {
+        setPaymasterNotice(DigiDollarSendWidget::tr(
+            "Wallet emptying was turned off because the DigiDollar input selection changed. "
+            "The entered amount and fee deduction are unchanged. Review the selected inputs before sending."));
+    }
+    updateFeeDisplay();
+    m_form.updateSendButton();
 }
 
 void PaymasterSendWidget::setPrivacy(bool privacy)
@@ -298,7 +321,7 @@ void PaymasterSendWidget::connectSignals()
                 onFeeModeChanged();
             });
     connect(m_subtractPaymasterFeeCheck, &QCheckBox::toggled, this, [this](bool checked) {
-        if (!checked) m_sendAllSpendableDD = false;
+        if (!checked) setComposeInputIntent(ComposeInputIntent::AMOUNT);
         invalidatePaymasterOfferPreview();
         updateFeeDisplay();
     });
@@ -1005,7 +1028,7 @@ void PaymasterSendWidget::onFeeModeChanged()
     const bool paymaster_enabled = paymasterModeSelected();
     if (!paymaster_enabled && m_subtractPaymasterFeeCheck) {
         m_subtractPaymasterFeeCheck->setChecked(false);
-        m_sendAllSpendableDD = false;
+        setComposeInputIntent(ComposeInputIntent::AMOUNT);
     }
     if (m_subtractPaymasterFeeCheck) {
         m_subtractPaymasterFeeCheck->setVisible(paymaster_enabled);
@@ -1395,7 +1418,7 @@ void PaymasterSendWidget::clearCompletedPaymasterSession()
     if (!m_send.clearAfterClosure()) return;
     stopPaymasterPolling();
     m_paymasterInitialAvailableBalance = 0.0;
-    m_sendAllSpendableDD = false;
+    m_composeInputIntent = ComposeInputIntent::AMOUNT;
     if (m_subtractPaymasterFeeCheck) m_subtractPaymasterFeeCheck->setChecked(false);
     m_paymasterMoreButton->setChecked(false);
     m_paymasterTechnicalButton->setChecked(false);
@@ -2939,7 +2962,7 @@ UniValue PaymasterSendWidget::buildPaymasterSendParams(const QString& address, C
     options.pushKV(
         "subtract_paymaster_fee_from_amount",
         m_subtractPaymasterFeeCheck && m_subtractPaymasterFeeCheck->isChecked());
-    options.pushKV("send_all_spendable_dd", m_sendAllSpendableDD);
+    options.pushKV("send_all_spendable_dd", sendsAllSpendableDD());
     if (m_send.view().authorizationCommitment.isEmpty()) {
         options.pushKV("prepare_only", true);
     } else {
@@ -4814,7 +4837,7 @@ void PaymasterSendWidget::updateFeeDisplay()
                 "</table>%5")
                 .arg(recipient_amount, fallback_recipient, fallback_fee,
                      remaining_balance,
-                     m_sendAllSpendableDD
+                     sendsAllSpendableDD()
                          ? DigiDollarSendWidget::tr("<br><b>Wallet emptying:</b> every confirmed, ordinary spendable $DD input will be bound to this exact request.")
                          : QString{}));
         } else {
@@ -4855,7 +4878,7 @@ void PaymasterSendWidget::updateFeeDisplay()
                 "</table>%5")
                 .arg(recipient_amount, fallback_recipient, fallback_fee,
                      remaining_balance,
-                     m_sendAllSpendableDD
+                     sendsAllSpendableDD()
                          ? DigiDollarSendWidget::tr("<br><b>Wallet emptying:</b> every confirmed, ordinary spendable $DD input will be bound to this exact request.")
                          : QString{}));
         } else if (exact_preview) {
@@ -4968,7 +4991,7 @@ bool PaymasterSendWidget::showConfirmationDialog(const QString& address, double 
                 "Recipient amount plus provider fee must equal %1 exactly.")
                 .arg(m_form.formatDDAmount(amount)));
         }
-        if (m_sendAllSpendableDD) {
+        if (sendsAllSpendableDD()) {
             question_string.append("<br /><b>");
             question_string.append(DigiDollarSendWidget::tr(
                 "Wallet emptying is enabled: every confirmed, ordinary spendable $DD input "
@@ -5288,7 +5311,7 @@ void PaymasterSendWidget::setWalletModel(WalletModel* model)
         m_paymasterPreviewRecipientCents = -1;
         m_paymasterPreviewServiceFeeCents = -1;
         m_paymasterPreviewTotalCents = -1;
-        m_sendAllSpendableDD = false;
+        m_composeInputIntent = ComposeInputIntent::AMOUNT;
         if (m_subtractPaymasterFeeCheck) m_subtractPaymasterFeeCheck->setChecked(false);
         m_clientSafetyStatusKnown = false;
         m_clientSafetyConfigured = false;
@@ -5429,7 +5452,7 @@ void PaymasterSendWidget::resetEntry()
 {
     m_paymasterClosureReason.clear();
     setPaymasterNotice(QString{});
-    m_sendAllSpendableDD = false;
+    m_composeInputIntent = ComposeInputIntent::AMOUNT;
     m_paymasterInitialAvailableBalance = 0.0;
     m_paymasterPreviewRecipientCents = -1;
     m_paymasterPreviewServiceFeeCents = -1;

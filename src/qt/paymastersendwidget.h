@@ -51,7 +51,10 @@ class PaymasterSendWidget final : public QWidget
 public:
     explicit PaymasterSendWidget(DigiDollarSendWidget& form);
     void amountChanged(bool setting_sweep);
-    void beginSweep();
+    /** Start a new compose sweep only with automatic input selection. */
+    bool beginSweep();
+    /** Reconcile a committed manual selection with the current compose intent. */
+    void selectedInputsChanged();
     void setPrivacy(bool privacy);
     bool isBusy() const { return m_send.view().busy; }
     bool isReady() const { return m_clientSafetyStatusKnown && m_clientSafetyConfigured && m_sessionDiscoveryReady && !historyBlocksPreparation(); }
@@ -313,7 +316,10 @@ private:
     qint64 m_paymasterPreviewTotalCents{-1};
     uint64_t m_paymasterOfferPreviewGeneration{0};
     uint64_t m_clientSafetyRefreshGeneration{0};
-    bool m_sendAllSpendableDD{false};
+    enum class ComposeInputIntent { AMOUNT, ALL_SPENDABLE };
+    bool setComposeInputIntent(ComposeInputIntent intent);
+    bool sendsAllSpendableDD() const { return m_composeInputIntent == ComposeInputIntent::ALL_SPENDABLE; }
+    ComposeInputIntent m_composeInputIntent{ComposeInputIntent::AMOUNT};
     enum class PaymasterPrimaryAction {
         REFRESH,
         RESUME,

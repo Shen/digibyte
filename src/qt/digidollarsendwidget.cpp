@@ -29,6 +29,7 @@
 #include <chrono>
 #include <cmath>
 #include <exception>
+#include <utility>
 
 #include <QLabel>
 #include <QLineEdit>
@@ -753,15 +754,14 @@ void DigiDollarSendWidget::onClearClicked()
 
 void DigiDollarSendWidget::onUseAvailableBalanceClicked()
 {
-    if (!m_balanceKnown || m_availableBalance <= 0) return;
-    if (m_paymaster->paymasterModeSelected() && m_coinControl && m_coinControl->HasSelected()) {
+    if (!m_useAvailableBalanceButton->isEnabled() || !m_balanceKnown || m_availableBalance <= 0) return;
+    if (!m_paymaster->beginSweep()) {
         showWarning(
             tr("Wallet emptying needs automatic input selection"),
             tr("Clear the manually selected DigiDollar inputs before emptying the wallet. "
                "Core must bind every confirmed, ordinary spendable input to one exact snapshot."));
         return;
     }
-    m_paymaster->beginSweep();
     m_settingSweepAmount = true;
     m_amountEdit->setText(QString::number(m_availableBalance, 'f', 2));
     m_settingSweepAmount = false;
@@ -1384,7 +1384,7 @@ bool DigiDollarAddressValidator::isValidDDAddress(const QString& address) const
 
 void DigiDollarSendWidget::onCoinControlButtonClicked()
 {
-    if (!m_walletModel) {
+    if (!m_walletModel || !m_coinControlButton->isEnabled()) {
         return;
     }
 
@@ -1395,8 +1395,16 @@ void DigiDollarSendWidget::onCoinControlButtonClicked()
 
     // Open the coin control dialog
     // Note: platformStyle would typically come from the main window
-    DigiDollarCoinControlDialog dlg(*m_coinControl, m_walletModel, nullptr, this);
-    dlg.exec();
+    // Selection changes become part of the draft only when this dialog is accepted.
+    const QPointer<WalletModel> wallet_model{m_walletModel};
+    wallet::DDCoinControl selection = *m_coinControl;
+    DigiDollarCoinControlDialog dlg(selection, m_walletModel, nullptr, this);
+    if (dlg.exec() == QDialog::Accepted && wallet_model &&
+        m_walletModel == wallet_model && m_coinControlButton->isEnabled()) {
+        const bool changed = selection.ListSelected() != m_coinControl->ListSelected();
+        *m_coinControl = std::move(selection);
+        if (changed) m_paymaster->selectedInputsChanged();
+    }
 
     // Update labels after dialog closes
     updateCoinControlLabels();
@@ -1470,10 +1478,12 @@ void DigiDollarSendWidget::setSelectedDigiDollarInputsForTesting(const std::vect
     if (!m_coinControl) {
         m_coinControl = std::make_unique<wallet::DDCoinControl>();
     }
+    const auto previous = m_coinControl->ListSelected();
     m_coinControl->UnSelectAll();
     for (const COutPoint& input : inputs) {
         m_coinControl->Select(input);
     }
+    if (m_coinControl->ListSelected() != previous) m_paymaster->selectedInputsChanged();
     updateCoinControlLabels();
 }
 

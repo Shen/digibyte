@@ -19,6 +19,7 @@
 #include <primitives/transaction.h>
 #include <qt/clientmodel.h>
 #include <qt/digidollarsendwidget.h>
+#include <qt/digidollarcoincontroldialog.h>
 #include <qt/digidollarstatus.h>
 #include <qt/digidollartab.h>
 #include <qt/guiutil.h>
@@ -110,6 +111,7 @@
 #include <QWizard>
 #include <QTimer>
 #include <QThread>
+#include <QTreeWidget>
 #include <QTemporaryDir>
 #include <QtTest/QtTestWidgets>
 #include <QtWidgets/qtestsupport_widgets.h>
@@ -4594,6 +4596,10 @@ void PaymasterWidgetTests::paymasterClientRestoresOriginalOrderFromNativeStatus(
     QVERIFY(client->m_send.view().restoredSendParams.isArray());
     const auto replay = client->buildPaymasterSendParams(QString::fromStdString(original.address), 325);
     QVERIFY(replay.isArray());
+    QVERIFY(!client->beginSweep());
+    form.setSelectedDigiDollarInputsForTesting({COutPoint{uint256::ONE, 99}});
+    client->amountChanged(false);
+    QCOMPARE(client->buildPaymasterSendParams(QString::fromStdString(original.address), 325).write(), replay.write());
     const auto& options = replay[6];
     QCOMPARE(options.find_value("maximum_paymaster_fee_cents").getInt<int>(), 57);
     QCOMPARE(options.find_value("maximum_provider_attempts").getInt<int>(), 1);
@@ -4623,6 +4629,120 @@ void PaymasterWidgetTests::paymasterClientRestoresOriginalOrderFromNativeStatus(
     QVERIFY(client->buildPaymasterSendParams(QString::fromStdString(original.address), 325).isNull());
     client->m_send.walletChanged();
     QVERIFY(client->m_send.view().restoredSendParams.isNull());
+}
+
+void PaymasterWidgetTests::paymasterClientComposeInputSelection_data()
+{
+    QTest::addColumn<QString>("funding_mode");
+    for (const char* mode : {"auto", "paymaster", "dgb"}) {
+        QTest::newRow(mode) << QString::fromLatin1(mode);
+    }
+}
+
+void PaymasterWidgetTests::paymasterClientComposeInputSelection()
+{
+    QFETCH(QString, funding_mode);
+    TestChain100Setup test;
+    auto loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = loader.get();
+    m_node.setContext(&test.m_node);
+    const auto wallet = SetupDescriptorsWallet(m_node, test, "qt-compose-input-selection");
+    wallet->EnsureDDWallet();
+    const COutPoint input{uint256::ONE, 99};
+    wallet->GetDDWallet()->AddDDUTXO(input, 1000);
+    DigiDollarMiniGUI gui(m_node);
+    gui.initModelForWallet(m_node, wallet);
+    DigiDollarTest::SyncDGBBalance(*gui.walletModel);
+    DigiDollarSendWidget form(gui.platformStyle.get());
+    auto* client = form.findChild<PaymasterSendWidget*>();
+    auto* mode = form.findChild<QComboBox*>("paymasterFeeMode");
+    auto* amount = form.findChild<QLineEdit*>("amountEdit");
+    auto* use_balance = form.findChild<QPushButton*>("useAvailableBalanceButton");
+    auto* inputs = form.findChild<QPushButton*>("coinControlButton");
+    auto* subtract = form.findChild<QCheckBox*>("subtractPaymasterFeeFromAmount");
+    auto* notice = form.findChild<QLabel*>("paymasterTransferNotice");
+    QVERIFY(client && mode && amount && use_balance && inputs && subtract && notice);
+    client->setPaymasterRpcExecutorForTesting([](const std::string& command, const UniValue&) {
+        if (command == "getpaymasterclientsafetystatus") return PaymasterClientSafetyStatus();
+        if (command == "listdigidollarsendsessions") return EmptyPaymasterSessionList();
+        throw std::runtime_error("Compose selection must not prepare a payment");
+    });
+    form.setWalletModel(gui.walletModel.get());
+    mode->setCurrentIndex(mode->findData(funding_mode));
+    form.setAvailableDigiDollarBalanceForTesting(1000);
+    const QString recipient{"RD3HXjF4ibdKEAHNwmv4AnwHWKsb2PgXsiMN5mtm5ao3XJmKLATx"};
+    const bool paymaster_mode = funding_mode != QLatin1String("dgb");
+    int warnings{0};
+    form.setDialogHandlerForTesting([&](QMessageBox::Icon, const QString& title, const QString&,
+                                       QMessageBox::StandardButtons, QMessageBox::StandardButton) {
+        if (title == QLatin1String("Wallet emptying needs automatic input selection")) ++warnings;
+        return QMessageBox::Ok;
+    });
+
+    // Selecting inputs first prevents the Paymaster sweep. Own-DGB Max keeps
+    // the ordinary manual selection and does not acquire Paymaster sweep intent.
+    amount->setText("3.25");
+    form.setSelectedDigiDollarInputsForTesting({input});
+    use_balance->click();
+    QCOMPARE(warnings, paymaster_mode ? 1 : 0);
+    QCOMPARE(amount->text(), paymaster_mode ? QStringLiteral("3.25") : QStringLiteral("10.00"));
+    auto params = client->buildPaymasterSendParams(recipient, 1000);
+    QCOMPARE(params[4].size(), size_t{1});
+    QVERIFY(params[6].find_value("send_all_spendable_dd").isFalse());
+
+    form.setSelectedDigiDollarInputsForTesting({});
+    use_balance->click();
+    params = client->buildPaymasterSendParams(recipient, 1000);
+    QVERIFY(params[4].isNull());
+    QCOMPARE(params[6].find_value("send_all_spendable_dd").get_bool(), paymaster_mode);
+    QCOMPARE(subtract->isChecked(), paymaster_mode);
+
+    // Drive the actual modal selection transaction, including edits followed
+    // by Escape/close. Rejected edits must not alter either selection or intent.
+    const auto edit_selection = [&](Qt::CheckState checked, bool accept) {
+        bool edited{false};
+        QTimer answer;
+        connect(&answer, &QTimer::timeout, &form, [&] {
+            auto* dialog = form.findChild<DigiDollarCoinControlDialog*>();
+            if (!dialog || !dialog->isVisible()) return;
+            auto* tree = dialog->findChild<QTreeWidget*>("treeWidget");
+            if (tree && tree->topLevelItemCount() > 0) {
+                auto* item = tree->topLevelItem(0);
+                if (item->childCount() > 0) item = item->child(0);
+                item->setCheckState(0, checked);
+                edited = true;
+            }
+            dialog->done(accept ? QDialog::Accepted : QDialog::Rejected);
+        });
+        answer.start(0);
+        inputs->click();
+        answer.stop();
+        return edited;
+    };
+    QVERIFY(edit_selection(Qt::Checked, false));
+    QCOMPARE(client->buildPaymasterSendParams(recipient, 1000).write(), params.write());
+    QVERIFY(edit_selection(Qt::Unchecked, true)); // Unchanged acceptance preserves sweep.
+    QCOMPARE(client->buildPaymasterSendParams(recipient, 1000).write(), params.write());
+
+    QVERIFY(edit_selection(Qt::Checked, true));
+    params = client->buildPaymasterSendParams(recipient, 1000);
+    QCOMPARE(params[4].size(), size_t{1});
+    QCOMPARE(params[4][0].find_value("txid").get_str(), input.hash.GetHex());
+    QVERIFY(params[6].find_value("send_all_spendable_dd").isFalse());
+    QCOMPARE(subtract->isChecked(), paymaster_mode);
+    QCOMPARE(amount->text(), QStringLiteral("10.00"));
+    if (paymaster_mode) QVERIFY(notice->text().contains("Wallet emptying was turned off"));
+
+    QVERIFY(edit_selection(Qt::Unchecked, false));
+    QCOMPARE(client->buildPaymasterSendParams(recipient, 1000).write(), params.write());
+    QVERIFY(edit_selection(Qt::Unchecked, true));
+    params = client->buildPaymasterSendParams(recipient, 1000);
+    QVERIFY(params[4].isNull());
+    QVERIFY(params[6].find_value("send_all_spendable_dd").isFalse()); // Unselecting does not restore sweep.
+    use_balance->click();
+    QCOMPARE(client->buildPaymasterSendParams(recipient, 1000)[6].find_value("send_all_spendable_dd").get_bool(), paymaster_mode);
+    amount->setText("9.00");
+    QVERIFY(client->buildPaymasterSendParams(recipient, 900)[6].find_value("send_all_spendable_dd").isFalse());
 }
 
 void PaymasterWidgetTests::paymasterClientSessionRpcActionsAreBound()
@@ -7889,6 +8009,10 @@ void PaymasterWidgetTests::paymasterClientFallbackContinues()
         QVERIFY(sends.front()[6].find_value("send_all_spendable_dd").isTrue());
         QCOMPARE(sends.front()[6].find_value("privacy").get_str(), std::string{"high"});
         QCOMPARE(sends.front()[6].find_value("maximum_provider_attempts").getInt<int>(), 1);
+        form.setSelectedDigiDollarInputsForTesting({COutPoint{uint256::ONE, 99}});
+        QVERIFY(!client->beginSweep());
+        client->amountChanged(false);
+        QCOMPARE(client->buildPaymasterSendParams(QStringLiteral("edited recipient"), 999).write(), sends.front().write());
     }
     QVERIFY(sends.front()[6].find_value("prepare_only").isTrue());
     QVERIFY(sends.front()[6].find_value("authorization_commitment").isNull());
