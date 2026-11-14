@@ -131,6 +131,7 @@ BOOST_FIXTURE_TEST_CASE(client_fee_observation_and_rpc_reject_free_offer_above_d
 BOOST_AUTO_TEST_CASE(provider_pending_setup_continues_admitted_work_only)
 {
     const std::vector<ProviderServiceStatus> waiting{
+        {ProviderServiceState::DRAIN_ONLY, {}},
         {ProviderServiceState::WAITING_FOR_READINESS, "PAYMASTER_POOL_PREPARATION_PENDING"},
         {ProviderServiceState::WAITING_FOR_READINESS, "PAYMASTER_AUTOMATIC_REPLENISHMENT_DISABLED"},
         {ProviderServiceState::WAITING_FOR_LIQUIDITY_CONFIRMATION, "PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING"},
@@ -155,7 +156,7 @@ BOOST_AUTO_TEST_CASE(provider_pending_setup_continues_admitted_work_only)
     const auto active = PlanProviderWork({ProviderServiceState::ACTIVE, {}}, true, true);
     BOOST_CHECK(active.new_capacity && active.request_continuations && active.submits);
     const auto drain = PlanProviderWork({ProviderServiceState::DRAIN_ONLY, {}}, true, true);
-    BOOST_CHECK(!drain.new_capacity && !drain.request_continuations && drain.submits);
+    BOOST_CHECK(!drain.new_capacity && drain.request_continuations && drain.submits);
 }
 
 BOOST_FIXTURE_TEST_CASE(provider_lifecycle_observation_matches_runtime_intent_without_authorizing_work, WalletTestingSetup)

@@ -1380,6 +1380,7 @@ struct ProviderRequestProcessingContext {
     const ProviderReadiness& readiness;
     node::NodeContext* node;
     bool automatic_service;
+    bool new_capacity;
     int64_t now;
     std::string& error;
 };
@@ -1418,23 +1419,26 @@ ProviderProcessingResult ProcessProviderCapacityRequest(
         throw ApplicationError(ErrorKind::UNLOCK,
                            "Provider wallet unlock is required for a capacity proof");
     }
-    bool have_stored_response{false};
+    PaymasterStore store{*wallet};
+    PaymasterCapacityProof proof;
+    const auto capacity_status = store.GetProviderCapacityProofWithStatus(*capacity_request, now, proof, error);
+    if (capacity_status != ProviderCapacityProofStatus::FOUND && capacity_status != ProviderCapacityProofStatus::NOT_FOUND)
+        throw ApplicationError(ErrorKind::WALLET, error.empty() ? "PAYMASTER_CAPACITY_DATABASE_READ" : error);
+    const bool have_stored_response = capacity_status == ProviderCapacityProofStatus::FOUND;
     const uint8_t requested_model = capacity_request->funding_model == FundingModel::SPONSORED
         ? FUNDING_MODEL_SPONSORED : FUNDING_MODEL_USER_PAID;
-    const bool model_ready = readiness.ready && (readiness.available_funding_models & requested_model) != 0;
-    if (!model_ready && CapacityContinuationMayProceed(readiness)) {
-        // An exact retry can arrive after its own proof reserved
-        // the last slot. Do not mistake it for fresh admission.
-        LOCK(wallet->cs_wallet);
-        WalletBatch batch{wallet->GetDatabase()};
-        std::vector<unsigned char> stored_response;
-        have_stored_response = batch.ReadPaymasterCapacityResponse(
-            Hash(SerializeCapacityRequest(*capacity_request)), stored_response);
+    const bool model_ready = request.new_capacity && readiness.ready && (readiness.available_funding_models & requested_model) != 0;
+    const bool continuation_ready = CapacityContinuationMayProceed(readiness);
+    if (!model_ready && !(have_stored_response && continuation_ready)) {
+        if (continuation_ready) {
+            message_guard.Defer();
+            result.disposition = ProviderProcessingDisposition::DEFERRED;
+            result.deferral_reason = "PAYMASTER_PROVIDER_DRAIN_ONLY";
+            return result;
+        }
+        throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_PROVIDER_NOT_RUNNING");
     }
-    if (!model_ready && !(have_stored_response && CapacityContinuationMayProceed(readiness))) {
-        throw ApplicationError(ErrorKind::WALLET,
-                           "PAYMASTER_PROVIDER_NOT_RUNNING");
-    }
+    error.clear();
     uint256 reference_block;
     int tip_height{-1};
     {
@@ -1453,9 +1457,8 @@ ProviderProcessingResult ProcessProviderCapacityRequest(
         throw ApplicationError(ErrorKind::WALLET,
                            "PAYMASTER_NETGROUP_BUCKET_UNAVAILABLE");
     }
-    PaymasterCapacityProof proof;
     std::vector<ProviderPoolEntry> reserved;
-    if (!ReserveAndBuildPaymasterCapacityProof(
+    if (!have_stored_response && !ReserveAndBuildPaymasterCapacityProof(
             *wallet, readiness.identity, *capacity_request,
             Params().GenesisBlock().GetHash(), reference_block,
             tip_height, /*minimum_confirmations=*/1,
@@ -2482,14 +2485,17 @@ ProviderProcessingResult ProcessPaymasterRequests(WalletContext& context, CWalle
         throw ApplicationError(ErrorKind::INTERNAL, "Node context unavailable");
     }
     const ProviderRequestProcessingContext request_context{
-        context, wallet, readiness, node, automatic_service, now, error};
+        context, wallet, readiness, node, automatic_service,
+        scope == ProviderRequestScope::NEW_AND_CONTINUING, now, error};
 
     // A reserved slot can make fresh capacity ineligible without stranding
     // admitted quote/recovery work. Dispatch only one eligible message per
     // call; a deferred capacity request stays queued, but its lease advances
     // the cursor so the next call gives another eligible type its turn.
-    const auto request_lease = context.paymaster->LeaseProviderRequest(
-        readiness.identity.provider_id, scope == ProviderRequestScope::NEW_AND_CONTINUING && (!automatic_service || readiness.ready));
+    // Capacity responses themselves can need exact replay after restart.
+    // The handler requires an authenticated stored response when fresh
+    // admission is disabled; leasing never grants financial authority.
+    const auto request_lease = context.paymaster->LeaseProviderRequest(readiness.identity.provider_id, true);
     const auto& messages = request_lease.Messages();
     result.disposition = messages.empty() ? ProviderProcessingDisposition::NO_MESSAGE : ProviderProcessingDisposition::PROCESSED;
     if (messages.empty()) return result;

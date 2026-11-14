@@ -661,9 +661,8 @@ void RunPaymasterProviderServiceCycleImpl(WalletContext& context, CWallet& walle
         }
     }
 
-    // A refill wait must not strand quote/recovery continuations. Fresh capacity
+    // A refill or drain wait must not strand admitted quote/recovery continuations. Fresh capacity
     // requests always require full current readiness in the request handler.
-    // Drain-only providers still finish only already-authorized submissions.
     const auto work = PlanProviderWork({state, first_error}, accept_new_requests,
                                        AutomaticProviderStateIsSynchronized(wallet));
     if (work.request_continuations) {

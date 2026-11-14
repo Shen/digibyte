@@ -2666,7 +2666,7 @@ ProviderWorkPlan PlanProviderWork(const DigiDollar::Paymaster::ProviderServiceSt
     case ProviderServiceState::ACTIVE:
         return {accept_new_requests, true, true};
     case ProviderServiceState::DRAIN_ONLY:
-        return {false, false, true};
+        return {false, true, true};
     case ProviderServiceState::WAITING_FOR_MAINTENANCE_APPROVAL:
     case ProviderServiceState::REPLENISHING_LIQUIDITY:
     case ProviderServiceState::WAITING_FOR_LIQUIDITY_CONFIRMATION:

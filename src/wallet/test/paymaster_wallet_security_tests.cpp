@@ -938,7 +938,8 @@ struct QuoteRequestProcessingSetup : TestChain100Setup {
         }
     } services_cleanup{*m_node.connman};
 
-    explicit QuoteRequestProcessingSetup(int outbound_connections = 0, DGBSatoshis network_fee = DGBSatoshis{500})
+    explicit QuoteRequestProcessingSetup(int outbound_connections = 0, DGBSatoshis network_fee = DGBSatoshis{500},
+        bool commit_quote = true, CAmount provider_change = 5500)
     {
         BOOST_REQUIRE(wallet.LoadWallet() == DBErrors::LOAD_OK);
         environment.policy.maximum_network_fee = DGBSatoshis{COIN / 10};
@@ -976,14 +977,16 @@ struct QuoteRequestProcessingSetup : TestChain100Setup {
         // while the original, byte-identical intent envelope is still valid.
         BOOST_REQUIRE_MESSAGE(BuildProviderQuoteFixture(environment,
             "550e8400-e29b-41d4-a716-446655441098", seed, now, fixture, error,
-            nullptr, {}, network_fee, 5500, Params().GenesisBlock().GetHash(),
+            nullptr, {}, network_fee, provider_change, Params().GenesisBlock().GetHash(),
             /*intent_ttl=*/60, /*quote_ttl=*/20), error);
         fixture.pool_entry.confirmation_height = 0;
         pool.push_back(fixture.pool_entry);
         BOOST_REQUIRE(PersistProviderQuoteEnvironment(wallet, environment, pool));
         PaymasterStore store{wallet};
-        BOOST_REQUIRE_MESSAGE(store.CommitProviderQuote(
-            fixture.attempt, fixture.request.intent.genesis_hash, now, error), error);
+        if (commit_quote) {
+            BOOST_REQUIRE_MESSAGE(store.CommitProviderQuote(
+                fixture.attempt, fixture.request.intent.genesis_hash, now, error), error);
+        }
         {
             LOCK(wallet.cs_wallet);
             wallet.SetLastBlockProcessed(*m_node.chain->getHeight(),
@@ -8929,6 +8932,63 @@ BOOST_FIXTURE_TEST_CASE(automatic_quote_progress_under_continuous_recovery_reque
 BOOST_FIXTURE_TEST_CASE(automatic_recovery_request_progress_under_continuous_quotes, QuoteRequestProcessingSetup)
 {
     CheckAutomaticRequestProgress(*this, /*flood_recovery=*/false);
+}
+
+struct UnquotedCapacityProcessingSetup : QuoteRequestProcessingSetup {
+    UnquotedCapacityProcessingSetup() : QuoteRequestProcessingSetup{0, DGBSatoshis{500}, false} {}
+};
+
+BOOST_FIXTURE_TEST_CASE(drain_restart_replays_admitted_capacity_without_new_admission, UnquotedCapacityProcessingSetup)
+{
+    std::string error;
+    manager.StopProvider(wallet.GetName());
+    auto settings = environment.settings;
+    settings.operation_mode = ProviderOperationMode::AUTOMATIC;
+    BOOST_REQUIRE(WalletBatch{wallet.GetDatabase()}.WritePaymasterSettings(settings));
+    wallet::CWallet restarted{m_node.chain.get(), "drain-capacity-restarted",
+        DuplicateSecurityFixtureDatabase(wallet.GetDatabase())};
+    BOOST_REQUIRE(restarted.LoadWallet() == DBErrors::LOAD_OK);
+    {
+        LOCK(restarted.cs_wallet);
+        restarted.SetLastBlockProcessed(*m_node.chain->getHeight(),
+            m_node.chain->getBlockHash(*m_node.chain->getHeight()));
+    }
+    const auto started = paymaster_app::StartPaymaster(context, restarted, false, paymaster_app::ExecutionMode::AUTOMATIC);
+    BOOST_CHECK(started.drain_only);
+    const auto capacity_bytes = SerializePaymasterSecurityObject(fixture.capacity_request);
+    BOOST_REQUIRE(manager.EnqueueNetworkDirectMessage(44, Hash(capacity_bytes), capacity_bytes.size(),
+        DirectPayload{fixture.capacity_request}, GetTime(), 44, {1, 8, 8}, DirectAdmissionClass::REQUEST) == DirectEnqueueResult::ACCEPTED);
+    const auto before = GetMockableDatabase(restarted).m_records;
+    RunPaymasterProviderServiceCycle(context, restarted);
+    BOOST_CHECK_EQUAL(manager.DirectMessageCount(), 0U);
+    BOOST_CHECK_EQUAL(manager.OutboundDirectMessageCount(), 1U);
+    BOOST_CHECK(GetMockableDatabase(restarted).m_records == before);
+    auto fresh = fixture.capacity_request;
+    fresh.request_id = "550e8400-e29b-41d4-a716-446655441222";
+    fresh.session_id = SecurityTestId(seed, 710);
+    fresh.client_nonce = SecurityTestId(seed, 711);
+    const auto fresh_bytes = SerializePaymasterSecurityObject(fresh);
+    BOOST_REQUIRE(manager.EnqueueNetworkDirectMessage(44, Hash(fresh_bytes), fresh_bytes.size(),
+        DirectPayload{fresh}, GetTime(), 44, {1, 8, 8}, DirectAdmissionClass::REQUEST) == DirectEnqueueResult::ACCEPTED);
+    RunPaymasterProviderServiceCycle(context, restarted);
+    BOOST_CHECK_EQUAL(manager.DirectMessageCount(), 1U);
+    BOOST_CHECK_EQUAL(manager.OutboundDirectMessageCount(), 1U);
+    BOOST_CHECK(manager.GetProviderServiceStatus(restarted.GetName()).state == ProviderServiceState::DRAIN_ONLY);
+    BOOST_CHECK(GetMockableDatabase(restarted).m_records == before);
+}
+
+BOOST_FIXTURE_TEST_CASE(continuing_capacity_replay_preserves_promoted_quote, QuoteRequestProcessingSetup)
+{
+    const auto bytes = SerializePaymasterSecurityObject(fixture.capacity_request);
+    BOOST_REQUIRE(manager.EnqueueNetworkDirectMessage(44, Hash(bytes), bytes.size(), DirectPayload{fixture.capacity_request},
+        GetTime(), 44, {1, 8, 8}, DirectAdmissionClass::REQUEST) == DirectEnqueueResult::ACCEPTED);
+    const auto before = GetMockableDatabase(wallet).m_records;
+    const auto result = paymaster_app::ProcessPaymasterRequests(context, wallet, paymaster_app::ExecutionMode::MANUAL,
+        paymaster_app::ProviderRequestScope::CONTINUING_ONLY);
+    BOOST_CHECK_EQUAL(result.message_type.value_or(""), "capacity");
+    BOOST_CHECK(result.queued.value_or(false));
+    BOOST_CHECK_EQUAL(manager.DirectMessageCount(), 0U);
+    BOOST_CHECK(GetMockableDatabase(wallet).m_records == before);
 }
 
 BOOST_FIXTURE_TEST_CASE(deferred_capacity_preserves_request_and_yields_next_turn, QuoteRequestProcessingSetup)
