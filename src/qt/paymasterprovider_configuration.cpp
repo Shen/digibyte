@@ -2269,16 +2269,13 @@ void ProviderConfiguration::savePolicy()
     UniValue policy{UniValue::VOBJ};
     policy.pushKV("funding_models", std::move(funding));
     policy.pushKV("sponsorship_scope", m_scope->currentData().toString().toStdString());
-    policy.pushKV("fee_rate_bps",
-                  m_user_paid->isChecked() ? m_fee_bps->value() : 0);
-    policy.pushKV("maximum_user_paid_service_fee_cents",
-                  m_user_paid->isChecked()
-                      ? m_maximum_user_paid_service_fee->value()
-                      : 0);
+    policy.pushKV("fee_rate_bps", m_fee_bps->value());
+    policy.pushKV("maximum_user_paid_service_fee_cents", m_maximum_user_paid_service_fee->value());
     policy.pushKV("min_amount_cents", m_min_amount->value());
     policy.pushKV("max_amount_cents", m_max_amount->value());
     policy.pushKV("quote_ttl", m_quote_ttl->value());
     policy.pushKV("maximum_network_fee_dgb_satoshis", m_network_fee->value());
+    policy = DigiDollar::Paymaster::ProjectSetupProviderPolicy(policy);
     const UniValue requested_policy = policy;
     UniValue params{UniValue::VARR};
     params.push_back(std::move(policy));

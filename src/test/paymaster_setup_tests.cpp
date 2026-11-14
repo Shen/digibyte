@@ -39,6 +39,49 @@ SetupChoices Choices()
 }
 } // namespace
 BOOST_AUTO_TEST_SUITE(paymaster_setup_tests)
+BOOST_AUTO_TEST_CASE(edited_sponsored_proposal_preserves_the_fee_draft_and_raw_validation)
+{
+    auto draft = SetupDefaultPolicy();
+    draft.pushKV("fee_rate_bps", 120);
+    draft.pushKV("maximum_user_paid_service_fee_cents", 37);
+    const auto original = draft.write();
+    BOOST_CHECK_EQUAL(ProjectSetupProviderPolicy(draft).write(), original);
+    UniValue models{UniValue::VARR};
+    models.push_back("sponsored");
+    draft.pushKV("funding_models", models);
+    const auto sponsored_draft = draft.write();
+    auto choices = Choices();
+    choices.policy = draft;
+    choices.safety = SetupDefaultSafety(20000000, false, true, false);
+    choices.liquidity = SetupDefaultLiquidity(false);
+    choices.pool.pushKV("admission_carrier_slots", 0);
+    choices.pool.pushKV("operational_carrier_slots", 0);
+    BOOST_CHECK_THROW(CheckSetupChoices(choices), std::exception);
+    choices.policy = ProjectSetupProviderPolicy(draft);
+    BOOST_CHECK_EQUAL(choices.policy.find_value("fee_rate_bps").getInt<int>(), 0);
+    BOOST_CHECK_EQUAL(choices.policy.find_value("maximum_user_paid_service_fee_cents").getInt<int>(), 0);
+    BOOST_CHECK_EQUAL(draft.write(), sponsored_draft);
+    for (const auto& key : draft.getKeys()) {
+        if (key != "fee_rate_bps" && key != "maximum_user_paid_service_fee_cents")
+            BOOST_CHECK_EQUAL(choices.policy.find_value(key).write(), draft.find_value(key).write());
+    }
+    BOOST_CHECK_NO_THROW(CheckSetupChoices(choices));
+    models.push_back("user_paid");
+    draft.pushKV("funding_models", models);
+    BOOST_CHECK_EQUAL(ProjectSetupProviderPolicy(draft).write(), draft.write());
+    models.push_back("user_paid");
+    draft.pushKV("funding_models", models);
+    BOOST_CHECK_THROW(ProjectSetupProviderPolicy(draft), std::invalid_argument);
+    for (const auto& invalid : {UniValue{UniValue::VARR}, UniValue{UniValue::VSTR, "sponsored"}}) {
+        draft.pushKV("funding_models", invalid);
+        BOOST_CHECK_THROW(ProjectSetupProviderPolicy(draft), std::invalid_argument);
+    }
+    models = UniValue{UniValue::VARR};
+    models.push_back("future_model");
+    draft.pushKV("funding_models", models);
+    BOOST_CHECK_THROW(ProjectSetupProviderPolicy(draft), std::invalid_argument);
+}
+
 BOOST_AUTO_TEST_CASE(target_capital_requires_a_known_fee_and_checks_money_range)
 {
     const auto capital = CalculateSetupCapital(50000000, 3, 1, 3, 1);

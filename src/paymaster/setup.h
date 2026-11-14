@@ -18,6 +18,9 @@ struct SetupSafetyLimits {
 };
 SetupSafetyLimits SetupSafetyProfile(bool conservative, int64_t advertised_fee);
 UniValue SetupDefaultPolicy();
+/** Project an explicitly edited draft for review without changing its saved
+ * inactive fee controls. Raw RPC policy validation remains strict. */
+UniValue ProjectSetupProviderPolicy(const UniValue& draft);
 UniValue SetupDefaultSafety(int64_t advertised_fee, bool user_paid, bool sponsored, bool restricted);
 /** Capacity and finite refill ceilings proposed for review, never an approval.
  * Admission uses three independent proofs; payment reserves scale with capacity. */

@@ -36,6 +36,25 @@ UniValue SetupDefaultPolicy()
     result.pushKV("maximum_network_fee_dgb_satoshis", 20000000);
     return result;
 }
+UniValue ProjectSetupProviderPolicy(const UniValue& draft)
+{
+    const auto& models = draft.find_value("funding_models");
+    std::set<std::string> selected;
+    if (!draft.isObject() || !models.isArray() || models.empty())
+        throw std::invalid_argument("PAYMASTER_INVALID_FUNDING_MODELS");
+    for (const auto& model : models.getValues()) {
+        if (!model.isStr() || (model.get_str() != "user_paid" && model.get_str() != "sponsored") ||
+            !selected.insert(model.get_str()).second)
+            throw std::invalid_argument("PAYMASTER_INVALID_FUNDING_MODELS");
+    }
+    UniValue policy = draft;
+    if (selected.count("user_paid") == 0) {
+        policy.pushKV("fee_rate_bps", 0);
+        policy.pushKV("maximum_user_paid_service_fee_cents", 0);
+    }
+    return policy;
+}
+
 UniValue SetupDefaultSafety(int64_t fee, bool user_paid, bool sponsored, bool restricted)
 {
     UniValue result{UniValue::VOBJ};

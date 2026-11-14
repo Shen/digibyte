@@ -484,7 +484,8 @@ public:
         OperatorShowOffer(choices.policy);
         const bool restricted_saved = choices.policy.find_value("sponsorship_scope").get_str() == "restricted";
         if (restricted_saved) std::cout << "Restricted sponsorship is disabled. Choose and review a supported offer; saved settings are not converted automatically.\n";
-        if (restricted_saved || OperatorCustomize("Customer offer")) {
+        const bool edit_offer = restricted_saved || OperatorCustomize("Customer offer");
+        if (edit_offer) {
             const bool paid_before = OperatorAllowsModel(choices.policy, "user_paid");
             const bool sponsored_before = OperatorAllowsModel(choices.policy, "sponsored");
             // Even a mixed legacy offer needs explicit consent before its
@@ -500,9 +501,8 @@ public:
             if (mode != "user_paid") models.push_back("sponsored");
             choices.policy.pushKV("funding_models", models);
             choices.policy.pushKV("sponsorship_scope", "public");
-            if (!OperatorAllowsModel(choices.policy, "user_paid")) choices.policy.pushKV("fee_rate_bps", 0);
             do {
-                OperatorFields(choices.policy, true, OperatorAllowsModel(choices.policy, "user_paid") ? std::set<std::string>{} : std::set<std::string>{"fee_rate_bps"});
+                OperatorFields(choices.policy, true, OperatorAllowsModel(choices.policy, "user_paid") ? std::set<std::string>{} : std::set<std::string>{"fee_rate_bps", "maximum_user_paid_service_fee_cents"});
                 if (choices.policy.find_value("min_amount_cents").getInt<int64_t>() <= choices.policy.find_value("max_amount_cents").getInt<int64_t>()) break;
                 std::cout << "Smallest payment exceeds largest payment. Correct the range; the other choices are retained.\n";
             } while (true);
@@ -611,6 +611,7 @@ public:
             "Start the provider manually after each restart. A start requested below applies only to this node session.");
         const bool start_requested = choices.enabled && OperatorSetting("Start when this setup is ready?", !existing || provider.find_value("running").isTrue(),
             "Wait for usable funding and confirmed reserves, then start and verify local readiness.", "Save the configuration without a one-time start request. Saved autostart remains independently effective.");
+        if (edit_offer) choices.policy = ProjectSetupProviderPolicy(choices.policy);
         CheckSetupChoices(choices);
         OperatorStep(6, "Review and approve the complete configuration");
         std::cout << "Wallet: " << wallet << " | Network: " << snapshot.find_value("network").get_str() << '\n';

@@ -1739,16 +1739,13 @@ UniValue ProviderSetup::readSetupPolicy(const SetupOfferControls& offer)
     if (wizard_user_paid->isChecked()) funding.push_back("user_paid");
     policy.pushKV("funding_models", funding);
     policy.pushKV("sponsorship_scope", wizard_scope->currentData().toString().toStdString());
-    policy.pushKV("fee_rate_bps", wizard_user_paid->isChecked() ? qRound(fee->value() * 100.0) : 0);
-    policy.pushKV("maximum_user_paid_service_fee_cents",
-                  wizard_user_paid->isChecked()
-                      ? maximum_user_paid_service_fee->value()
-                      : 0);
+    policy.pushKV("fee_rate_bps", qRound(fee->value() * 100.0));
+    policy.pushKV("maximum_user_paid_service_fee_cents", maximum_user_paid_service_fee->value());
     policy.pushKV("min_amount_cents", minimum->value());
     policy.pushKV("max_amount_cents", maximum->value());
     policy.pushKV("quote_ttl", lifetime->value());
     policy.pushKV("maximum_network_fee_dgb_satoshis", network_fee->value());
-    return policy;
+    return DigiDollar::Paymaster::ProjectSetupProviderPolicy(policy);
 }
 
 UniValue ProviderSetup::readSetupPoolOptions(const SetupPoolControls& pool, bool execute)

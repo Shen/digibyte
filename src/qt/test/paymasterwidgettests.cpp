@@ -15721,7 +15721,7 @@ void PaymasterWidgetTests::paymasterOfferPolicyTypedValues_data()
     QTest::addColumn<bool>("german");
     QTest::addColumn<QString>("outcome");
     for (bool german : {false, true}) {
-        for (const char* outcome : {"saved", "stale_readback", "rpc_error", "invalid", "partial_draft"}) {
+        for (const char* outcome : {"saved", "stale_readback", "rpc_error", "invalid", "partial_draft", "sponsored_draft"}) {
             QTest::newRow(qPrintable(QStringLiteral("%1-%2").arg(german ? "de" : "en", outcome)))
                 << german << QString::fromLatin1(outcome);
         }
@@ -15747,7 +15747,7 @@ void PaymasterWidgetTests::paymasterOfferPolicyTypedValues()
         if (method == "setpaymasterpolicy") {
             ++writes;
             written = params[0];
-            if (outcome == "rpc_error") throw std::runtime_error("injected policy write failure");
+            if (outcome == "rpc_error" || outcome == "sponsored_draft") throw std::runtime_error("injected policy write failure");
             auto persisted = written;
             persisted.pushKV("policy_hash", std::string(64, 'b'));
             if (outcome != "stale_readback") {
@@ -15825,16 +15825,24 @@ void PaymasterWidgetTests::paymasterOfferPolicyTypedValues()
         }
         return;
     }
+    if (outcome == "sponsored_draft") {
+        auto* sponsored = panel->findChild<QCheckBox*>("paymasterPolicySponsored");
+        auto* paid = panel->findChild<QCheckBox*>("paymasterPolicyUserPaid");
+        QVERIFY(sponsored && paid);
+        sponsored->setChecked(true);
+        paid->setChecked(false);
+    }
     save->click();
     QCOMPARE(writes, 1);
     const std::vector<std::pair<const char*, int>> expected{
-        {"fee_rate_bps", 80}, {"maximum_user_paid_service_fee_cents", 37},
+        {"fee_rate_bps", outcome == "sponsored_draft" ? 0 : 80},
+        {"maximum_user_paid_service_fee_cents", outcome == "sponsored_draft" ? 0 : 37},
         {"min_amount_cents", 125}, {"max_amount_cents", 234567},
         {"maximum_network_fee_dgb_satoshis", 12345678},
     };
     for (const auto& [name, value] : expected) QCOMPARE(written.find_value(name).getInt<int>(), value);
     for (const auto& [name, value] : fields) QCOMPARE(panel->findChild<QSpinBox*>(name)->value(), value);
-    if (outcome == "rpc_error") {
+    if (outcome == "rpc_error" || outcome == "sponsored_draft") {
         QVERIFY(summary->text().contains("Unsaved changes"));
         QVERIFY(panel->findChild<QLabel*>("paymasterPolicySaveStatus")->text().contains("could not be confirmed"));
     } else if (outcome == "stale_readback") {
