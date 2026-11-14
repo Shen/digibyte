@@ -497,7 +497,7 @@ bool AddExactDurableTransactionToWallet(CWallet& wallet,
             marker != existing->mapValue.end() && marker->second == "1") {
             // Recovery still checks exact bytes and current chain/pool presence.
             // An unchanged observation needs no cache invalidation or UI event.
-            return true;
+            return PersistExactPaymasterWalletTransaction(wallet, transaction, error);
         }
         if (same_type && !same_state) {
             require_intermediate_state = true;
@@ -530,7 +530,7 @@ bool AddExactDurableTransactionToWallet(CWallet& wallet,
         error = "PAYMASTER_WALLET_TRANSACTION_DATABASE_WRITE";
         return false;
     }
-    return true;
+    return PersistExactPaymasterWalletTransaction(wallet, transaction, error);
 }
 
 TxState DurableWalletState(const ExactFinalTransactionPreflight& preflight)
@@ -666,7 +666,9 @@ PaymasterFinalizationFailure ClassifyPaymasterFinalizationFailure(
     if (stage == PaymasterFinalizationStage::DURABLE_RESULT &&
         (error == "PAYMASTER_NODE_RUNTIME_UNAVAILABLE" ||
          error == "PAYMASTER_FINAL_BLOCK_READ" ||
+         error == "PAYMASTER_WALLET_TRANSACTION_DATABASE_READ" ||
          error == "PAYMASTER_WALLET_TRANSACTION_DATABASE_WRITE" ||
+         error == "PAYMASTER_WALLET_DD_STATE_UPDATE_FAILED" ||
          error == "PAYMASTER_FINAL_MEMPOOL_POLICY" ||
          error == "PAYMASTER_FINAL_BROADCAST_UNAVAILABLE" ||
          error == "PAYMASTER_RECOVERY_USER_PREVOUT_NOT_FOUND")) {
@@ -678,6 +680,40 @@ PaymasterFinalizationFailure ClassifyPaymasterFinalizationFailure(
 bool IsTransientPaymasterFinalizationError(std::string_view error)
 {
     return ClassifyPaymasterFinalizationFailure(error) == PaymasterFinalizationFailure::LOCAL_UNAVAILABLE;
+}
+
+bool PersistExactPaymasterWalletTransaction(CWallet& wallet,
+    const CTransactionRef& transaction, std::string& error)
+{
+    LOCK(wallet.cs_wallet);
+    const auto* saved = transaction ? wallet.GetWalletTx(transaction->GetHash()) : nullptr;
+    if (!saved || !MatchDurableFinalTransaction(saved->tx, transaction, error)) {
+        if (!saved) error = "PAYMASTER_FINAL_TRANSACTION_MISSING";
+        return false;
+    }
+    CWalletTx durable{transaction, TxStateInactive{}};
+    const auto status = wallet.GetDatabase().MakeBatch()->ReadWithStatus(
+        std::make_pair(DBKeys::TX, transaction->GetHash()), durable);
+    if (status != DatabaseReadStatus::FOUND && status != DatabaseReadStatus::NOT_FOUND) {
+        error = "PAYMASTER_WALLET_TRANSACTION_DATABASE_READ";
+        return false;
+    }
+    // Compare the full native record, including witness and metadata. Memory
+    // alone cannot establish that the preceding AddToWallet write succeeded.
+    const bool persisted = status == DatabaseReadStatus::FOUND &&
+        CanonicalBytes(durable) == CanonicalBytes(*saved);
+    if (!persisted && !WalletBatch{wallet.GetDatabase()}.WriteTx(*saved)) {
+        error = "PAYMASTER_WALLET_TRANSACTION_DATABASE_WRITE";
+        return false;
+    }
+    if (auto* dd_wallet = wallet.GetDDWallet(); dd_wallet && IsDigiDollarTransaction(*transaction)) {
+        if (!dd_wallet->ProcessIncomingDDTransaction(transaction)) {
+            error = "PAYMASTER_WALLET_DD_STATE_UPDATE_FAILED";
+            return false;
+        }
+    }
+    error.clear();
+    return true;
 }
 
 bool InsertAndBroadcastExactPaymasterTransaction(

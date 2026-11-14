@@ -1993,6 +1993,7 @@ bool CommitMaintenanceExecution(CWallet& wallet, const PaymasterMaintenanceExecu
         const auto existing = wallet.mapWallet.find(tx->GetHash());
         if (existing == wallet.mapWallet.end()) {
             if (!wallet.CommitTransaction(tx, leg.metadata, {}, &error)) return false;
+            if (!PersistExactPaymasterWalletTransaction(wallet, tx, error)) return false;
         } else {
             // AddToWallet can leave its in-memory entry behind when WriteTx
             // fails. Re-persist it before accounting or removing the journal.
@@ -2005,15 +2006,11 @@ bool CommitMaintenanceExecution(CWallet& wallet, const PaymasterMaintenanceExecu
                 }
                 saved.mapValue[key] = value;
             }
-            if (!WalletBatch{wallet.GetDatabase()}.WriteTx(saved)) {
-                error = "PAYMASTER_MAINTENANCE_RECOVERY_TRANSACTION_WRITE";
-                return false;
-            }
+            if (!PersistExactPaymasterWalletTransaction(wallet, tx, error)) return false;
             if (wallet.GetBroadcastTransactions() && wallet.GetTxDepthInMainChain(saved) == 0 &&
                 !wallet.SubmitTxMemoryPoolAndRelay(saved, error, true)) return false;
         }
         if (leg.digidollar) {
-            auto* dd_wallet = wallet.GetDDWallet();
             const auto comment = leg.metadata.find("comment");
             MaintenanceSendHistory history{leg.history_recipient, leg.history_amount.value,
                 comment == leg.metadata.end() ? std::string{} : comment->second, leg.multiple_recipients};
@@ -2025,7 +2022,6 @@ bool CommitMaintenanceExecution(CWallet& wallet, const PaymasterMaintenanceExecu
                 if (!described) { error = "PAYMASTER_INVALID_MAINTENANCE_TRANSACTION"; return false; }
                 history = *described;
             }
-            if (!dd_wallet || !dd_wallet->ProcessIncomingDDTransaction(tx)) { error = "PAYMASTER_MAINTENANCE_DD_STATE_UPDATE_FAILED"; return false; }
             if (!RecordMaintenanceSendHistory(wallet, tx->GetHash(), history, error)) return false;
         }
     }

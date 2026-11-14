@@ -249,6 +249,12 @@ bool ReconcileConfirmedClientPayment(
             !wallet.AddToWallet(observed_transaction,
                 TxStateConfirmed{observed.confirmed_block, observed.confirmed_height, observed.confirmed_position}))
             throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_OBSERVED_TRANSACTION_WRITE");
+        if (const auto* saved = wallet.GetWalletTx(attempt.unsigned_txid)) {
+            std::string persist_error;
+            if (!PersistExactPaymasterWalletTransaction(wallet,
+                    observed_transaction ? observed_transaction : saved->tx, persist_error))
+                throw ApplicationError(ErrorKind::WALLET, persist_error);
+        }
         bool completed{false};
         std::string observation_error;
         if (!store.CompleteClientConfirmedPayment(session.request_id,

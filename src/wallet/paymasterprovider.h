@@ -121,6 +121,12 @@ PaymasterFinalizationFailure ClassifyPaymasterFinalizationFailure(
     std::string_view error, PaymasterFinalizationStage stage = PaymasterFinalizationStage::DURABLE_RESULT);
 bool IsTransientPaymasterFinalizationError(std::string_view error);
 
+/** Persist the exact current native wallet record before acknowledging a
+ * Paymaster operation. AddToWallet may retain memory after a failed write.
+ * This does not authorize insertion, signing, broadcasting or accounting. */
+bool PersistExactPaymasterWalletTransaction(CWallet& wallet,
+    const CTransactionRef& transaction, std::string& error);
+
 /** A new provider signature must not reuse inputs retained by unresolved
  * maintenance. Exact durable signature replay does not call this guard. */
 bool CheckPaymasterMaintenanceInputsAvailable(

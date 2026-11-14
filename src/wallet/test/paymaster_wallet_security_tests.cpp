@@ -6117,6 +6117,22 @@ BOOST_FIXTURE_TEST_CASE(durable_observation_skips_only_unchanged_wallet_state,
     BOOST_CHECK(confirmed);
     BOOST_CHECK_EQUAL(notifications, 0U);
     BOOST_CHECK(GetMockableDatabase(wallet).m_records == unchanged_database);
+    {
+        auto& database = GetMockableDatabase(wallet);
+        const auto key = std::make_pair(DBKeys::TX, transaction->GetHash());
+        BOOST_REQUIRE(database.MakeBatch()->Write(key, std::string{"corrupt native row"}));
+        const auto damaged = database.m_records;
+        BOOST_CHECK(!observe());
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_WALLET_TRANSACTION_DATABASE_READ");
+        BOOST_CHECK(GetMockableDatabase(wallet).m_records == damaged);
+        BOOST_CHECK_EQUAL(notifications, 0U);
+        {
+            LOCK(wallet.cs_wallet);
+            BOOST_REQUIRE(WalletBatch{wallet.GetDatabase()}.WriteTx(wallet.mapWallet.at(transaction->GetHash())));
+        }
+        BOOST_REQUIRE_MESSAGE(observe(), error);
+        BOOST_CHECK_EQUAL(notifications, 0U);
+    }
 
     // Reconcile changed observations, including another block, a stale height,
     // a different position, and an inactive/abandoned transaction after a reorg.
@@ -7300,6 +7316,65 @@ static void ExerciseDurablePaymentExecutor(wallet::CWallet& client, ProviderQuot
         }
         BOOST_REQUIRE_MESSAGE(PreflightExactPaymasterFinalTransaction(client, MakeTransactionRef(final_transaction),
             ExactFinalTxIndexMode::NONBLOCKING, observation, error), error);
+    }
+
+    // A native write failure retains memory, but that memory is never a
+    // persistence acknowledgement. Exercise unchanged mempool observations
+    // for both first insertion and an update of an existing wallet record.
+    {
+        const auto tx = MakeTransactionRef(final_transaction);
+        const auto admitted = WITH_LOCK(cs_main,
+            return client.chain().context()->chainman->ProcessTransaction(tx, false));
+        BOOST_REQUIRE(admitted.m_result_type == MempoolAcceptResult::ResultType::VALID);
+        for (const bool update : {false, true}) {
+            const auto key = std::make_pair(DBKeys::TX, final.GetHash());
+            auto retry_copy = DuplicateSecurityFixtureDatabase(client.GetDatabase());
+            BOOST_REQUIRE(retry_copy->MakeBatch()->Erase(key));
+            wallet::CWallet retry{client.chain().context()->chain.get(), "durable-write-retry",
+                std::move(retry_copy)};
+            BOOST_REQUIRE(retry.LoadWallet() == DBErrors::LOAD_OK);
+            BOOST_REQUIRE(!WITH_LOCK(retry.cs_wallet, return retry.GetWalletTx(final.GetHash())));
+            if (update) {
+                LOCK(retry.cs_wallet);
+                BOOST_REQUIRE(retry.AddToWallet(tx, TxStateInactive{}, [](CWalletTx& saved, bool) {
+                    saved.fFromMe = saved.fTimeReceivedIsTxTime = true;
+                    saved.mapValue["paymaster_durable_commit"] = "1";
+                    saved.mapValue["comment"] = "preserve metadata";
+                    return true;
+                }));
+            }
+            auto& retry_database = GetMockableDatabase(retry);
+            DataStream encoded_key;
+            encoded_key << key;
+            retry_database.m_refuse_write = [&](Span<const std::byte> candidate) {
+                return candidate.size() == encoded_key.size() &&
+                    std::equal(candidate.begin(), candidate.end(), encoded_key.begin());
+            };
+            bool confirmed{false};
+            BOOST_CHECK(!InsertAndBroadcastExactPaymasterTransaction(retry, tx, confirmed, error));
+            BOOST_CHECK_EQUAL(error, "PAYMASTER_WALLET_TRANSACTION_DATABASE_WRITE");
+            BOOST_REQUIRE(WITH_LOCK(retry.cs_wallet, return retry.GetWalletTx(final.GetHash())));
+            BOOST_CHECK_EQUAL(retry_database.MakeBatch()->Exists(key), update);
+            retry_database.m_refuse_write = {};
+            BOOST_REQUIRE_MESSAGE(InsertAndBroadcastExactPaymasterTransaction(retry, tx, confirmed, error), error);
+            CWalletTx persisted{tx, TxStateInactive{}};
+            BOOST_REQUIRE(retry_database.MakeBatch()->Read(key, persisted));
+            BOOST_CHECK(persisted.tx->GetWitnessHash() == tx->GetWitnessHash());
+            BOOST_CHECK(SerializePaymasterSecurityObject(*persisted.tx) == bytes);
+            BOOST_CHECK(persisted.fFromMe && persisted.fTimeReceivedIsTxTime);
+            BOOST_CHECK_EQUAL(persisted.mapValue.at("paymaster_durable_commit"), "1");
+            if (update) BOOST_CHECK_EQUAL(persisted.mapValue.at("comment"), "preserve metadata");
+            // Native serialization restores mempool observations as inactive;
+            // a fresh exact replay restores current chain/pool state.
+            wallet::CWallet reopened_retry{client.chain().context()->chain.get(), "durable-write-reopened",
+                DuplicateSecurityFixtureDatabase(retry.GetDatabase())};
+            BOOST_REQUIRE(reopened_retry.LoadWallet() == DBErrors::LOAD_OK);
+            BOOST_REQUIRE_MESSAGE(InsertAndBroadcastExactPaymasterTransaction(reopened_retry, tx, confirmed, error), error);
+            BOOST_CHECK(IsPaymasterInputReserved(reopened_retry, session.user_inputs.front()));
+            ClientFeeLedger retry_fees;
+            BOOST_REQUIRE(WalletBatch{reopened_retry.GetDatabase()}.ReadPaymasterClientFeeLedger(retry_fees));
+            BOOST_CHECK(SerializePaymasterSecurityObject(retry_fees) == spent_fees);
+        }
     }
 
     // A clock rollback cannot turn a fully signed historical authorization
