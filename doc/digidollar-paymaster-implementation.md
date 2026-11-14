@@ -96,6 +96,12 @@ SOCKS5 privacy rules; they never reserve wallet capital. See the
 
 ## Durable state and recovery
 
+Policies never initialize over missing spending history. Only absence of both
+policy and ledger permits a fresh ledger; finite setup history is preserved
+when recurring policy is enrolled later. Missing history beneath an existing
+policy is unavailable, including during automatic refill and reconciliation.
+Saving the same policy does not repair that state or reset its budgets.
+
 The client persists a canonical request ID/order. New public orders also retain
 an independently versioned `pmclientorder` replay record with the original fee
 cap, selection, attempt limit, amount semantics and ordered inputs. Its hash and

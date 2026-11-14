@@ -1439,6 +1439,27 @@ bool GetPaymasterProviderSettings(const CWallet& wallet, ProviderSettings& setti
     return WalletBatch{wallet.GetDatabase()}.ReadPaymasterSettings(settings);
 }
 
+DatabaseReadStatus PaymasterPolicyLedgerStatus(DatabaseReadStatus policy, DatabaseReadStatus ledger,
+                                               bool allow_existing_setup_history)
+{
+    if (policy == DatabaseReadStatus::UNSUPPORTED_VERSION || ledger == DatabaseReadStatus::UNSUPPORTED_VERSION) return DatabaseReadStatus::UNSUPPORTED_VERSION;
+    // Finite setup can establish maintenance history before recurring policy.
+    // Preserve that history on first policy enrollment; never initialize over it.
+    if (ledger == DatabaseReadStatus::FOUND &&
+        (policy == DatabaseReadStatus::FOUND ||
+         (allow_existing_setup_history && policy == DatabaseReadStatus::NOT_FOUND))) return DatabaseReadStatus::FOUND;
+    if (policy == DatabaseReadStatus::NOT_FOUND && ledger == DatabaseReadStatus::NOT_FOUND) return DatabaseReadStatus::NOT_FOUND;
+    return DatabaseReadStatus::READ_ERROR;
+}
+
+DatabaseReadStatus ReadPaymasterMaintenanceState(WalletBatch& batch,
+    ProviderLiquidityPolicy& policy, ProviderMaintenanceLedger& ledger)
+{
+    const auto policy_status = batch.ReadPaymasterLiquidityPolicyWithStatus(policy);
+    const auto ledger_status = batch.ReadPaymasterMaintenanceLedgerWithStatus(ledger);
+    return PaymasterPolicyLedgerStatus(policy_status, ledger_status, /*allow_existing_setup_history=*/true);
+}
+
 bool SetPaymasterProviderSafetyPolicy(CWallet& wallet,
                                       const ProviderSafetyPolicy& policy,
                                       int64_t now,
@@ -1465,8 +1486,12 @@ bool SetPaymasterProviderSafetyPolicy(CWallet& wallet,
     }
     ProviderBudgetLedger ledger;
     const auto ledger_status = batch.ReadPaymasterProviderBudgetLedgerWithStatus(ledger);
-    if (ledger_status != DatabaseReadStatus::FOUND && ledger_status != DatabaseReadStatus::NOT_FOUND) {
-        error = "PAYMASTER_INVALID_PROVIDER_BUDGET_LEDGER";
+    ProviderSafetyPolicy previous_policy;
+    const auto previous_status = batch.ReadPaymasterProviderSafetyPolicyWithStatus(previous_policy);
+    const auto pair_status = PaymasterPolicyLedgerStatus(previous_status, ledger_status);
+    if (pair_status != DatabaseReadStatus::FOUND && pair_status != DatabaseReadStatus::NOT_FOUND) {
+        error = previous_status != DatabaseReadStatus::FOUND && previous_status != DatabaseReadStatus::NOT_FOUND
+            ? "PAYMASTER_INVALID_SAFETY_POLICY" : "PAYMASTER_INVALID_PROVIDER_BUDGET_LEDGER";
         return false;
     }
     if (ledger_status == DatabaseReadStatus::NOT_FOUND) {
@@ -1478,12 +1503,6 @@ bool SetPaymasterProviderSafetyPolicy(CWallet& wallet,
     ProviderSafetyPolicy persisted{policy};
     persisted.updated_at = effective_now;
     if (!ValidateProviderSafetyPolicy(persisted, advertised, error)) return false;
-    ProviderSafetyPolicy previous_policy;
-    const auto previous_status = batch.ReadPaymasterProviderSafetyPolicyWithStatus(previous_policy);
-    if (previous_status != DatabaseReadStatus::FOUND && previous_status != DatabaseReadStatus::NOT_FOUND) {
-        error = "PAYMASTER_INVALID_SAFETY_POLICY";
-        return false;
-    }
     const bool had_previous_policy = previous_status == DatabaseReadStatus::FOUND;
     if (had_previous_policy) previous_policy.updated_at = persisted.updated_at;
     const bool policy_changed = !had_previous_policy ||
@@ -1558,7 +1577,8 @@ bool SetPaymasterProviderLiquidityPolicy(
     }
 
     ProviderMaintenanceLedger ledger;
-    const auto ledger_status = batch.ReadPaymasterMaintenanceLedgerWithStatus(ledger);
+    ProviderLiquidityPolicy previous_policy;
+    const auto ledger_status = ReadPaymasterMaintenanceState(batch, previous_policy, ledger);
     if (ledger_status != DatabaseReadStatus::FOUND && ledger_status != DatabaseReadStatus::NOT_FOUND) {
         error = "PAYMASTER_INVALID_MAINTENANCE_LEDGER";
         return false;
@@ -1569,13 +1589,7 @@ bool SetPaymasterProviderLiquidityPolicy(
     if (!ValidateProviderMaintenanceLedger(ledger, error)) return false;
     ledger.accounting_time_high_water = std::max(
         ledger.accounting_time_high_water, now);
-    ProviderLiquidityPolicy previous_policy;
-    const auto previous_status = batch.ReadPaymasterLiquidityPolicyWithStatus(previous_policy);
-    if (previous_status != DatabaseReadStatus::FOUND && previous_status != DatabaseReadStatus::NOT_FOUND) {
-        error = "PAYMASTER_INVALID_LIQUIDITY_POLICY";
-        return false;
-    }
-    const bool had_previous_policy = previous_status == DatabaseReadStatus::FOUND;
+    const bool had_previous_policy = previous_policy.updated_at > 0;
     if (had_previous_policy) previous_policy.updated_at = policy.updated_at;
     const bool policy_changed = !had_previous_policy ||
         GetProviderLiquidityPolicyStorageHash(previous_policy) !=
@@ -1629,8 +1643,12 @@ bool SetPaymasterClientSafetyPolicy(CWallet& wallet,
     WalletBatch batch{wallet.GetDatabase()};
     ClientFeeLedger ledger;
     const auto ledger_status = batch.ReadPaymasterClientFeeLedgerWithStatus(ledger);
-    if (ledger_status != DatabaseReadStatus::FOUND && ledger_status != DatabaseReadStatus::NOT_FOUND) {
-        error = "PAYMASTER_INVALID_CLIENT_FEE_LEDGER";
+    ClientSafetyPolicy previous;
+    const auto previous_status = batch.ReadPaymasterClientSafetyPolicyWithStatus(previous);
+    const auto pair_status = PaymasterPolicyLedgerStatus(previous_status, ledger_status);
+    if (pair_status != DatabaseReadStatus::FOUND && pair_status != DatabaseReadStatus::NOT_FOUND) {
+        error = previous_status != DatabaseReadStatus::FOUND && previous_status != DatabaseReadStatus::NOT_FOUND
+            ? "PAYMASTER_INVALID_CLIENT_SAFETY_POLICY" : "PAYMASTER_INVALID_CLIENT_FEE_LEDGER";
         return false;
     }
     if (ledger_status == DatabaseReadStatus::NOT_FOUND) {
@@ -1643,12 +1661,6 @@ bool SetPaymasterClientSafetyPolicy(CWallet& wallet,
     ClientSafetyPolicy persisted{policy};
     persisted.updated_at = effective_now;
     if (!ValidateClientSafetyPolicy(persisted, error)) return false;
-    ClientSafetyPolicy previous;
-    const auto previous_status = batch.ReadPaymasterClientSafetyPolicyWithStatus(previous);
-    if (previous_status != DatabaseReadStatus::FOUND && previous_status != DatabaseReadStatus::NOT_FOUND) {
-        error = "PAYMASTER_INVALID_CLIENT_SAFETY_POLICY";
-        return false;
-    }
     // Older RPC callers updating absolute limits must not remove a percentage cap.
     if (persisted.maximum_service_fee_bps < 0) {
         persisted.maximum_service_fee_bps = previous.maximum_service_fee_bps;
@@ -1680,10 +1692,8 @@ bool CaptureClientFeeBudget(const CWallet& wallet, int64_t now,
     ClientFeeLedger ledger;
     const auto policy_status = batch.ReadPaymasterClientSafetyPolicyWithStatus(result.policy);
     const auto ledger_status = batch.ReadPaymasterClientFeeLedgerWithStatus(ledger);
-    const auto readable = [](DatabaseReadStatus status) {
-        return status == DatabaseReadStatus::FOUND || status == DatabaseReadStatus::NOT_FOUND;
-    };
-    if (!readable(policy_status) || !readable(ledger_status)) {
+    const auto pair_status = PaymasterPolicyLedgerStatus(policy_status, ledger_status);
+    if (pair_status != DatabaseReadStatus::FOUND && pair_status != DatabaseReadStatus::NOT_FOUND) {
         error = policy_status == DatabaseReadStatus::UNSUPPORTED_VERSION || ledger_status == DatabaseReadStatus::UNSUPPORTED_VERSION
             ? "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION" : "PAYMASTER_INVALID_CLIENT_SAFETY_STATE";
         return false;

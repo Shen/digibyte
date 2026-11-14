@@ -27,6 +27,7 @@
 #include <wallet/context.h>
 #include <wallet/digidollarwallet.h>
 #include <wallet/paymasteridentity.h>
+#include <wallet/paymasterapplication.h>
 #include <wallet/paymasterfinance.h>
 #include <wallet/paymastercheckpoint.h>
 #include <wallet/paymasterprovider.h>
@@ -312,6 +313,30 @@ BOOST_AUTO_TEST_CASE(policy_setters_never_initialize_over_unreadable_accounting)
     BOOST_CHECK((HashWriter{} << retained).GetHash() == (HashWriter{} << budget).GetHash());
     BOOST_CHECK((HashWriter{} << retained_fees).GetHash() == (HashWriter{} << fees).GetHash());
     BOOST_CHECK((HashWriter{} << retained_maintenance).GetHash() == (HashWriter{} << maintenance).GetHash());
+    // Absence is a distinct failure from READ_ERROR: an enrolled policy must
+    // never turn a missing history row into fresh financial authority.
+    const auto complete = db.m_records;
+    for (const auto& key : {DBKeys::PAYMASTER_PROVIDER_BUDGET, DBKeys::PAYMASTER_PROVIDER_SAFETY,
+             DBKeys::PAYMASTER_MAINTENANCE_LEDGER, DBKeys::PAYMASTER_CLIENT_FEES,
+             DBKeys::PAYMASTER_CLIENT_SAFETY}) {
+        auto raw = db.MakeBatch();
+        BOOST_REQUIRE(raw->Erase(key));
+        const auto missing = db.m_records;
+        bool result;
+        if (key == DBKeys::PAYMASTER_PROVIDER_BUDGET || key == DBKeys::PAYMASTER_PROVIDER_SAFETY)
+            result = SetPaymasterProviderSafetyPolicy(wallet, safety, 1000, error);
+        else if (key == DBKeys::PAYMASTER_MAINTENANCE_LEDGER || key == DBKeys::PAYMASTER_LIQUIDITY_POLICY)
+            result = SetPaymasterProviderLiquidityPolicy(wallet, liquidity, 1000, error);
+        else result = SetPaymasterClientSafetyPolicy(wallet, client, 1000, error);
+        BOOST_CHECK_MESSAGE(!result, key);
+        if (key == DBKeys::PAYMASTER_MAINTENANCE_LEDGER) {
+            BOOST_CHECK(!paymaster_app::RunAutomaticDGBReplenishment(wallet, liquidity, 1, 1, error));
+            BOOST_CHECK(!paymaster_app::RunAutomaticCarrierReplenishment(wallet, liquidity, 1, 1, error));
+        }
+        BOOST_CHECK(db.m_records == missing);
+        db.m_records = complete;
+        BOOST_REQUIRE_MESSAGE(CheckPaymasterCheckpoint(db, error), error);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(background_service_contains_invalid_maintenance)

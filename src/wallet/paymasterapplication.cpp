@@ -636,6 +636,8 @@ ProviderReadiness GetProviderReadiness(CWallet& wallet, WalletContext& context,
     }
     if (!result.have_safety_policy) result.errors.push_back("PAYMASTER_SAFETY_POLICY_NOT_FOUND");
     if (!result.have_budget_ledger) result.errors.push_back("PAYMASTER_PROVIDER_BUDGET_LEDGER_NOT_FOUND");
+    if (result.have_liquidity_policy && !result.have_maintenance_ledger)
+        result.errors.push_back("PAYMASTER_MAINTENANCE_LEDGER_NOT_FOUND");
     if (result.have_settings && result.have_policy && result.settings.policy_hash != DigiDollar::Paymaster::GetProviderPolicyHash(result.policy)) {
         result.errors.push_back("PAYMASTER_POLICY_BINDING_MISMATCH");
     }
@@ -1083,8 +1085,9 @@ bool ReconcileProviderMaintenance(CWallet& wallet,
     using namespace DigiDollar::Paymaster;
     WalletBatch batch{wallet.GetDatabase()};
     ProviderMaintenanceLedger ledger;
+    ProviderLiquidityPolicy policy;
     const DatabaseReadStatus ledger_status{
-        batch.ReadPaymasterMaintenanceLedgerWithStatus(ledger)};
+        ReadPaymasterMaintenanceState(batch, policy, ledger)};
     if (ledger_status == DatabaseReadStatus::NOT_FOUND) return true;
     if (ledger_status != DatabaseReadStatus::FOUND) {
         error = PersistedReadError(
@@ -2162,11 +2165,10 @@ bool RunAutomaticDGBReplenishment(
         // Readiness reconciliation also writes this journal. Keep planning,
         // budget reservation and persistence in one read-modify-write interval.
         WalletBatch batch{wallet.GetDatabase()};
+        ProviderLiquidityPolicy saved_policy;
         const DatabaseReadStatus ledger_status{
-            batch.ReadPaymasterMaintenanceLedgerWithStatus(ledger)};
-        if (ledger_status == DatabaseReadStatus::NOT_FOUND) {
-            ledger.accounting_time_high_water = GetTime();
-        } else if (ledger_status != DatabaseReadStatus::FOUND) {
+            ReadPaymasterMaintenanceState(batch, saved_policy, ledger)};
+        if (ledger_status != DatabaseReadStatus::FOUND) {
             error = PersistedReadError(
                 ledger_status, "ProviderMaintenanceLedger", ledger,
                 "PAYMASTER_MAINTENANCE_LEDGER_NOT_FOUND",
@@ -2376,11 +2378,10 @@ bool RunAutomaticCarrierReplenishment(
     {
         LOCK(wallet.cs_wallet);
         WalletBatch batch{wallet.GetDatabase()};
+        ProviderLiquidityPolicy saved_policy;
         const DatabaseReadStatus ledger_status{
-            batch.ReadPaymasterMaintenanceLedgerWithStatus(ledger)};
-        if (ledger_status == DatabaseReadStatus::NOT_FOUND) {
-            ledger.accounting_time_high_water = GetTime();
-        } else if (ledger_status != DatabaseReadStatus::FOUND) {
+            ReadPaymasterMaintenanceState(batch, saved_policy, ledger)};
+        if (ledger_status != DatabaseReadStatus::FOUND) {
             error = PersistedReadError(
                 ledger_status, "ProviderMaintenanceLedger", ledger,
                 "PAYMASTER_MAINTENANCE_LEDGER_NOT_FOUND",

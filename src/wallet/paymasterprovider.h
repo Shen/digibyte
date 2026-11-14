@@ -25,6 +25,16 @@
 namespace wallet {
 
 class CWallet;
+class WalletBatch;
+enum class DatabaseReadStatus;
+
+/** Only absence of policy and history permits initialization. Existing
+ * history is preserved when finite setup precedes recurring-policy enrollment. */
+DatabaseReadStatus PaymasterPolicyLedgerStatus(DatabaseReadStatus policy, DatabaseReadStatus ledger,
+                                               bool allow_existing_setup_history = false);
+DatabaseReadStatus ReadPaymasterMaintenanceState(WalletBatch& batch,
+    DigiDollar::Paymaster::ProviderLiquidityPolicy& policy,
+    DigiDollar::Paymaster::ProviderMaintenanceLedger& ledger);
 
 /** Result of revalidating and replaying one already durable, fully signed
  * provider commit. Recovery never creates a new signature or starts the
