@@ -949,6 +949,60 @@ bool SaveCarrierWithdrawalPreview(
 }
 
 namespace {
+struct MaintenanceSendHistory {
+    CScript recipient;
+    CAmount amount{0};
+    std::string comment;
+    bool multiple_recipients{false};
+};
+
+// The maintenance operation remains authoritative after the native execution
+// journal is completed. Initial commit, journal replay and later reconciliation
+// must reconstruct the same aggregate send rather than infer it from one output.
+std::optional<MaintenanceSendHistory> DescribeMaintenanceSendHistory(
+    const DigiDollar::Paymaster::ProviderMaintenanceRecord& operation)
+{
+    using namespace DigiDollar::Paymaster;
+    MaintenanceSendHistory history;
+    size_t recipients{0};
+    switch (operation.kind) {
+    case ProviderMaintenanceKind::PREPARE_CARRIER:
+        history.comment = "Paymaster carrier pool";
+        break;
+    case ProviderMaintenanceKind::REPLENISH_CARRIER:
+        history.comment = "Paymaster automatic carrier replenishment";
+        break;
+    case ProviderMaintenanceKind::WITHDRAW_CARRIER_EXCESS:
+        history.comment = "Paymaster carrier excess withdrawal";
+        history.recipient = operation.withdrawal_excess_script_pub_key;
+        history.amount = operation.withdrawal_excess_amount.value;
+        recipients = 1;
+        break;
+    default:
+        return std::nullopt;
+    }
+    for (const auto& output : operation.outputs) {
+        if (output.asset != PoolAsset::DD_CARRIER) return std::nullopt;
+        const auto total = CheckedAdd(history.amount, output.carrier_value.value);
+        if (!total) return std::nullopt;
+        history.amount = *total;
+        if (recipients++ == 0) history.recipient = output.script_pub_key;
+    }
+    if (history.recipient.empty() || history.amount <= 0) return std::nullopt;
+    history.multiple_recipients = recipients > 1;
+    return history;
+}
+
+bool RecordMaintenanceSendHistory(CWallet& wallet, const uint256& txid,
+    const MaintenanceSendHistory& history, std::string& error)
+{
+    AssertLockHeld(wallet.cs_wallet);
+    auto* dd_wallet = wallet.GetDDWallet();
+    if (!dd_wallet) { error = "PAYMASTER_DD_WALLET_UNAVAILABLE"; return false; }
+    return dd_wallet->RecordPaymasterSendHistory(txid, history.recipient,
+        history.amount, error, history.comment, history.multiple_recipients);
+}
+
 constexpr size_t MAINTENANCE_HISTORY_WORK{256};
 constexpr size_t MAINTENANCE_DIRTY_LIMIT{4096};
 
@@ -1320,12 +1374,9 @@ bool ReconcileProviderMaintenance(CWallet& wallet,
         const auto* confirmed = transaction->second.state<TxStateConfirmed>();
         if (record.kind == ProviderMaintenanceKind::PREPARE_CARRIER &&
             (confirmed || transaction->second.InMempool())) {
-            CAmount carrier_total{0};
-            for (const auto& output : record.outputs) carrier_total += output.carrier_value.value;
-            auto* dd_wallet = wallet.GetDDWallet();
-            if (!dd_wallet || !dd_wallet->RecordPaymasterSendHistory(
-                    txid, record.outputs.front().script_pub_key, carrier_total, error)) {
-                if (error.empty()) error = "PAYMASTER_DD_WALLET_UNAVAILABLE";
+            const auto history = DescribeMaintenanceSendHistory(record);
+            if (!history) { error = "PAYMASTER_INVALID_MAINTENANCE_TRANSACTION"; return false; }
+            if (!RecordMaintenanceSendHistory(wallet, txid, *history, error)) {
                 return false;
             }
         }
@@ -1964,9 +2015,18 @@ bool CommitMaintenanceExecution(CWallet& wallet, const PaymasterMaintenanceExecu
         if (leg.digidollar) {
             auto* dd_wallet = wallet.GetDDWallet();
             const auto comment = leg.metadata.find("comment");
+            MaintenanceSendHistory history{leg.history_recipient, leg.history_amount.value,
+                comment == leg.metadata.end() ? std::string{} : comment->second, leg.multiple_recipients};
+            if (execution.has_ledger) {
+                const auto operation = std::find_if(execution.after_ledger.records.begin(), execution.after_ledger.records.end(),
+                    [&](const auto& record) { return record.transaction_id == tx->GetHash(); });
+                const auto described = operation == execution.after_ledger.records.end()
+                    ? std::nullopt : DescribeMaintenanceSendHistory(*operation);
+                if (!described) { error = "PAYMASTER_INVALID_MAINTENANCE_TRANSACTION"; return false; }
+                history = *described;
+            }
             if (!dd_wallet || !dd_wallet->ProcessIncomingDDTransaction(tx)) { error = "PAYMASTER_MAINTENANCE_DD_STATE_UPDATE_FAILED"; return false; }
-            if (!dd_wallet->RecordPaymasterSendHistory(tx->GetHash(), leg.history_recipient, leg.history_amount.value,
-                    error, comment == leg.metadata.end() ? std::string{} : comment->second, leg.multiple_recipients)) return false;
+            if (!RecordMaintenanceSendHistory(wallet, tx->GetHash(), history, error)) return false;
         }
     }
     // Pool and budget transitions are one commit, including both retirement

@@ -4942,6 +4942,10 @@ BOOST_AUTO_TEST_CASE(carrier_withdrawal_stale_fee_input_does_not_fence_provider)
             dd_wallet->ProcessTransactionForDD(*transaction, *executed.txid);
             size_t recovered{0};
             BOOST_REQUIRE_MESSAGE(paymaster_app::ReconcileProviderMaintenance(wallet, recovered, error), error);
+            BOOST_REQUIRE(WalletBatch{database}.ReadDDTransaction(*executed.txid, history));
+            BOOST_CHECK_EQUAL(history.amount, 200);
+            BOOST_CHECK_EQUAL(history.address, "multiple");
+            BOOST_CHECK_EQUAL(history.comment, "Paymaster carrier excess withdrawal");
             BOOST_CHECK_EQUAL(dd_wallet->GetTotalDDBalance(), 200);
             BOOST_CHECK_EQUAL(dd_wallet->GetSpendableDDBalance(), 100);
             BOOST_CHECK_EQUAL(dd_wallet->GetPendingDDBalance(), 0);
@@ -5018,6 +5022,10 @@ BOOST_AUTO_TEST_CASE(carrier_refill_preserves_multiple_outputs_and_send_history_
     dd_wallet->ProcessTransactionForDD(*transaction, txid);
     size_t recovered{0};
     BOOST_REQUIRE_MESSAGE(paymaster_app::ReconcileProviderMaintenance(wallet, recovered, error), error);
+    BOOST_REQUIRE(batch.ReadDDTransaction(txid, history));
+    BOOST_CHECK_EQUAL(history.amount, 200);
+    BOOST_CHECK_EQUAL(history.address, "multiple");
+    BOOST_CHECK_EQUAL(history.comment, "Paymaster automatic carrier replenishment");
     BOOST_REQUIRE(batch.ReadPaymasterProviderPool(pool));
     BOOST_CHECK_EQUAL(paymaster_app::CountLiquiditySlots(pool, PoolPurpose::ADMISSION, PoolAsset::DD_CARRIER, 2).ready, 2U);
     BOOST_CHECK_EQUAL(dd_wallet->GetTotalDDBalance(), 200);
@@ -5032,6 +5040,156 @@ BOOST_AUTO_TEST_CASE(carrier_refill_preserves_multiple_outputs_and_send_history_
         BOOST_CHECK(submission.relay);
         BOOST_CHECK(wallet.mapWallet.count(submission.tx->GetHash()) != 0);
         BOOST_CHECK(submission.tx->GetWitnessHash() == wallet.mapWallet.at(submission.tx->GetHash()).tx->GetWitnessHash());
+    }
+}
+
+BOOST_AUTO_TEST_CASE(finite_carrier_history_survives_reconciliation_restart_and_write_retry)
+{
+    ScopedPaymasterMockTime clock{2000};
+    SyncWithValidationInterfaceQueue();
+    for (const size_t output_count : {1U, 2U}) {
+        for (const bool fail_history_write : {false, true}) {
+            PaymasterBroadcastChain broadcast_chain{*m_node.chain};
+            CWallet wallet{&broadcast_chain, "finite-carrier-history", CreateMockableWalletDatabase()};
+            BOOST_REQUIRE(wallet.LoadWallet() == DBErrors::LOAD_OK);
+            LOCK(wallet.cs_wallet);
+            wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+            wallet.SetupDescriptorScriptPubKeyMans();
+            wallet.SetLastBlockProcessed(100, Params().GenesisBlock().GetHash());
+            wallet.SetBroadcastTransactions(true);
+            wallet.EnsureDDWallet();
+            auto* dd_wallet = wallet.GetDDWallet();
+            BOOST_REQUIRE(dd_wallet);
+            ProviderIdentityRecord identity;
+            std::string error;
+            BOOST_REQUIRE(CreatePaymasterIdentity(wallet, "Finite carrier history", 1000, identity, error));
+            ProviderLiquidityPolicy policy;
+            policy.maximum_maintenance_fee_per_transaction = DGBSatoshis{20000000};
+            policy.maximum_maintenance_fee_per_hour = DGBSatoshis{40000000};
+            policy.maximum_maintenance_fee_per_day = DGBSatoshis{60000000};
+            policy.updated_at = 1000;
+            ApproveRefillExecution(wallet, policy, FundingModel::USER_PAID);
+            CMutableTransaction funding;
+            funding.vin.emplace_back(COutPoint{uint256::ONE, 0});
+            funding.vout.emplace_back(COIN, identity.identity_script);
+            funding.vout.emplace_back(0, identity.identity_script);
+            BOOST_REQUIRE(wallet.AddToWallet(MakeTransactionRef(funding),
+                TxStateConfirmed{Params().GenesisBlock().GetHash(), 1, 0}));
+            const CAmount total = 100 * static_cast<CAmount>(output_count);
+            const COutPoint source{funding.GetHash(), 1};
+            dd_wallet->AddDDUTXO(source, total);
+            WalletBatch batch{wallet.GetDatabase()};
+            BOOST_REQUIRE(batch.WriteDDUTXO(source, total));
+            ProviderMaintenanceRecord operation;
+            operation.operation_id = GetRandHash();
+            operation.plan_id = GetRandHash();
+            operation.kind = ProviderMaintenanceKind::PREPARE_CARRIER;
+            operation.maximum_fee = DGBSatoshis{20000000};
+            operation.preparation_authorization = paymaster_app::PoolPreparationAuthorization(wallet);
+            operation.preparation_request = GetRandHash();
+            operation.created_at = operation.updated_at = 1000;
+            std::vector<std::pair<CDigiDollarAddress, CAmount>> recipients;
+            for (size_t index{0}; index < output_count; ++index) {
+                const auto destination = wallet.GetNewDestination(OutputType::BECH32M, "Finite carrier");
+                BOOST_REQUIRE(destination);
+                ProviderMaintenanceOutput output;
+                output.asset = PoolAsset::DD_CARRIER;
+                output.script_pub_key = GetScriptForDestination(*destination);
+                output.carrier_value = DDCents{100};
+                operation.outputs.push_back(output);
+                recipients.emplace_back(CDigiDollarAddress{EncodeDigiDollarAddress(*destination)}, 100);
+            }
+            ProviderMaintenanceLedger ledger;
+            ledger.accounting_time_high_water = 1000;
+            ledger.records = {operation};
+            BOOST_REQUIRE(batch.WritePaymasterMaintenanceLedger(ledger));
+            DDTransferPlan plan;
+            BOOST_REQUIRE_MESSAGE(dd_wallet->PlanFundedDigiDollarTransfer(recipients, plan, error), error);
+            const paymaster_app::DDMaintenanceTransfer transfer{plan, operation.outputs.front().script_pub_key,
+                "Paymaster carrier pool", output_count > 1};
+            auto& database = GetMockableDatabase(wallet);
+            DataStream history_prefix;
+            history_prefix << DBKeys::DD_TRANSACTION;
+            const auto refuse_history = [&](Span<const std::byte> key) {
+                return key.size() >= history_prefix.size() &&
+                    std::equal(history_prefix.begin(), history_prefix.end(), key.begin());
+            };
+            if (fail_history_write) database.m_refuse_write = refuse_history;
+            std::vector<paymaster_app::ProviderMaintenanceTransaction> transactions;
+            const bool executed = paymaster_app::ExecuteProviderMaintenanceTransactions(wallet,
+                paymaster_app::FiniteSetupMaintenanceAuthority{operation}, {transfer}, transactions, error);
+            database.m_refuse_write = {};
+            BOOST_CHECK_EQUAL(executed, !fail_history_write);
+
+            const auto check_history = [&](CWallet& current, const uint256& txid) {
+                DDTransaction history;
+                BOOST_REQUIRE(WalletBatch{current.GetDatabase()}.ReadDDTransaction(txid, history));
+                BOOST_CHECK_EQUAL(history.amount, total);
+                BOOST_CHECK_EQUAL(history.category, "send");
+                BOOST_CHECK(!history.incoming);
+                BOOST_CHECK_EQUAL(history.comment, "Paymaster carrier pool");
+                BOOST_CHECK_EQUAL(history.address, output_count > 1 ? "multiple" : recipients.front().first.ToString());
+                const auto in_memory = current.GetDDWallet()->GetDDTransactionHistory();
+                BOOST_REQUIRE_EQUAL(std::count_if(in_memory.begin(), in_memory.end(), [&](const auto& row) {
+                    return row.txid == txid.GetHex() && row.category == "send" && !row.incoming &&
+                        row.amount == history.amount && row.address == history.address && row.comment == history.comment;
+                }), 1);
+            };
+            if (!fail_history_write) {
+                BOOST_REQUIRE_EQUAL(transactions.size(), 1U);
+                check_history(wallet, transactions.front().transaction->GetHash());
+            } else {
+                PaymasterMaintenanceExecution pending;
+                BOOST_REQUIRE(batch.ReadPaymasterMaintenanceExecutionWithStatus(pending) == DatabaseReadStatus::FOUND);
+                BOOST_CHECK(!CheckPaymasterProviderRestoreGuard(wallet, error));
+            }
+            // Reopen both a completed execution and one interrupted while
+            // writing DD history. Replay uses the same immutable signed bytes.
+            CWallet reopened{&broadcast_chain, "finite-carrier-history-reopen", DuplicateMockDatabase(database)};
+            BOOST_REQUIRE(reopened.LoadWallet() == DBErrors::LOAD_OK);
+            LOCK(reopened.cs_wallet);
+            reopened.SetLastBlockProcessed(100, Params().GenesisBlock().GetHash());
+            reopened.SetBroadcastTransactions(true);
+            reopened.EnsureDDWallet();
+            BOOST_REQUIRE_MESSAGE(paymaster_app::ResumeProviderMaintenanceTransactions(reopened, error), error);
+            WalletBatch reopened_batch{reopened.GetDatabase()};
+            BOOST_REQUIRE(reopened_batch.ReadPaymasterMaintenanceLedger(ledger));
+            BOOST_REQUIRE_EQUAL(ledger.records.size(), 1U);
+            const uint256 txid = ledger.records.front().transaction_id;
+            check_history(reopened, txid);
+            size_t recovered{0};
+            BOOST_REQUIRE_MESSAGE(paymaster_app::ReconcileProviderMaintenance(reopened, recovered, error), error);
+            check_history(reopened, txid);
+            reopened.mapWallet.at(txid).m_state = TxStateConfirmed{Params().GenesisBlock().GetHash(), 1, 0};
+            BOOST_REQUIRE(reopened_batch.WriteTx(reopened.mapWallet.at(txid)));
+            reopened.GetDDWallet()->ProcessTransactionForDD(*reopened.mapWallet.at(txid).tx, txid);
+            BOOST_REQUIRE_MESSAGE(paymaster_app::ReconcileProviderMaintenance(reopened, recovered, error), error);
+            check_history(reopened, txid);
+            // Repair the exact historical bug, including a failed repair write.
+            // A saved amount/address is not authority for the next reconstruction.
+            if (output_count > 1) {
+                BOOST_REQUIRE(reopened.GetDDWallet()->RecordPaymasterSendHistory(txid,
+                    operation.outputs.front().script_pub_key, total, error, "Paymaster carrier pool", false));
+                auto& reopened_database = GetMockableDatabase(reopened);
+                reopened_database.m_refuse_write = refuse_history;
+                BOOST_CHECK(!paymaster_app::ReconcileProviderMaintenance(reopened, recovered, error));
+                DDTransaction unchanged;
+                BOOST_REQUIRE(reopened_batch.ReadDDTransaction(txid, unchanged));
+                BOOST_CHECK(unchanged.address != "multiple");
+                reopened_database.m_refuse_write = {};
+                BOOST_REQUIRE_MESSAGE(paymaster_app::ReconcileProviderMaintenance(reopened, recovered, error), error);
+                check_history(reopened, txid);
+            }
+            BOOST_REQUIRE_MESSAGE(CheckPaymasterProviderRestoreGuard(reopened, error), error);
+            BOOST_CHECK_EQUAL(reopened.mapWallet.size(), 2U);
+            CWallet confirmed_reopened{&broadcast_chain, "finite-carrier-confirmed-reopen", DuplicateMockDatabase(reopened.GetDatabase())};
+            BOOST_REQUIRE(confirmed_reopened.LoadWallet() == DBErrors::LOAD_OK);
+            LOCK(confirmed_reopened.cs_wallet);
+            confirmed_reopened.SetLastBlockProcessed(100, Params().GenesisBlock().GetHash());
+            confirmed_reopened.EnsureDDWallet();
+            BOOST_REQUIRE_MESSAGE(paymaster_app::ReconcileProviderMaintenance(confirmed_reopened, recovered, error), error);
+            check_history(confirmed_reopened, txid);
+        }
     }
 }
 
