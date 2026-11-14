@@ -4,7 +4,51 @@ There is **no complete current-revision release certification** in this record.
 The candidate below and historical checkpoints identify actual verification;
 implemented behavior alone does not establish release acceptance.
 
-## Current observations, maintenance history and durable client execution
+## Persistence, capacity lifetime and concurrent preparation (2026-11-15)
+
+Review baseline: `3ae51315d43a5e023f20fdca6173f2ff0f4d384f`; code through
+`06354d94ec31ea14fd244a5f1e0a333d2e5619e6`. AP1-AP5 now share exact native persistence,
+retain unsigned resource promises until proof expiry, continue admitted drain
+work, project sponsored-only setup fees consistently and atomically bind client
+orders/attempt preparation. Follow-up controls reject backdated resource reuse
+and restore idempotent DD history/UTXO bookkeeping after native write failure.
+
+| Actual local check | Result and scope |
+| --- | --- |
+| Native | **81 selected cases, 6428 assertions, exit 0**, final exclusive run; Boost seed `20261114` and fixed random context seed. Includes native write/reload/corruption, normal/recovery closure, delayed cleanup, V5/V6 checkpoint failures, backdated proof requests, drain/replay/fairness, concurrent order/rollback/sweep and DD maintenance/history. |
+| Qt | **25 data rows**, exit 0: `paymasterOfferPolicyTypedValues` (12) and `paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep` (13), Windows/Fusion. Init/cleanup are excluded from that count. |
+| Compilation | **18 changed units freshly compiled** (15 native, 3 Qt), MSVC 14.43.34808, `/W3 /WX /Od /MT /std:c++20`; source/object hashes match. All **13 changed production units** pass C++17 `/Zs`. These are isolated partial links with retained dependencies. |
+| Local controls | Working-tree dependency/cycle check, trusted-base boundary comparison, six boundary fixtures, change-record JSON and working-tree/range/individual-commit whitespace checks pass. No boundary policy or checkpoint guard was relaxed. |
+
+Native SHA256: `72fc2759eda4f5ecda537ca0ec24dd09721fb72dda1ab4c4726ac32123e2da69`.
+Qt SHA256: `a64f3197d723f089eab59bb8877bfd27814e55333576cc650db2dbc78f96b479`.
+Exact selections, commands, logs, source/object hashes and syntax checks are
+retained locally under `.ai/implement-review-3ae/` and
+`.ai/implement-review-3ae-qt/`, including `final-selection.txt`, `runs.jsonl`,
+`compiled.jsonl` and `verification.json`. Tests use isolated wallets/data and
+short temporary paths. The remaining 648 registered native cases were not run in the final selection.
+
+Initial failures remain recorded. Baseline runs reproduce obsolete prerequisites
+in the existing maintenance/service tests and shared capacity-lifecycle fixture.
+Their setup now supplies approved ledger state, sufficient slot value, the real
+genesis and complete admission inventory for the requested user-paid model;
+existing lock, readiness, replay and checkpoint assertions remain enforced.
+One intermediate concurrent native/Qt run failed the cleanup test with
+`PAYMASTER_DATABASE_COMMIT`. That case passes separately and in the final
+exclusive selection; the intermittent cause remains undiagnosed. It is not
+counted as resolved release evidence. Early fixture/probe/link/filter diagnostics
+are retained too; none justified relaxing validation or checkpoint checks.
+
+The repository AGENTS/CLAUDE reading order, contribution/architecture/source maps,
+developer notes and Paymaster boundary/reuse/checkpoint rules governed this work.
+No shared-Core or boundary-list expansion was needed. Clean daemon/GUI builds,
+end-to-end concurrent RPC and restart-to-payment functional tests, full suites,
+sanitizers, Tidy/plugin and platform matrices were **not run**; they remain
+operator/release gates in the [runbook](digidollar-paymaster-testing.md).
+The local order concurrency test proves its mutation contract, not the exact old
+pre-selection interleaving or complete transport concurrency.
+
+## Previous observations, maintenance history and durable client execution
 
 AP1–AP5 following review of `b63b5ccd604fce1b7fdbf8d72c397b8c973ec1be`,
 verified in the uncommitted worktree on 2026-11-14. Contracts are in the

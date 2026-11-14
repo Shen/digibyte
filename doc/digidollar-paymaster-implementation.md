@@ -163,8 +163,21 @@ Provider-only closure uses `CloseProviderAttempt` (including
 `CloseExpiredProviderRecovery`. `ValidateProviderUnsignedAttempt` and
 `ValidateProviderUnsignedRecovery` authenticate the local identity, saved terms,
 manifest and any USER-signed PSBT, then `ReleaseProviderUnsignedBindings`
-atomically releases only the exact provider pool and budget bindings. Normal
-`USER_SIGNED` expiry uses the quote deadline; `USER_PSBT_ACCEPTED` uses
+atomically releases the exact budget binding. The pool inputs remain `RESERVED`
+under the same commit key until the original signed capacity proof expires:
+closing an unsigned quote cannot revoke that proof's resource exclusivity.
+Capacity cleanup re-authenticates the closed owner and its unsigned authority,
+then releases only that remaining hold before compacting the proof cache. A
+closed owner may outlive pruned released-budget history; any nonreleased budget
+row still vetoes release.
+
+Fresh proof selection also requires the request's start time to be at or after
+the resource's last availability update. This prevents a delayed or clock-skewed
+request from backdating the next proof into the old proof's window. Requests
+without an eligible resource defer without a signature or persisted admission;
+exact authenticated cached replies retain their original bytes.
+
+Normal `USER_SIGNED` expiry uses the quote deadline; `USER_PSBT_ACCEPTED` uses
 `retry_until`. Recovery uses the earlier response/capacity deadline and retains
 its USER-signed bytes with `expired=true`. A valid USER-only receipt or an
 authenticated negative terminal result without a final permits provider closure;
@@ -176,6 +189,10 @@ Provider closure and unsigned pruning require the restore guard to pass before
 any release. A quarantined snapshot cannot prove absence of an external signature.
 Repeated submits after local cancellation without a wire result receive a terminal
 rejection; an authenticated saved negative result keeps its exact replay path.
+Automatic `DRAIN_ONLY` dispatch continues admitted quotes, recovery requests and
+exact cached capacity replies through `CONTINUING_ONLY`. Fresh capacity stays
+deferred without changing runtime intent. Unlock, restore, policy, budget and
+index gates still apply to each continuation; a scheduler state grants no spend.
 
 The persisted quote is authenticated again before acceptance or signing through
 `DecodePaymasterAuthorizationArtifacts`, shared with provider execution and
@@ -579,6 +596,13 @@ manifest time rule and session binding; local availability failures preserve the
 final for retry, while permanent failures retain evidence in a conflict state.
 Startup uses nonblocking index checks. Neither entry point renews authorization
 or permits safety-depth pruning.
+`PersistExactPaymasterWalletTransaction` is shared by exact final insertion,
+confirmed-payment observation and native maintenance replay. It compares the
+complete current native wallet record with a readable database row, writing it
+when absent or different. A failed native write can leave memory behind; neither
+that entry nor its Paymaster marker establishes durability. Unreadable native
+rows retain retryable failure. Initialized DD wallets also repeat idempotent DD
+tracking before completion, including after a failed first insertion.
 Historical execution uses the recorded acceptance time if the local clock has
 rolled back; fresh authorization keeps its current-time gate. Typed local mempool
 policy failures remain retryable for durable finals. A failed broadcast gets a
@@ -719,6 +743,10 @@ amounts; display-only thousands grouping never enters numeric export columns.
 Qt policy defaults and resets read the same `SetupDefaultPolicy` proposal as the
 CLI. A numeric policy reset preserves the selected funding model; restoring the
 funding model is a separate action.
+Edited CLI, guided Qt and manual Qt proposals share
+`ProjectSetupProviderPolicy`: sponsored-only proposals zero both inactive
+user-paid fee fields while preserving the editable draft. Saved unrepresentable
+policies retain their explicit replacement workflow; raw RPC validation is strict.
 
 Pool-preparation request bindings now hash typed recovery mappings with the local
 `Pool Request v2` tag, independent of JSON formatting. This is a local preview/replay

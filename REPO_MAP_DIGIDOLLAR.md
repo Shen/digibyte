@@ -933,6 +933,11 @@ acceptance; local failures retain the reply for retry.
 `LoadClientPaymentReplay` in `paymasterclient.cpp` binds the original order before
 preparation effects; `SelectCreatedClientPaymentInputs` rechecks its original
 inputs for both ordinary payments and sweeps.
+`SelectOrJoinClientPaymentOrder` keeps final replay lookup, ordinary input
+selection and immutable order creation under one wallet lock. Attempt creation
+rechecks current session authority after transport acquisition; local capacity
+and quote-request mutations also reload their saved attempt. Network operations
+and chain/index waits stay outside these local mutations.
 `ListClientSessionPage` uses `ListPaymasterSessionsPage` and
 `PaymasterStore::ListClientSessionsPage` for bounded raw rows/bytes before
 filtering. Summary views expose refresh only; detail reads retain complete

@@ -46,6 +46,31 @@ these targeted controls does not establish repository-wide strict C++17 support.
 
 Authorization and serving regressions (after rebuilding the selected tests):
 
+Native write recovery includes first-insert and state-update failures followed by
+an unchanged pool observation, corrupt native-row reads and exact witness/metadata
+reload. Run `durable_client_final_executor_revalidates_authority_and_replays_exact_payment`
+and `durable_observation_skips_only_unchanged_wallet_state` in
+`paymaster_wallet_security_tests`. For capacity lifetime, run
+`provider_unsigned_close_preserves_bindings_and_is_atomic` and
+`provider_user_only_recovery_expiry_is_atomic_and_cannot_resurrect`; these separate
+budget release from physical holds, including failed commit, restart and delayed
+cleanup after budget-history pruning.
+The identity-suite `capacity_proof_is_signed_from_exact_available_operational_slot`
+and its V5 counterpart additionally reject backdated resource reuse without
+storage changes, then accept a fresh request after release.
+
+Drain dispatch cases are `drain_restart_replays_admitted_capacity_without_new_admission`,
+`continuing_capacity_replay_preserves_promoted_quote` and
+`deferred_capacity_preserves_request_and_yields_next_turn` in that suite.
+`paymaster_application_tests/client_order_selection_and_join_are_atomic_and_keep_original_inputs`
+starts a second caller during the first order mutation, then checks reserved-input
+join and begin/write/commit rollback. It tests the local atomic contract; it does
+not reproduce the old pre-selection interleaving or replace an end-to-end
+concurrent RPC/transport run. The adjacent CREATED-order case covers sweep replay
+with later funds. Run `paymaster_setup_tests` and Qt
+`paymasterOfferPolicyTypedValues` for sponsored-only proposal projection and
+retained fee drafts. Clean daemon functional checks remain separate release work.
+
 ```powershell
 & ./build_msvc/x64/Release/test_digibyte.exe '--run_test=paymaster_provider_tests:paymaster_setup_tests:paymaster_wallet_psbt_tests:paymaster_wallet_store_tests/client_attempt_artifacts_and_authorization_are_append_only_and_atomic,unsigned_client_cleanup*,unsigned_client_cancel_failures_and_lost_reply_preserve_input_ownership:paymaster_wallet_security_tests/provider_pre_signature_firewall_reloads_capacity_pool_and_budget,provider_user_authorization_honors_exact_reserved_safety_binding,deferred_capacity_preserves_request_and_yields_next_turn,quote_prevout_lookup_failure_preserves_local_authority,provider_recovery_pre_signature_firewall_reloads_pool_and_budget:netbase_tests' --report_level=detailed
 ```
