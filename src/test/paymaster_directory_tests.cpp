@@ -9,6 +9,7 @@
 #include <key.h>
 #include <netbase.h>
 #include <paymaster/directory.h>
+#include <streams.h>
 #include <test/util/setup_common.h>
 
 #include <array>
@@ -98,6 +99,51 @@ BOOST_AUTO_TEST_CASE(validates_signed_envelope_and_monotonic_replacement)
     BOOST_CHECK(!directory.AcceptsSequence(provider_id, 2));
     BOOST_CHECK(directory.AcceptsSequence(provider_id, 3));
     BOOST_CHECK_EQUAL(directory.Size(), 1U);
+}
+
+BOOST_AUTO_TEST_CASE(announcement_wire_size_and_name_are_bounded_before_intake)
+{
+    CKey key;
+    key.MakeNewKey(true);
+    auto announcement = SignedAnnouncement(key, uint256::ONE, 1, 100000);
+    std::string error;
+    BOOST_REQUIRE(ValidateAnnouncementSize(announcement, error));
+    const auto small = announcement;
+    CMutableTransaction parent;
+    parent.vin.resize(250);
+    for (auto& input : parent.vin) input.scriptWitness.stack = {std::vector<unsigned char>(64)};
+    parent.vout.resize(3);
+    for (auto& output : parent.vout) output = CTxOut{10000000, CScript{} << OP_1 << std::vector<unsigned char>(32, 1)};
+    for (auto& slot : announcement.admission_slots) slot.dgb_creating_tx = parent;
+    BOOST_CHECK_GT(GetSerializeSize(announcement), MAX_ANNOUNCEMENT_BYTES);
+    BOOST_CHECK(!ValidateAnnouncementSize(announcement, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_ANNOUNCEMENT_TOO_LARGE");
+    BOOST_CHECK(!ValidateAnnouncementEnvelope(announcement, uint256::ONE, 100000, error));
+
+    announcement = small;
+    auto& padding = announcement.admission_slots.front().dgb_creating_tx.vin.emplace_back().scriptSig;
+    padding.resize(MAX_ANNOUNCEMENT_BYTES - GetSerializeSize(announcement) - 4);
+    while (GetSerializeSize(announcement) < MAX_ANNOUNCEMENT_BYTES) padding.push_back(OP_0);
+    BOOST_REQUIRE_EQUAL(GetSerializeSize(announcement), MAX_ANNOUNCEMENT_BYTES);
+    BOOST_CHECK(ValidateAnnouncementSize(announcement, error));
+    padding.push_back(OP_0);
+    BOOST_CHECK(!ValidateAnnouncementSize(announcement, error));
+    for (const uint64_t length : {uint64_t{33}, uint64_t{65536}, uint64_t{0x02000000}}) {
+        CDataStream truncated{SER_NETWORK, ::PROTOCOL_VERSION};
+        truncated << small.version << small.genesis_hash << small.identity_key;
+        WriteCompactSize(truncated, length);
+        Announcement decoded;
+        BOOST_CHECK_THROW(truncated >> decoded, std::ios_base::failure);
+        BOOST_CHECK_LE(decoded.display_name.capacity(), MAX_PAYMASTER_DISPLAY_NAME_BYTES);
+    }
+    CDataStream encoded{SER_NETWORK, ::PROTOCOL_VERSION};
+    encoded << small;
+    const std::vector<unsigned char> bytes{MakeUCharSpan(encoded).begin(), MakeUCharSpan(encoded).end()};
+    Announcement decoded;
+    encoded >> decoded;
+    CDataStream roundtrip{SER_NETWORK, ::PROTOCOL_VERSION};
+    roundtrip << decoded;
+    BOOST_CHECK(std::vector<unsigned char>(MakeUCharSpan(roundtrip).begin(), MakeUCharSpan(roundtrip).end()) == bytes);
 }
 
 BOOST_AUTO_TEST_CASE(rejects_sponsored_offer_with_fee)

@@ -4335,7 +4335,7 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
     if (msg_type == NetMsgType::PMANNOUNCE) {
         if (!peer->m_paymaster_negotiated || !m_opts.paymaster ||
             !IsPaymasterP2PActive(m_chainman) ||
-            vRecv.size() > 64 * 1024) return;
+            vRecv.size() > DigiDollar::Paymaster::MAX_ANNOUNCEMENT_BYTES) return;
         const int64_t now = GetTime();
         if (!m_opts.paymaster->AdmitAnnouncementTransport(
                 pfrom.GetId(), pfrom.nKeyedNetGroup, now)) return;

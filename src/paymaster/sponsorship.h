@@ -47,7 +47,7 @@ struct RestrictedServiceDescriptor {
         READWRITE(obj.version, obj.genesis_hash, obj.provider_id,
                   WithParams(CNetAddr::V2, obj.p2p_endpoint), obj.offer_id,
                   obj.policy_hash, obj.sponsor_authorization_key,
-                  obj.sponsor_display_name, obj.authorization_scheme,
+                  LIMITED_STRING(obj.sponsor_display_name, MAX_PAYMASTER_DISPLAY_NAME_BYTES), obj.authorization_scheme,
                   obj.expires_at, obj.admission_sequence,
                   obj.min_confirmations, obj.minimum_liquidity_proof,
                   obj.provider_identity_signature);

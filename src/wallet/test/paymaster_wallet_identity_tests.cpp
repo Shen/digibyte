@@ -11,6 +11,7 @@
 #include <index/txindex.h>
 #include <interfaces/chain.h>
 #include <key.h>
+#include <netbase.h>
 #include <paymaster/directory.h>
 #include <paymaster/error.h>
 #include <paymaster/manager.h>
@@ -1142,6 +1143,51 @@ BOOST_AUTO_TEST_CASE(paymaster_input_scan_reuses_pool_without_cross_scan_cache)
         BOOST_CHECK(scan.IsReserved(reservation.outpoint));
         BOOST_CHECK(!scan.IsReserved(COutPoint{uint256::ONE, 511}));
     }
+}
+
+BOOST_AUTO_TEST_CASE(announcement_builder_rejects_large_admission_parents_before_publication)
+{
+    CWallet wallet{m_node.chain.get(), "large-admission", CreateMockableWalletDatabase()};
+    LOCK(wallet.cs_wallet);
+    wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+    wallet.SetupDescriptorScriptPubKeyMans();
+    ProviderIdentityRecord identity;
+    std::string error;
+    BOOST_REQUIRE(CreatePaymasterIdentity(wallet, "Large admission", 1000, identity, error));
+    ProviderPolicy policy;
+    policy.funding_models = FUNDING_MODEL_SPONSORED;
+    policy.fee_rate_bps = 0;
+    policy.min_payment = DDCents{100};
+    policy.max_payment = DDCents{MAX_DD_OUTPUT_CENTS};
+    policy.maximum_network_fee = DGBSatoshis{MIN_PAYMASTER_TX_FEE};
+    BOOST_REQUIRE_MESSAGE(ValidateProviderPolicy(policy, error), error);
+    CMutableTransaction parent;
+    for (uint32_t i{0}; i < 250; ++i) {
+        parent.vin.emplace_back(COutPoint{uint256::ONE, i});
+        parent.vin.back().scriptWitness.stack = {std::vector<unsigned char>(64)};
+    }
+    for (size_t i{0}; i < REQUIRED_ADMISSION_SLOTS; ++i)
+        parent.vout.emplace_back(MIN_ADMISSION_DGB_SATOSHIS, identity.identity_script);
+    const auto transaction = MakeTransactionRef(parent);
+    BOOST_REQUIRE(wallet.AddToWallet(transaction, TxStateInactive{}));
+    std::vector<ProviderPoolEntry> pool;
+    for (uint32_t i{0}; i < REQUIRED_ADMISSION_SLOTS; ++i) {
+        ProviderPoolEntry entry;
+        entry.outpoint = COutPoint{transaction->GetHash(), i};
+        entry.purpose = PoolPurpose::ADMISSION;
+        entry.asset = PoolAsset::DGB;
+        entry.script_pub_key = identity.identity_script;
+        entry.dgb_value = DGBSatoshis{MIN_ADMISSION_DGB_SATOSHIS};
+        entry.confirmation_height = 1;
+        entry.updated_at = 1000;
+        pool.push_back(entry);
+    }
+    Announcement announcement;
+    BOOST_CHECK(!BuildPaymasterAnnouncement(wallet, identity, policy, pool,
+        LookupNumeric("8.8.8.8:12024", 0), Params().GenesisBlock().GetHash(), uint256::ONE,
+        1000, FUNDING_MODEL_SPONSORED, announcement, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_ANNOUNCEMENT_TOO_LARGE");
+    BOOST_CHECK_GT(GetSerializeSize(announcement), MAX_ANNOUNCEMENT_BYTES);
 }
 
 BOOST_AUTO_TEST_CASE(legacy_wallet_is_rejected)

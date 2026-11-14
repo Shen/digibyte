@@ -2857,6 +2857,7 @@ bool BuildPaymasterAnnouncement(CWallet& wallet,
         announcement.admission_slots.push_back(std::move(slot));
     }
     announcement.identity_signature.resize(64);
+    if (!ValidateAnnouncementSize(announcement, error)) return false;
     if (!identity_key.SignSchnorr(GetAnnouncementSignatureHash(announcement),
                                   announcement.identity_signature, nullptr, GetRandHash())) {
         error = "PAYMASTER_ANNOUNCEMENT_SIGNING_FAILED";

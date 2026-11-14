@@ -40,6 +40,12 @@ total. Sweep uses spendable, unreserved inputs and the same authorization rules.
 
 ## Protocol sequence
 
+Announcements have one 64-KiB serialized byte ceiling, enforced by construction,
+publication and peer intake. Funding parents are included in that ceiling;
+oversized admission proofs report `PAYMASTER_ANNOUNCEMENT_TOO_LARGE` and cannot
+start or refresh an active public offer. No automatic consolidation spend is
+authorized by this failure. Display names are bounded before decoder allocation.
+
 Authenticated Direct enqueue retains the local Core onion-transport
 classification. High-privacy recovery uses that observation, including for
 loopback onion forwarding and processing after disconnect. Unknown arrival

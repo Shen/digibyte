@@ -329,7 +329,7 @@ struct ProviderIdentityRecord {
     SERIALIZE_METHODS(ProviderIdentityRecord, obj)
     {
         READWRITE(obj.version, obj.provider_id, obj.identity_key,
-                  obj.identity_script, obj.display_name, obj.created_at);
+                  obj.identity_script, LIMITED_STRING(obj.display_name, MAX_PAYMASTER_DISPLAY_NAME_BYTES), obj.created_at);
     }
 };
 

@@ -68,12 +68,22 @@ uint256 GetAnnouncementSignatureHash(const Announcement& announcement)
     return hasher.GetSHA256();
 }
 
+bool ValidateAnnouncementSize(const Announcement& announcement, std::string& error)
+{
+    if (GetSerializeSize(announcement) > MAX_ANNOUNCEMENT_BYTES) {
+        error = "PAYMASTER_ANNOUNCEMENT_TOO_LARGE";
+        return false;
+    }
+    return true;
+}
+
 bool ValidateAnnouncementEnvelope(const Announcement& announcement,
                                   const uint256& expected_genesis,
                                   int64_t now,
                                   std::string& error,
                                   bool allow_local_endpoint)
 {
+    if (!ValidateAnnouncementSize(announcement, error)) return false;
     if (announcement.version != PROTOCOL_VERSION || announcement.genesis_hash != expected_genesis) {
         error = "PAYMASTER_WRONG_PROTOCOL_OR_CHAIN";
         return false;

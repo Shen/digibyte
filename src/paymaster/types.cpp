@@ -133,7 +133,7 @@ bool IsCanonicalRequestId(std::string_view request_id)
 
 bool IsValidPaymasterDisplayName(std::string_view display_name)
 {
-    if (display_name.size() > 32) return false;
+    if (display_name.size() > MAX_PAYMASTER_DISPLAY_NAME_BYTES) return false;
     for (const unsigned char c : display_name) {
         if (c < 0x20 || c > 0x7e || c == '/' || c == '@') return false;
     }

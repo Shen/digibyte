@@ -23,6 +23,8 @@ class CService;
 
 namespace DigiDollar::Paymaster {
 
+static constexpr size_t MAX_PAYMASTER_DISPLAY_NAME_BYTES{32};
+
 /** Preserve vector wire bytes while rejecting a domain count before any
  * element allocation. Envelope validation still checks shape and authority. */
 template <size_t Limit>

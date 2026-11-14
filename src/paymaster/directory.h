@@ -23,6 +23,7 @@
 namespace DigiDollar::Paymaster {
 
 static constexpr size_t MAX_DIRECTORY_ENTRIES{256};
+static constexpr size_t MAX_ANNOUNCEMENT_BYTES{64 * 1024};
 static constexpr size_t MAX_ANNOUNCEMENT_OFFERS{4};
 static constexpr size_t REQUIRED_ADMISSION_SLOTS{3};
 static constexpr int64_t MIN_ADMISSION_DGB_SATOSHIS{10000000};
@@ -83,7 +84,8 @@ struct Announcement {
 
     SERIALIZE_METHODS(Announcement, obj)
     {
-        READWRITE(obj.version, obj.genesis_hash, obj.identity_key, obj.display_name,
+        READWRITE(obj.version, obj.genesis_hash, obj.identity_key,
+                  LIMITED_STRING(obj.display_name, MAX_PAYMASTER_DISPLAY_NAME_BYTES),
                   obj.sequence, obj.created_at, obj.expires_at,
                   WithParams(CNetAddr::V2, obj.endpoint), Using<BoundedVectorFormatter<MAX_ANNOUNCEMENT_OFFERS>>(obj.offers),
                   obj.min_confirmations, obj.capability_flags, Using<BoundedVectorFormatter<REQUIRED_ADMISSION_SLOTS>>(obj.admission_slots));
@@ -97,6 +99,8 @@ struct Announcement {
 };
 
 PaymasterId GetPaymasterId(const XOnlyPubKey& identity_key);
+/** Publisher and receiver share the exact serialized envelope limit. */
+bool ValidateAnnouncementSize(const Announcement& announcement, std::string& error);
 uint256 GetAnnouncementSignatureHash(const Announcement& announcement);
 bool ValidateAnnouncementEnvelope(const Announcement& announcement,
                                   const uint256& expected_genesis,
