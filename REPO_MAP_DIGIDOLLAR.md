@@ -874,6 +874,11 @@ RPC requests. Finance caching and persistence are described in the
 [implementation guide](doc/digidollar-paymaster-implementation.md#derived-indexes-and-finance-storage).
 `paymasterapplication.cpp` owns bounded maintenance-history observation;
 `paymastermaintenancecache.h` exposes only wallet-lifetime cache teardown.
+`ExecuteDurableClientFinal` in `paymastertransactions.cpp`, declared beside the
+exact transaction APIs in `paymasterprovider.h`, shares durable client payment and
+recovery execution across result intake, retries and startup. The store's common
+broadcast validator remains the financial authority. Tip reconciliation schedules
+identities and rechecks current wallet observations at mutation and pruning.
 Inbound processing uses `ValidateAlternativeRecoverySubmitPayload` in
 `src/paymaster/recovery.cpp` after reconstructing trusted local state; the full
 validator retains chainstate checks. Permanent peer rejection and retained local
@@ -914,6 +919,9 @@ Begin/Resume/Complete bind its hash without relaxing the stale-clone fence.
 `PrepareMaintenanceAccounting`, `CheckMaintenanceExecutionState` and
 `CommitMaintenanceExecution` construct, validate and apply its exact transition
 without reconstructing or signing replacement work.
+Commit, native-journal replay and finite-carrier reconciliation share the
+maintenance-operation send-history description, including aggregate amounts,
+multiple recipients and comments.
 
 ### src/wallet/paymasterclientview*, paymasterrecoveryservice*
 

@@ -260,6 +260,17 @@ Recovery fee exposure is retained through the 240-confirmation reorganization
 safety depth. A winning original payment is accounted once. Retained exact
 commit evidence can validate historical execution after rolling ledger entries
 expire, without authorizing new work or recreating budget.
+Reconciliation notifications schedule exact transaction identities; fresh wallet
+observations under `cs_wallet` authorize state changes. Pruning checks those
+observations again and commits original recovery-fee release together with the
+tombstone and artifact deletion. Reorgs or failed writes retain both authority
+and exposure. Direct replay callers pass depth one to defer safety-depth pruning
+to tip reconciliation. Exact current stempool membership counts as accepted
+network presence, using the wallet's existing mempool/stempool semantics; it
+never supplies confirmation depth.
+Wallet callbacks may lag a reorg. Pruning also binds the wallet tip and confirmed
+block to the active chain and holds `cs_main` through the fee/tombstone commit.
+A stale wallet tip defers pruning without releasing signed authority or fees.
 
 Normal provider sessions and active alternative provider recoveries share an admission
 limit of 8,192 records. Exact existing retries do not consume another
@@ -454,6 +465,9 @@ commit/rebroadcast only those bytes without signing. Pool and budget changes are
 atomic; history and finance use their existing idempotent APIs. A wallet entry
 left in memory by a failed transaction write is persisted again before completion.
 The journal also protects every signed input from ordinary wallet selection.
+Initial commit, journal replay and finite-carrier reconciliation reconstruct the
+same send-history amount, recipient multiplicity and comment from the maintenance
+operation. Retirement uses its immutable execution-leg metadata.
 
 Only the immediately adjacent interrupted checkpoint commit can be repaired,
 with the same journal hash and an exact accounting snapshot. Completion erases
@@ -555,6 +569,21 @@ RPC and background callers invoke the same native services with typed inputs and
 results (`wallet/paymasterresults.h`). JSON encoding belongs to
 `wallet/rpc/paymaster_results.cpp`; session snapshots are captured before encoding.
 Financial guards remain inside those services, including restart/replay checks.
+`ExecuteDurableClientFinal` in `paymastertransactions.cpp` resumes normal and
+alternative-recovery finals after their durable commit, including explicit retries
+and startup. A txid only locates current authoritative records. The operation
+reloads exact bytes, calls `ValidateClientDurableFinalForBroadcast`, drains signed
+equivocation evidence, executes the existing exact preflight/broadcast path and
+reconciles a fresh observation. The store validator reuses the durable accepted
+manifest time rule and session binding; local availability failures preserve the
+final for retry, while permanent failures retain evidence in a conflict state.
+Startup uses nonblocking index checks. Neither entry point renews authorization
+or permits safety-depth pruning.
+Historical execution uses the recorded acceptance time if the local clock has
+rolled back; fresh authorization keeps its current-time gate. Typed local mempool
+policy failures remain retryable for durable finals. A failed broadcast gets a
+fresh canonical preflight before classification, preserving witness/consensus
+rejection while retaining exact authority through temporary policy changes.
 RPC and Qt preserve the [structured failure contract](digidollar-paymaster-integration.md#structured-execution-failures).
 Finance snapshots preserve pool and maintenance read statuses: an unreadable
 record is a failed observation, never an absent record or known zero capital.

@@ -4,6 +4,54 @@ There is **no complete current-revision release certification** in this record.
 The candidate below and historical checkpoints identify actual verification;
 implemented behavior alone does not establish release acceptance.
 
+## Current observations, maintenance history and durable client execution
+
+AP1–AP5 following review of `b63b5ccd604fce1b7fdbf8d72c397b8c973ec1be`,
+verified in the uncommitted worktree on 2026-11-14. Contracts are in the
+[implementation guide](digidollar-paymaster-implementation.md); exact operator
+commands and coverage limits are in the
+[focused runbook](digidollar-paymaster-testing.md#review-follow-up-regressions).
+
+| Executed check | Result and scope |
+|---|---|
+| Final native selections | Exit 0: **29 distinct cases / 5,674 assertions** across three bounded selections (6/8/15 cases). Current 239/0/conflicted observations and delayed wallet callbacks veto stale depth-240 pruning; wrong active block anchors, exact stempool presence/removal/witness mismatch and direct depth-one retention; atomic recovery-fee release and pruning with failed writes and chain-lock checks through ordinary and strict observed-recovery commits. Finite single/multiple-recipient history through journal failure/replay, confirmation and reopen; normal/recovery final authority, clock rollback, typed temporary fee-policy failures before preflight and between insertion/broadcast, permanent witness conflict, result/retry/startup adapters and byte/fee idempotence. Adjacent finance, maintenance, checkpoint readers, ordinary DGB coin control, DD self-send persistence and database cursors pass. No selected failures or skips. |
+| Final Qt selection | Exit 0: **six functions / eight cases**, no failures/skips, using Windows/Fusion. AUTO, Paymaster and Own DGB compose transitions, accepted/canceled input dialogs, immutable restored orders and gross-amount fallback; ordinary DD coin control, labels and offer invalidation. |
+| Compilation | All **14 changed C++ units** have matching freshly compiled objects from implementation/follow-up checks, plus six reached Qt allocator/fixture consumers and two regenerated moc units: **22 objects**, MSVC 14.43.34808, `/W3 /WX /Od /MT /std:c++20`. Current changed-source/object hashes checked. All **nine changed production units** pass C++17 `/Zs`; the Qt test unit also passes that syntax check. The five code prefixes additionally pass **18 source/header snapshot syntax checks**, using C++17 production and C++20 test snapshots. |
+| Local controls | Working-tree dependency/cycle check, six positive/negative boundary fixtures, JSON, whitespace and changed-path/shared-Core record checks pass. Every code prefix passes the committed trusted-base comparison against scope commit `52a54eb8c907be9888b0496a3bd21eb60df273a3`; that scope commit passes against the review baseline. The explicitly authorized shared DD send-form path is recorded; forbidden paths, dependency rules, financial validation and checkpoint guarantees remain enforced. |
+
+Code content through `80f365f0b3241a8de9d771854205ba1b20b5769f` matches
+the verified changed-source content. The five code commits have separate
+source/header snapshot checks; these do not establish clean intermediate product
+builds or additional functional test runs.
+
+Native SHA256: `42c6b573cde283547c262c2596c2c8b6bbc08e772285fcf5ac86d34bf510c33e`.
+Qt SHA256: `6b1b7f804b850d9e55546b7e803ae05bc2f7445cff6af593016a3bded41dc388`.
+Exact selections, commands, logs and source/object manifests remain locally under
+`.ai/followup-review-b63-native/`, `.ai/followup-review-b63-qt/` and
+`.ai/commit-review-b63/`; initial implementation evidence remains unchanged under
+`.ai/implement-review-b63-native/` and `.ai/implement-review-b63-qt/`.
+Native checks use Boost seed `20261114` and `RANDOM_CTX_SEED=0000000000000000000000000000000000000000000000000000000000000001`.
+
+Failed initial checks are retained. The new stempool fixture needed actual removal
+notifications before checking the wallet cache; its assertions remain intact.
+The unchanged checkpoint-reader test reported `written=false` once during a
+parallel preliminary run, then passed alone and in the final exclusive run;
+the cause of that intermittent failure is unresolved. Two further unchanged
+diagnostic runs and the final follow-up selection also pass. Follow-up mining
+fixtures initially inherited MAIN: bounded diagnostics timed out before proving
+the new assertions. Explicit Regtest fixtures and a pre-mining network check
+correct this. Replacement-block callbacks initially completed a recovery before
+its failure-injection section; the fixture now isolates that section while keeping
+its assertions. Initial Qt partial links
+contained old `CWallet` allocation templates; the reached consumers were rebuilt.
+The minimal Qt plugin failed in a native dialog; final tests use Windows/Fusion.
+
+These are isolated partial links with retained dependencies and incomplete
+transitive-header provenance. Complete clean Windows/Linux product builds,
+full/functional suites including live reorg and Dandelion propagation, sanitizers,
+cross-platform builds and repository Tidy/plugin checks were not run and remain
+operator gates. This evidence does not establish release certification.
+
 ## Provider closure, independent locks and client payment history
 
 AP1–AP4 following review of `ecc7ad72cf8678f72c1fe778fecdbc3c6fe8aa81`,

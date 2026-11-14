@@ -29,6 +29,10 @@ by the recipient, `service_fee_cents` is additional, and `user_total_cents` is
 the sum. `subtract_paymaster_fee_from_amount` instead makes the entered amount
 the exact total; unrepresentable rounded totals fail.
 `send_all_spendable_dd` uses spendable inputs, excluding protected reserves.
+Sweeps forbid explicit selected inputs. In the Qt compose form, accepting a
+changed manual selection ends wallet emptying and invalidates the offer preview;
+the entered amount and fee deduction stay visible for review. Canceling the
+input dialog preserves the draft. An existing request retains its original order.
 
 ## Preparation, explicit authorization, execution and resumption
 

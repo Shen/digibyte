@@ -546,6 +546,47 @@ git diff -w $paymasterBases.official_baseline HEAD
 
 ## Review follow-up regressions
 
+For current-observation pruning, maintenance history, compose input intent and
+shared durable client execution (review `b63b5ccd604fce1b7fdbf8d72c397b8c973ec1be`),
+use a freshly built candidate from the repository root, with the short isolated
+test temporary directory described above. These focused checks take seconds to
+a few minutes; require exit zero and every selected case to pass:
+
+```powershell
+$reviewCases = @(
+    'paymaster_wallet_store_tests/current_wallet_observation_vetoes_stale_payment_pruning,current_recovery_observation_keeps_fee_and_authority_atomic,final_transaction_observations_handle_mempool_reorg_and_retention,transient_finalization_errors_remain_retryable',
+    'paymaster_wallet_identity_tests/finite_carrier_history_survives_reconciliation_restart_and_write_retry,carrier_refill_preserves_multiple_outputs_and_send_history_with_submission,carrier_withdrawal_stale_fee_input_does_not_fence_provider',
+    'paymaster_wallet_security_tests/durable_client_final_executor_revalidates_authority_and_replays_exact_payment,client_recovery_result_commit_failure_survives_ttl_and_exact_retry,client_recovery_confirmed_before_first_result_survives_expiry_and_reload,provider_capacity_cache_compaction_outlives_pruned_normal_owner'
+)
+& ./build_msvc/x64/Release/test_digibyte.exe "--run_test=$($reviewCases -join ':')" --report_level=detailed
+if ($LASTEXITCODE -ne 0) { throw 'Current-observation/history/client execution regression failed' }
+$env:DIGIBYTE_QT_TEST_SUITE = 'PaymasterWidgetTests'
+try {
+    foreach ($reviewQtCase in @('paymasterClientComposeInputSelection', 'paymasterClientRestoresOriginalOrderFromNativeStatus', 'paymasterClientFallbackContinues')) {
+        $env:DIGIBYTE_QT_TEST_FUNCTION = $reviewQtCase
+        & ./build_msvc/x64/Release/test_digibyte-qt.exe
+        if ($LASTEXITCODE -ne 0) { throw "Qt compose/replay regression failed: $reviewQtCase" }
+    }
+} finally {
+    Remove-Item Env:DIGIBYTE_QT_TEST_FUNCTION, Env:DIGIBYTE_QT_TEST_SUITE
+}
+```
+
+Use the Windows platform for these modal dialog cases. Also run the adjacent
+checkpoint, ordinary DGB/DD selection/history and wallet database selections in
+this guide. The pruning fixtures use mined active block anchors with injected
+signed wallet finals; their block associations are synthetic. The callback-lag
+case disconnects the active tip while wallet notifications are held back. This
+does not establish a complete startup/payment-network reorg. The finite history
+test uses the existing synthetic maintenance relay adapter. Client executor cases
+use mined inputs and ordinary node preflight; they cover clock rollback and typed
+local fee-policy rejection before preflight and between insertion and broadcast,
+followed by exact relay without new authority. The exact stempool
+observation fixture inserts pool entries explicitly and checks presence, removal
+and witness mismatch; it is not a Dandelion propagation test. Complete clean
+Windows/Linux builds, functional reorg/payment scenarios, sanitizers and Tidy
+remain the separate [operator gates](#windows-build-from-powershell).
+
 For provider-only closure, independent lock owners, client history repair and
 carrier headroom, rebuild the changed sources and direct consumers, including
 shared-wallet consumers after wallet layout changes. From the repository root,
