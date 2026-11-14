@@ -228,6 +228,11 @@ record. Each cleanup pass removes at most 64 eligible unsigned records of each
 kind after all saved retry/capacity deadlines and the 24-hour replay retention
 interval. Recovery pruning revalidates the saved shape, absence of signed/commit
 evidence and released pool/budget bindings before its atomic deletion.
+Expired unsigned client recoveries use the same bounded retention cleanup.
+Cleanup rechecks independent signature/commit evidence and fee liabilities,
+and removes a request locator only if it still belongs to that exact record.
+A newer recovery of the same original payment survives old-record cleanup.
+Signed or ambiguous client recoveries never expire into a release.
 At 240 confirmations, maintenance can atomically move at most 64 fully validated
 provider recovery finals into `pmaltarchive`, with a `pmaltlocator` consistency
 marker. Admission, drain and expiry scans visit active records only. Exact replay

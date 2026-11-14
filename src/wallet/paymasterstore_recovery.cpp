@@ -1029,15 +1029,17 @@ bool PaymasterStore::ExpireAlternativeRecoveries(
             if (!ObserveProviderRecoveryHistoryCompletion(m_wallet, batch, recovery, confirmation_proof, error)) return false;
             if (confirmation_proof) archiving.emplace_back(recovery, std::move(*confirmation_proof));
         }
-        // Expired provider quotes remain replay barriers through every saved
+        // Expired unsigned records remain replay barriers through every saved
         // protocol deadline and the retention interval. Never prune a signed
         // phase merely because its quote is old.
-        if (recovery.provider_side && recovery.expired &&
+        if (recovery.expired &&
             pruning.size() < MAX_PROVIDER_SESSION_PRUNES_PER_PASS &&
             TimeDeltaExceeds(now, std::max({recovery.updated_at,
                 recovery.capacity_request.expires_at, recovery.capacity_snapshot.expires_at,
                 recovery.recovery_response.expires_at}), CAPACITY_REPLAY_RETENTION_SECONDS)) {
             if (!ValidateAlternativeRecoveryRecordShape(recovery, error) ||
+                recovery.phase > AlternativeRecoveryPhase::RESPONSE_VALIDATED ||
+                !recovery.user_signed_psbt.empty() || !recovery.final_transaction.empty() ||
                 CanonicalBytes(recovery.signed_result) != CanonicalBytes(PaymasterResult{})) {
                 if (error.empty()) error = "PAYMASTER_UNSIGNED_RECOVERY_PRUNE_UNSAFE";
                 return false;
@@ -1085,7 +1087,9 @@ bool PaymasterStore::ExpireAlternativeRecoveries(
         [](const AlternativeRecoveryRecord& recovery) {
             return recovery.provider_side;
         });
-    if ((expire_provider || !pruning.empty()) &&
+    const bool prune_provider = std::any_of(pruning.begin(), pruning.end(),
+        [](const auto& recovery) { return recovery.provider_side; });
+    if ((expire_provider || prune_provider) &&
         (!batch.ReadPaymasterProviderPool(pool) ||
          !batch.ReadPaymasterProviderBudgetLedger(provider_ledger))) {
         error = "PAYMASTER_PROVIDER_NOT_READY";
@@ -1098,8 +1102,14 @@ bool PaymasterStore::ExpireAlternativeRecoveries(
             return !recovery.provider_side &&
                    !recovery.accepted_recovery_authorization_commitment.IsNull();
         });
-    if (expire_client_fee &&
-        !batch.ReadPaymasterClientFeeLedger(client_fee_ledger)) {
+    const bool prune_client = std::any_of(pruning.begin(), pruning.end(),
+        [](const auto& recovery) { return !recovery.provider_side; });
+    const auto client_fee_status = (expire_client_fee || prune_client)
+        ? batch.ReadPaymasterClientFeeLedgerWithStatus(client_fee_ledger)
+        : DatabaseReadStatus::NOT_FOUND;
+    if ((expire_client_fee && client_fee_status != DatabaseReadStatus::FOUND) ||
+        (prune_client && client_fee_status != DatabaseReadStatus::FOUND &&
+         client_fee_status != DatabaseReadStatus::NOT_FOUND)) {
         error = "PAYMASTER_INVALID_CLIENT_SAFETY_STATE";
         return false;
     }
@@ -1109,7 +1119,20 @@ bool PaymasterStore::ExpireAlternativeRecoveries(
     // deleting any replay barrier; unreadable evidence also vetoes pruning.
     for (const auto& recovery : pruning) {
         const auto& commit_key = recovery.recovery_response.recovery_commit_key;
-        if (!RequireNoAuthorizationEvidence(batch, commit_key, error) ||
+        if (!commit_key.IsNull() && !RequireNoAuthorizationEvidence(batch, commit_key, error)) return false;
+        if (!recovery.provider_side) {
+            if ((!recovery.accepted_recovery_authorization_commitment.IsNull() &&
+                 client_fee_status != DatabaseReadStatus::FOUND) ||
+                std::any_of(client_fee_ledger.reservations.begin(), client_fee_ledger.reservations.end(),
+                    [&](const ClientFeeReservation& entry) {
+                        return entry.commit_key == commit_key && entry.state != BudgetReservationState::RELEASED;
+                    })) {
+                error = "PAYMASTER_UNSIGNED_RECOVERY_PRUNE_UNSAFE";
+                return false;
+            }
+            continue;
+        }
+        if (
             std::any_of(pool.begin(), pool.end(), [&](const ProviderPoolEntry& entry) {
                 return entry.reservation_id == commit_key || entry.origin_commit_key == commit_key;
             }) ||
@@ -1197,21 +1220,28 @@ bool PaymasterStore::ExpireAlternativeRecoveries(
         }
     }
     if (!batch.TxnBegin()) return Abort(batch, error, "PAYMASTER_DATABASE_BEGIN");
+    // Expired client records can be detached from a later recovery of the
+    // same payment. Never erase that replacement's locator during cleanup.
+    const auto erase_owned_locator = [&](const AlternativeRecoveryRecord& recovery) {
+        if (recovery.provider_side) return true;
+        uint256 current;
+        const auto status = batch.ReadPaymasterAlternativeRecoveryRequestWithStatus(recovery.request_id, current);
+        if (status == DatabaseReadStatus::NOT_FOUND) return true;
+        return status == DatabaseReadStatus::FOUND &&
+            (current != recovery.recovery_id || batch.ErasePaymasterAlternativeRecoveryRequest(recovery.request_id));
+    };
     for (const auto& candidate : archiving) {
         if (!batch.ArchivePaymasterAlternativeRecovery(candidate.first)) {
             return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
         }
     }
     for (const auto& recovery : pruning) {
-        if (!batch.ErasePaymasterAlternativeRecovery(recovery.recovery_id)) {
+        if (!erase_owned_locator(recovery) || !batch.ErasePaymasterAlternativeRecovery(recovery.recovery_id)) {
             return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
         }
     }
     for (const AlternativeRecoveryRecord& recovery : expiring) {
-        if (!batch.WritePaymasterAlternativeRecovery(recovery, true) ||
-            (!recovery.provider_side &&
-             !batch.ErasePaymasterAlternativeRecoveryRequest(
-                 recovery.request_id))) {
+        if (!batch.WritePaymasterAlternativeRecovery(recovery, true) || !erase_owned_locator(recovery)) {
             return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
         }
     }

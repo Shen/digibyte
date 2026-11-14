@@ -5584,6 +5584,64 @@ BOOST_AUTO_TEST_CASE(conflicting_capacity_proofs_are_evidence_and_block_provider
     BOOST_CHECK_EQUAL(reliability.cooldown_until, std::numeric_limits<int64_t>::max());
 }
 
+BOOST_AUTO_TEST_CASE(expired_client_recoveries_are_pruned_without_erasing_replacement)
+{
+    ScopedRecoveryMockTime mock_time{104};
+    PaymasterStore store{m_wallet};
+    PaymentSession session;
+    ValidClientResultArtifacts artifacts;
+    SeedResultlessClientPayment(m_wallet, "550e8400-e29b-41d4-a716-4466554400e1", session, artifacts);
+    std::string error;
+    {
+        LOCK(m_wallet.cs_wallet);
+        WalletBatch batch{m_wallet.GetDatabase()};
+        BOOST_REQUIRE(batch.WritePaymasterReservation({InputReservation::CURRENT_VERSION,
+            artifacts.user_input, session.request_id, session.session_id, ReservationRole::USER_DD, true, 101}));
+    }
+    auto recovery = MakeClientViewRecovery(session, artifacts);
+    recovery.recovery_provider_endpoint = "127.0.0.1:14022";
+    auto& request = recovery.capacity_request;
+    request.genesis_hash = Params().GenesisBlock().GetHash();
+    request.provider_id = recovery.recovery_provider_id;
+    request.request_id = recovery.request_id;
+    request.session_id = recovery.session_id;
+    request.client_nonce = recovery.client_nonce;
+    request.funding_model = FundingModel::USER_PAID;
+    request.requested_slots = 1;
+    request.created_at = 102;
+    request.expires_at = 150;
+    BOOST_REQUIRE_MESSAGE(store.PrepareAlternativeRecovery(recovery, error), error);
+    size_t expired{0};
+    BOOST_REQUIRE_MESSAGE(store.ExpireAlternativeRecoveries(151, expired, error), error);
+    BOOST_CHECK_EQUAL(expired, 1U);
+    AlternativeRecoveryRecord old;
+    BOOST_REQUIRE(store.GetAlternativeRecoveryById(recovery.recovery_id, old));
+    BOOST_REQUIRE(old.expired);
+    AlternativeRecoveryRecord absent;
+    BOOST_CHECK(store.GetAlternativeRecoveryWithStatus(session.request_id, absent) == DatabaseReadStatus::NOT_FOUND);
+    auto replacement = recovery;
+    replacement.client_nonce = uint256S("e2");
+    replacement.created_at = replacement.updated_at = 152;
+    replacement.capacity_request.client_nonce = replacement.client_nonce;
+    replacement.capacity_request.created_at = 152;
+    const auto prune_at = 152 + paymaster_store::internal::CAPACITY_REPLAY_RETENTION_SECONDS;
+    replacement.capacity_request.expires_at = prune_at + 100;
+    replacement.recovery_id = GetAlternativeRecoveryId(replacement.request_id, replacement.session_id,
+        replacement.recovery_provider_id, replacement.client_nonce);
+    BOOST_REQUIRE_MESSAGE(store.PrepareAlternativeRecovery(replacement, error), error);
+    auto& database = GetMockableDatabase(m_wallet);
+    const auto before = database.m_records;
+    database.FailCommit();
+    BOOST_CHECK(!store.ExpireAlternativeRecoveries(prune_at, expired, error));
+    database.ClearFailureInjection();
+    BOOST_CHECK(database.m_records == before);
+    BOOST_REQUIRE_MESSAGE(store.ExpireAlternativeRecoveries(prune_at, expired, error), error);
+    BOOST_CHECK(store.GetAlternativeRecoveryByIdWithStatus(recovery.recovery_id, absent) == DatabaseReadStatus::NOT_FOUND);
+    BOOST_REQUIRE(store.GetAlternativeRecoveryWithStatus(session.request_id, absent) == DatabaseReadStatus::FOUND);
+    BOOST_CHECK(absent.recovery_id == replacement.recovery_id);
+    BOOST_CHECK(IsPaymasterInputReserved(m_wallet, artifacts.user_input));
+}
+
 BOOST_AUTO_TEST_CASE(conflicting_signed_quotes_are_persisted_atomically)
 {
     PaymasterStore store{m_wallet};
