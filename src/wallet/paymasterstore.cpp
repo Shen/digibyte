@@ -1507,49 +1507,6 @@ bool LoadRecoveryFinalArtifact(WalletBatch& batch,
     return true;
 }
 
-bool ObserveExactWalletArtifact(const CWallet& wallet,
-                                const ExactFinalArtifact& artifact,
-                                ExactFinalObservation& observation,
-                                std::string& error)
-{
-    observation = {};
-    if (artifact.txid.IsNull()) return true;
-    const auto wallet_tx = wallet.mapWallet.find(artifact.txid);
-    if (wallet_tx == wallet.mapWallet.end()) return true;
-    if (!wallet_tx->second.tx ||
-        CanonicalBytes(*wallet_tx->second.tx) != artifact.bytes ||
-        wallet_tx->second.tx->GetWitnessHash() != artifact.wtxid) {
-        error = "PAYMASTER_OBSERVED_FINAL_WITNESS_MISMATCH";
-        return false;
-    }
-    observation.confirmation_depth =
-        wallet.GetTxDepthInMainChain(wallet_tx->second);
-    observation.in_mempool = wallet_tx->second.InMempool();
-    error.clear();
-    return true;
-}
-
-bool BindExactObservation(const CTransaction& transaction,
-                          const ExactFinalArtifact& artifact,
-                          int confirmation_depth,
-                          bool in_mempool,
-                          ExactFinalObservation& observation,
-                          std::string& error)
-{
-    if (artifact.txid.IsNull() || transaction.GetHash() != artifact.txid) {
-        return false;
-    }
-    if (CanonicalBytes(transaction) != artifact.bytes ||
-        transaction.GetWitnessHash() != artifact.wtxid) {
-        error = "PAYMASTER_OBSERVED_FINAL_WITNESS_MISMATCH";
-        return false;
-    }
-    observation.confirmation_depth = confirmation_depth;
-    observation.in_mempool = in_mempool;
-    error.clear();
-    return true;
-}
-
 // -------------------------------------------------------------------------
 // Equivocation evidence and capacity admission
 // -------------------------------------------------------------------------
