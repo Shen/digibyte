@@ -70,6 +70,23 @@ bool CommitWithPaymasterAuthorizationProtection(CWallet& wallet, WalletBatch& ba
  * signature evidence, including unknown and unreadable records. */
 bool RequireNoProviderSignatureEvidence(WalletBatch& batch, const uint256& commit_key,
                                        std::string& error);
+/** Provider-local closure authenticates any retained negative response; a
+ * response carrying final bytes, unknown records or a commit always veto it. */
+bool ValidateProviderUnsignedAttempt(WalletBatch& batch, const PaymentSession& session,
+                                      const ProviderAttempt& attempt, std::string& error);
+bool ValidateProviderUnsignedRecovery(WalletBatch& batch, const AlternativeRecoveryRecord& recovery,
+                                       std::string& error);
+bool ValidateProviderAttemptReleaseBindings(const PaymentSession& session,
+    const ProviderAttempt& attempt, const std::vector<ProviderPoolEntry>& pool, std::string& error);
+bool ValidateProviderRecoveryReleaseBindings(const AlternativeRecoveryRecord& recovery,
+    const std::vector<ProviderPoolEntry>& pool, std::string& error);
+/** Shared financial transition for normal and recovery closures. Callers first
+ * authenticate the corresponding authority and budget binding, retain
+ * cs_wallet, and commit this working copy together with its terminal record. */
+bool ReleaseProviderUnsignedBindings(const uint256& commit_key,
+    const std::vector<COutPoint>& inputs, int64_t now,
+    std::vector<ProviderPoolEntry>& pool, ProviderBudgetLedger& ledger,
+    std::string& error);
 /** Unsigned cancellation/expiry additionally require absent user authority. */
 bool RequireNoAuthorizationEvidence(WalletBatch& batch, const uint256& commit_key,
                                     std::string& error);

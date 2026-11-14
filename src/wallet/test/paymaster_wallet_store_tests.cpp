@@ -3257,7 +3257,7 @@ BOOST_AUTO_TEST_CASE(client_attempt_artifacts_and_authorization_are_append_only_
     BOOST_CHECK(IsPaymasterInputReserved(reopened, user_input));
 }
 
-BOOST_AUTO_TEST_CASE(unsigned_quote_cancellation_atomically_releases_provider_pool)
+BOOST_AUTO_TEST_CASE(provider_quote_cancellation_rejects_client_session_without_releasing_pool)
 {
     PaymasterStore store{m_wallet};
     PaymentSession session;
@@ -3310,18 +3310,22 @@ BOOST_AUTO_TEST_CASE(unsigned_quote_cancellation_atomically_releases_provider_po
         BOOST_CHECK(database.m_records == unknown);
         database.m_records = unsigned_rows;
     }
-    BOOST_REQUIRE(store.CancelProviderQuote(quoted.attempt_id, 103, canceled, error));
-    BOOST_CHECK(canceled.state == AttemptState::REJECTED);
-    BOOST_CHECK(store.CancelProviderQuote(quoted.attempt_id, 104, canceled, error));
+    // CreateOrJoinSession made a client session. A matching-looking pool row
+    // does not turn it into authenticated provider authority. Successful
+    // release/rollback is covered with signed provider fixtures in the security suite.
+    BOOST_CHECK(!store.CancelProviderQuote(quoted.attempt_id, 103, canceled, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_SIGNATURE_MAY_EXIST");
+    BOOST_CHECK(!store.CancelProviderQuote(quoted.attempt_id, 104, canceled, error));
+    BOOST_CHECK(database.m_records == unsigned_rows);
     std::vector<ProviderPoolEntry> pool;
     {
         LOCK(m_wallet.cs_wallet);
         BOOST_REQUIRE(WalletBatch{m_wallet.GetDatabase()}.ReadPaymasterProviderPool(pool));
     }
     BOOST_REQUIRE_EQUAL(pool.size(), 1U);
-    BOOST_CHECK(pool.front().state == PoolEntryState::AVAILABLE);
-    BOOST_CHECK(pool.front().reservation_id.IsNull());
-    BOOST_CHECK_EQUAL(pool.front().updated_at, 103);
+    BOOST_CHECK(pool.front().state == PoolEntryState::RESERVED);
+    BOOST_CHECK(pool.front().reservation_id == quoted.commit_key);
+    BOOST_CHECK_EQUAL(pool.front().updated_at, 102);
 
     ProviderAttempt signed_attempt = candidate;
     signed_attempt.attempt_id = uint256S("35");
@@ -3334,10 +3338,10 @@ BOOST_AUTO_TEST_CASE(unsigned_quote_cancellation_atomically_releases_provider_po
         BOOST_REQUIRE(WalletBatch{m_wallet.GetDatabase()}.WritePaymasterAttempt(signed_attempt));
     }
     BOOST_CHECK(!store.CancelProviderQuote(signed_attempt.attempt_id, 106, canceled, error));
-    BOOST_CHECK_EQUAL(error, "PAYMASTER_QUOTE_AUTHORIZATION_MAY_EXIST");
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_SIGNATURE_MAY_EXIST");
 }
 
-BOOST_AUTO_TEST_CASE(expired_provider_quotes_release_pool_and_budget_atomically)
+BOOST_AUTO_TEST_CASE(provider_quote_expiry_requires_authenticated_provider_evidence)
 {
     PaymasterStore store{m_wallet};
     std::string error;
@@ -3470,29 +3474,27 @@ BOOST_AUTO_TEST_CASE(expired_provider_quotes_release_pool_and_budget_atomically)
     auto& database = GetMockableDatabase(m_wallet);
     const MockableData before_expiry = database.m_records;
     size_t expired_count{0};
-    for (size_t failing_write = 0; failing_write < 4; ++failing_write) {
-        database.FailWriteAt(failing_write);
-        BOOST_CHECK(!store.ExpireProviderQuotes(111, expired_count, error));
-        BOOST_CHECK_EQUAL(error, "PAYMASTER_DATABASE_WRITE");
-        database.ClearFailureInjection();
+    // These records deliberately lack the identity, signed quote and provider
+    // manifest. Expired labels, reserved pool rows and a ledger alone cannot
+    // authorize release. Real signed fixtures retain the successful expiry,
+    // every write/commit failure, receipt, independent-evidence and replay
+    // assertions in provider_unsigned_close_preserves_bindings_and_is_atomic
+    // and provider_user_only_deadlines_close_and_prune in the security suite.
+    for (const int64_t now : {111, 112}) {
+        BOOST_CHECK(!store.ExpireProviderQuotes(now, expired_count, error));
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_SIGNATURE_MAY_EXIST");
         BOOST_CHECK(database.m_records == before_expiry);
         BOOST_CHECK_EQUAL(expired_count, 0U);
     }
-    database.FailCommit();
-    BOOST_CHECK(!store.ExpireProviderQuotes(111, expired_count, error));
-    BOOST_CHECK_EQUAL(error, "PAYMASTER_DATABASE_COMMIT");
-    database.ClearFailureInjection();
-    BOOST_CHECK(database.m_records == before_expiry);
-    BOOST_CHECK_EQUAL(expired_count, 0U);
-
-    BOOST_REQUIRE_MESSAGE(store.ExpireProviderQuotes(111, expired_count, error), error);
-    BOOST_CHECK_EQUAL(expired_count, 1U);
-    ProviderAttempt persisted_attempt;
-    BOOST_REQUIRE(store.GetAttempt(expired.attempt.attempt_id, persisted_attempt));
-    BOOST_CHECK(persisted_attempt.state == AttemptState::QUOTE_EXPIRED);
-    PaymentSession persisted_session;
-    BOOST_REQUIRE(store.GetSessionByRequestId(expired.session.request_id, persisted_session));
-    BOOST_CHECK(persisted_session.state == SessionState::FAILED);
+    const QuoteFixture* const checked_fixtures[]{&expired, &authorized, &state_protected};
+    for (const QuoteFixture* fixture : checked_fixtures) {
+        ProviderAttempt persisted_attempt;
+        BOOST_REQUIRE(store.GetAttempt(fixture->attempt.attempt_id, persisted_attempt));
+        BOOST_CHECK(persisted_attempt.state == fixture->attempt.state);
+        PaymentSession persisted_session;
+        BOOST_REQUIRE(store.GetSessionByRequestId(fixture->session.request_id, persisted_session));
+        BOOST_CHECK(persisted_session.state == fixture->session.state);
+    }
 
     std::vector<ProviderPoolEntry> pool;
     ProviderBudgetLedger persisted_ledger;
@@ -3502,76 +3504,19 @@ BOOST_AUTO_TEST_CASE(expired_provider_quotes_release_pool_and_budget_atomically)
         BOOST_REQUIRE(batch.ReadPaymasterProviderPool(pool));
         BOOST_REQUIRE(batch.ReadPaymasterProviderBudgetLedger(persisted_ledger));
     }
-    const auto pool_state = [&](const uint256& commit_key) {
-        return std::find_if(pool.begin(), pool.end(), [&](const ProviderPoolEntry& entry) {
-                   return entry.reservation_id == commit_key ||
-                          (commit_key == expired.attempt.commit_key &&
-                           entry.outpoint == expired.pool_entry.outpoint);
-               })
-            ->state;
-    };
-    BOOST_CHECK(pool_state(expired.attempt.commit_key) == PoolEntryState::AVAILABLE);
-    BOOST_CHECK(pool_state(authorized.attempt.commit_key) == PoolEntryState::RESERVED);
-    BOOST_CHECK(pool_state(state_protected.attempt.commit_key) == PoolEntryState::RESERVED);
+    BOOST_REQUIRE_EQUAL(pool.size(), 3U);
+    for (const QuoteFixture* fixture : checked_fixtures) {
+        const auto entry = std::find_if(pool.begin(), pool.end(), [&](const ProviderPoolEntry& candidate) {
+            return candidate.outpoint == fixture->pool_entry.outpoint;
+        });
+        BOOST_REQUIRE(entry != pool.end());
+        BOOST_CHECK(entry->state == PoolEntryState::RESERVED);
+        BOOST_CHECK(entry->reservation_id == fixture->attempt.commit_key);
+    }
+    BOOST_REQUIRE_EQUAL(persisted_ledger.reservations.size(), 3U);
     for (const ProviderBudgetReservation& reservation : persisted_ledger.reservations) {
-        if (reservation.commit_key == expired.attempt.commit_key) {
-            BOOST_CHECK(reservation.state == BudgetReservationState::RELEASED);
-        } else {
-            BOOST_CHECK(reservation.state == BudgetReservationState::RESERVED);
-        }
+        BOOST_CHECK(reservation.state == BudgetReservationState::RESERVED);
     }
-
-    BOOST_REQUIRE(store.ExpireProviderQuotes(112, expired_count, error));
-    BOOST_CHECK_EQUAL(expired_count, 0U);
-
-    const QuoteFixture unreadable_authorization = make_quote(
-        "550e8400-e29b-41d4-a716-446655440104", uint256S("81"),
-        uint256S("82"), uint256S("83"), uint256S("84"));
-    BOOST_REQUIRE_MESSAGE(
-        ReserveProviderBudget(
-            persisted_ledger, safety, FundingModel::USER_PAID,
-            SponsorshipScope::PUBLIC,
-            unreadable_authorization.attempt.commit_key, DGBSatoshis{50},
-            recipient_bucket, 101, error, netgroup_bucket),
-        error);
-    pool.push_back(unreadable_authorization.pool_entry);
-    {
-        LOCK(m_wallet.cs_wallet);
-        WalletBatch batch{m_wallet.GetDatabase()};
-        BOOST_REQUIRE(
-            batch.WritePaymasterSession(unreadable_authorization.session));
-        BOOST_REQUIRE(batch.WritePaymasterSessionId(
-            unreadable_authorization.session.session_id,
-            unreadable_authorization.session.request_id));
-        BOOST_REQUIRE(
-            batch.WritePaymasterAttempt(unreadable_authorization.attempt));
-        BOOST_REQUIRE(batch.WritePaymasterProviderBudgetLedger(
-            persisted_ledger));
-        BOOST_REQUIRE(batch.WritePaymasterProviderPool(pool));
-    }
-    UserAuthorizationRecord outdated_authorization;
-    outdated_authorization.version = 0;
-    outdated_authorization.commit_key =
-        unreadable_authorization.attempt.commit_key;
-    outdated_authorization.attempt_id =
-        unreadable_authorization.attempt.attempt_id;
-    outdated_authorization.canonical_psbt_hash = uint256S("85");
-    outdated_authorization.accepted_at = 102;
-    outdated_authorization.retry_until = 200;
-    {
-        auto batch = m_wallet.GetDatabase().MakeBatch();
-        BOOST_REQUIRE(batch->Write(
-            std::make_pair(DBKeys::PAYMASTER_USER_AUTH,
-                           outdated_authorization.commit_key),
-            outdated_authorization));
-    }
-    const auto before_unreadable_authorization = database.m_records;
-    BOOST_CHECK(!store.ExpireProviderQuotes(113, expired_count, error));
-    BOOST_CHECK_EQUAL(
-        error,
-        "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION: record=UserAuthorizationRecord found=0 expected=1");
-    BOOST_CHECK_EQUAL(expired_count, 0U);
-    BOOST_CHECK(database.m_records == before_unreadable_authorization);
 }
 
 static void CheckProviderQuoteCommit(WalletTestingSetup& fixture, bool fail_commit)

@@ -425,17 +425,22 @@ public:
         DigiDollar::Paymaster::PaymasterCapacityProof& capacity_proof,
         std::string& error) const;
 
-    /** Atomically reject an unsigned quote and release only provider pool
-     * entries bound to its commit key. Any possible user authorization makes
-     * cancellation unsafe and is rejected. */
+    /** Atomically close a provider-side quote and release only its bound pool
+     * and budget after proving no provider payment signature exists. Received
+     * USER-only signatures may be retained; client-side authority is rejected. */
     bool CancelProviderQuote(const uint256& attempt_id,
                              int64_t now,
                              DigiDollar::Paymaster::ProviderAttempt& attempt,
                              std::string& error);
-    /** Atomically expire every quote whose TTL elapsed before a signature
-     * could exist. Provider quotes release pool/budget reservations; client
-     * quotes release fee and USER_DD reservations in the same transaction.
-     * Any durable signature/final artifact always wins over timeout. */
+    /** Close an expired provider attempt only after proving that no provider
+     * payment signature exists. Received USER signatures remain evidence, not
+     * an obligation to keep provider liquidity reserved beyond its deadline. */
+    bool CloseExpiredProviderAttempt(const uint256& attempt_id, int64_t now,
+        DigiDollar::Paymaster::ProviderAttempt& attempt, std::string& error);
+    /** Atomically expire provider quotes before any provider signature and
+     * client quotes before any user authority. Provider quotes release pool and
+     * budget; client quotes release fee and USER_DD reservations atomically.
+     * Any possible provider signature or client authority wins over timeout. */
     bool ExpireProviderQuotes(int64_t now,
                               size_t& expired_quotes,
                               std::string& error);
@@ -671,6 +676,10 @@ public:
     bool ExpireAlternativeRecoveries(int64_t now,
                                      size_t& expired_recoveries,
                                      std::string& error);
+    /** Provider-only expiry of an exact recovery that has no provider payment
+     * signature. Client USER_SIGNED recovery authority is never closed here. */
+    bool CloseExpiredProviderRecovery(const uint256& recovery_id, int64_t now,
+                                     std::string& error);
 
     /** Atomically bind the capacity-reserved provider pool and worst-case DGB
      * budget to an authenticated recovery response. */
@@ -814,6 +823,10 @@ private:
                       const DigiDollar::Paymaster::AlternativeRecoveryRecord* observed_recovery = nullptr,
                       const DigiDollar::Paymaster::ExactFinalTransactionProof* final_proof = nullptr,
                       const CTransactionRef& observed_transaction = {});
+    enum class ProviderClosure { CANCEL, EXPIRED, INPUT_UNAVAILABLE };
+    bool CloseProviderAttempt(const uint256& attempt_id, ProviderClosure reason, int64_t now,
+        const std::optional<DigiDollar::Paymaster::PaymasterResult>& result,
+        DigiDollar::Paymaster::ProviderAttempt& attempt, std::string& error);
     CWallet& m_wallet;
 };
 

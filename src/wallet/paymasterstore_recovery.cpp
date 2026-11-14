@@ -910,6 +910,59 @@ bool PaymasterStore::HasProviderDrainWork(
     return true;
 }
 
+bool PaymasterStore::CloseExpiredProviderRecovery(const uint256& recovery_id, int64_t now,
+    std::string& error)
+{
+    error.clear();
+    LOCK(m_wallet.cs_wallet);
+    if (!CheckPaymasterProviderRestoreGuard(m_wallet, error)) return false;
+    WalletBatch batch{m_wallet.GetDatabase()};
+    AlternativeRecoveryRecord recovery;
+    if (now <= 0 || batch.ReadPaymasterAlternativeRecoveryWithStatus(recovery_id, recovery) != DatabaseReadStatus::FOUND ||
+        !ValidateProviderUnsignedRecovery(batch, recovery, error)) {
+        if (error.empty()) error = "PAYMASTER_RECOVERY_DATABASE_READ";
+        return false;
+    }
+    const int64_t deadline = std::min(recovery.recovery_response.expires_at, recovery.capacity_snapshot.expires_at);
+    if (!recovery.expired && deadline > now) {
+        error = "PAYMASTER_PROVIDER_AUTHORIZATION_NOT_EXPIRED";
+        return false;
+    }
+    std::vector<ProviderPoolEntry> pool;
+    ProviderBudgetLedger ledger;
+    if (batch.ReadPaymasterProviderPoolWithStatus(pool) != DatabaseReadStatus::FOUND ||
+        batch.ReadPaymasterProviderBudgetLedgerWithStatus(ledger) != DatabaseReadStatus::FOUND ||
+        !ValidateProviderPoolEntries(pool, error) || !ValidateProviderBudgetLedger(ledger, error)) {
+        if (error.empty()) error = "PAYMASTER_INVALID_PROVIDER_BUDGET_STATE";
+        return false;
+    }
+    const auto& key = recovery.recovery_response.recovery_commit_key;
+    if (recovery.expired) {
+        if (std::any_of(pool.begin(), pool.end(), [&](const auto& entry) { return entry.reservation_id == key; }) ||
+            std::any_of(ledger.reservations.begin(), ledger.reservations.end(), [&](const auto& entry) {
+                return entry.commit_key == key && entry.state != BudgetReservationState::RELEASED;
+            })) {
+            error = "PAYMASTER_RECOVERY_PROVIDER_POOL_MISMATCH";
+            return false;
+        }
+        return true;
+    }
+    auto inputs = recovery.recovery_response.manifest.recovery_provider_carrier_inputs;
+    inputs.insert(inputs.end(), recovery.recovery_response.manifest.recovery_provider_dgb_inputs.begin(),
+        recovery.recovery_response.manifest.recovery_provider_dgb_inputs.end());
+    if (!ValidateProviderAlternativeRecoveryBudgetAuthorizationImpl(recovery, nullptr, ledger,
+            BudgetReservationState::RESERVED, true, error) ||
+        !ValidateProviderRecoveryReleaseBindings(recovery, pool, error) ||
+        !ReleaseProviderUnsignedBindings(key, inputs, now, pool, ledger, error)) return false;
+    recovery.expired = true;
+    recovery.updated_at = std::max(recovery.updated_at, now);
+    if (!batch.TxnBegin()) return Abort(batch, error, "PAYMASTER_DATABASE_BEGIN");
+    if (!batch.WritePaymasterAlternativeRecovery(recovery) || !batch.WritePaymasterProviderPool(pool) ||
+        !batch.WritePaymasterProviderBudgetLedger(ledger)) return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
+    if (!batch.TxnCommit()) return Abort(batch, error, "PAYMASTER_DATABASE_COMMIT");
+    return true;
+}
+
 bool PaymasterStore::ExpireAlternativeRecoveries(
     int64_t now,
     size_t& expired_recoveries,
@@ -950,8 +1003,9 @@ bool PaymasterStore::ExpireAlternativeRecoveries(
                 recovery.capacity_request.expires_at, recovery.capacity_snapshot.expires_at,
                 recovery.recovery_response.expires_at}), CAPACITY_REPLAY_RETENTION_SECONDS)) {
             if (!ValidateAlternativeRecoveryRecordShape(recovery, error) ||
-                recovery.phase > AlternativeRecoveryPhase::RESPONSE_VALIDATED ||
-                !recovery.user_signed_psbt.empty() || !recovery.final_transaction.empty() ||
+                (recovery.phase > AlternativeRecoveryPhase::RESPONSE_VALIDATED &&
+                 !(recovery.provider_side && recovery.phase == AlternativeRecoveryPhase::USER_SIGNED)) ||
+                (!recovery.provider_side && !recovery.user_signed_psbt.empty()) || !recovery.final_transaction.empty() ||
                 CanonicalBytes(recovery.signed_result) != CanonicalBytes(PaymasterResult{})) {
                 if (error.empty()) error = "PAYMASTER_UNSIGNED_RECOVERY_PRUNE_UNSAFE";
                 return false;
@@ -959,14 +1013,19 @@ bool PaymasterStore::ExpireAlternativeRecoveries(
             pruning.push_back(recovery);
         }
         if (recovery.expired ||
-            recovery.phase > AlternativeRecoveryPhase::RESPONSE_VALIDATED) {
+            (recovery.phase > AlternativeRecoveryPhase::RESPONSE_VALIDATED &&
+             !(recovery.provider_side && recovery.phase == AlternativeRecoveryPhase::USER_SIGNED))) {
             continue;
         }
         const int64_t expires_at =
-            recovery.phase >= AlternativeRecoveryPhase::RESPONSE_VALIDATED ? recovery.recovery_response.expires_at : recovery.capacity_request.expires_at;
+            recovery.phase >= AlternativeRecoveryPhase::RESPONSE_VALIDATED
+                ? (recovery.provider_side ? std::min(recovery.recovery_response.expires_at, recovery.capacity_snapshot.expires_at)
+                                          : recovery.recovery_response.expires_at)
+                : recovery.capacity_request.expires_at;
         if (expires_at > now) continue;
         if (recovery.provider_side &&
-            recovery.phase != AlternativeRecoveryPhase::RESPONSE_VALIDATED) {
+            recovery.phase != AlternativeRecoveryPhase::RESPONSE_VALIDATED &&
+            recovery.phase != AlternativeRecoveryPhase::USER_SIGNED) {
             continue;
         }
         recovery.expired = true;
@@ -987,6 +1046,10 @@ bool PaymasterStore::ExpireAlternativeRecoveries(
     // Expiry releases financial bindings before the later pruning pass. Prove
     // absence of independent authority here too, not only before deletion.
     for (const auto& recovery : expiring) {
+        if (recovery.provider_side) {
+            if (!ValidateProviderUnsignedRecovery(batch, recovery, error)) return false;
+            continue;
+        }
         if (recovery.phase != AlternativeRecoveryPhase::RESPONSE_VALIDATED) continue;
         const auto& key = recovery.recovery_response.recovery_commit_key;
         if (!RequireNoAuthorizationEvidence(batch, key, error)) return false;
@@ -1001,6 +1064,7 @@ bool PaymasterStore::ExpireAlternativeRecoveries(
         });
     const bool prune_provider = std::any_of(pruning.begin(), pruning.end(),
         [](const auto& recovery) { return recovery.provider_side; });
+    if ((expire_provider || prune_provider) && !CheckPaymasterProviderRestoreGuard(m_wallet, error)) return false;
     if ((expire_provider || prune_provider) &&
         (!batch.ReadPaymasterProviderPool(pool) ||
          !batch.ReadPaymasterProviderBudgetLedger(provider_ledger))) {
@@ -1031,7 +1095,9 @@ bool PaymasterStore::ExpireAlternativeRecoveries(
     // deleting any replay barrier; unreadable evidence also vetoes pruning.
     for (const auto& recovery : pruning) {
         const auto& commit_key = recovery.recovery_response.recovery_commit_key;
-        if (!commit_key.IsNull() && !RequireNoAuthorizationEvidence(batch, commit_key, error)) return false;
+        if (recovery.provider_side) {
+            if (!ValidateProviderUnsignedRecovery(batch, recovery, error)) return false;
+        } else if (!commit_key.IsNull() && !RequireNoAuthorizationEvidence(batch, commit_key, error)) return false;
         if (!recovery.provider_side) {
             if ((!recovery.accepted_recovery_authorization_commitment.IsNull() &&
                  client_fee_status != DatabaseReadStatus::FOUND) ||
@@ -1065,35 +1131,14 @@ bool PaymasterStore::ExpireAlternativeRecoveries(
         if (recovery.provider_side) {
             const uint256& commit_key =
                 recovery.recovery_response.recovery_commit_key;
-            std::set<COutPoint> remaining{
-                recovery.recovery_response.manifest
-                    .recovery_provider_carrier_inputs.begin(),
-                recovery.recovery_response.manifest
-                    .recovery_provider_carrier_inputs.end()};
-            remaining.insert(
-                recovery.recovery_response.manifest
-                    .recovery_provider_dgb_inputs.begin(),
-                recovery.recovery_response.manifest
-                    .recovery_provider_dgb_inputs.end());
-            for (ProviderPoolEntry& entry : pool) {
-                if (entry.reservation_id != commit_key) continue;
-                if (entry.state != PoolEntryState::RESERVED ||
-                    remaining.erase(entry.outpoint) != 1) {
-                    error = "PAYMASTER_RECOVERY_PROVIDER_POOL_MISMATCH";
-                    return false;
-                }
-                entry.state = PoolEntryState::AVAILABLE;
-                entry.reservation_id.SetNull();
-                entry.updated_at = now;
-            }
-            if (!remaining.empty() ||
-                !ReleaseProviderBudget(provider_ledger, commit_key, now,
-                                       error)) {
-                if (error.empty()) {
-                    error = "PAYMASTER_RECOVERY_PROVIDER_POOL_MISMATCH";
-                }
-                return false;
-            }
+            auto inputs = recovery.recovery_response.manifest.recovery_provider_carrier_inputs;
+            inputs.insert(inputs.end(),
+                recovery.recovery_response.manifest.recovery_provider_dgb_inputs.begin(),
+                recovery.recovery_response.manifest.recovery_provider_dgb_inputs.end());
+            if (!ValidateProviderAlternativeRecoveryBudgetAuthorizationImpl(recovery, nullptr, provider_ledger,
+                    BudgetReservationState::RESERVED, true, error) ||
+                !ValidateProviderRecoveryReleaseBindings(recovery, pool, error) ||
+                !ReleaseProviderUnsignedBindings(commit_key, inputs, now, pool, provider_ledger, error)) return false;
         } else if (!recovery.accepted_recovery_authorization_commitment.IsNull()) {
             const uint256& commit_key =
                 recovery.recovery_response.recovery_commit_key;
@@ -1556,6 +1601,12 @@ bool PaymasterStore::CommitProviderAlternativeRecoveryFinal(
 
     ProviderCommitRecord existing_commit;
     PaymasterResult existing_result;
+    // Expiry can win after the signer releases cs_wallet. The stale local
+    // final artifact must never resurrect the released reservation.
+    if (current.expired) {
+        error = "PAYMASTER_ALTERNATIVE_RECOVERY_EXPIRED";
+        return false;
+    }
     const bool have_commit = batch.ReadPaymasterProviderCommit(
         commit.commit_key, existing_commit);
     const bool have_result = batch.ReadPaymasterResult(

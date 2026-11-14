@@ -131,13 +131,32 @@ Authorization-bearing transitions share
 `WalletBatch` transaction, then published to memory only after commit. This
 includes the first alternative-provider recovery signature and exact final
 replay repair. Existing checkpoint preparation/commit ordering remains intact.
-Unsigned cancellation and recovery expiry/pruning require readable, absent
+Client unsigned cancellation and recovery expiry/pruning require readable, absent
 independent authority records before releasing financial bindings; unknown
 versions and read failures cannot substitute for absence.
 The same session-wide check covers client quote expiry, unsigned abandonment
 and fallback, including idempotent success paths and every historical attempt.
 It also checks self/alternative recovery authority. Accepted unsigned terms and
 authentic negative terminal results alone do not imply a payment signature.
+
+Provider-only closure uses `CloseProviderAttempt` (including
+`CancelProviderQuote` and `CloseExpiredProviderAttempt`) and
+`CloseExpiredProviderRecovery`. `ValidateProviderUnsignedAttempt` and
+`ValidateProviderUnsignedRecovery` authenticate the local identity, saved terms,
+manifest and any USER-signed PSBT, then `ReleaseProviderUnsignedBindings`
+atomically releases only the exact provider pool and budget bindings. Normal
+`USER_SIGNED` expiry uses the quote deadline; `USER_PSBT_ACCEPTED` uses
+`retry_until`. Recovery uses the earlier response/capacity deadline and retains
+its USER-signed bytes with `expired=true`. A valid USER-only receipt or an
+authenticated negative terminal result without a final permits provider closure;
+provider-signature evidence, corrupt/future records and read failures retain the
+bindings. Client liabilities are unaffected. Closed recovery cannot advance
+through `UpdateAlternativeRecovery`, pre-signature authorization or
+`CommitProviderAlternativeRecoveryFinal`; exact committed-final replay is retained.
+Provider closure and unsigned pruning require the restore guard to pass before
+any release. A quarantined snapshot cannot prove absence of an external signature.
+Repeated submits after local cancellation without a wire result receive a terminal
+rejection; an authenticated saved negative result keeps its exact replay path.
 
 The persisted quote is authenticated again before acceptance or signing through
 `DecodePaymasterAuthorizationArtifacts`, shared with provider execution and
@@ -183,13 +202,14 @@ between failed processing calls. It still consumes the existing inbox byte/count
 quotas. This retention is in memory; restart continues to rely on durable evidence
 and the existing provider replay/recovery paths.
 
-Unsigned cancellation closes only work proven unsigned. Late responses cannot
-revive approval after closure. Signed or ambiguous work remains protected and
-exposes only Core-permitted actions. Cancel-to-self is an on-chain recovery
-transaction, not an undo guarantee: the original transaction can still win.
-Recovery quote expiry applies to unsigned preparation. `USER_SIGNED` and
-`FINAL_COMMITTED` remain observable and resumable through Core-permitted actions
-after that deadline; Qt must not request fresh approval for the saved signature.
+Client unsigned cancellation closes only work proven unsigned. Late responses
+cannot revive approval after closure. Signed or ambiguous client work remains
+protected and exposes only Core-permitted actions. Cancel-to-self is an on-chain
+recovery transaction, not an undo guarantee: the original transaction can still win.
+Client recovery quote expiry applies to unsigned preparation. Client
+`USER_SIGNED` and `FINAL_COMMITTED` remain observable and resumable through
+Core-permitted actions after that deadline; Qt must not request fresh approval
+for the saved signature.
 `CompleteClientConfirmedFinal` is the common local observation operation used by
 refresh, recovery resolution and bounded tip maintenance. A fully validated exact
 alternative recovery at 240 confirmations can settle without a provider result:
@@ -224,10 +244,11 @@ expire, without authorizing new work or recreating budget.
 
 Normal provider sessions and active alternative provider recoveries share an admission
 limit of 8,192 records. Exact existing retries do not consume another
-record. Each cleanup pass removes at most 64 eligible unsigned records of each
-kind after all saved retry/capacity deadlines and the 24-hour replay retention
-interval. Recovery pruning revalidates the saved shape, absence of signed/commit
-evidence and released pool/budget bindings before its atomic deletion.
+record. Each cleanup pass removes at most 64 eligible provider-unsigned records
+of each kind after all saved retry/capacity deadlines and the 24-hour replay
+retention interval, including closed USER-only records. Recovery pruning reuses the
+provider-unsigned proof and validates released pool/budget bindings before its
+atomic deletion; unknown or damaged evidence is retained.
 Expired unsigned client recoveries use the same bounded retention cleanup.
 Cleanup rechecks independent signature/commit evidence and fee liabilities,
 and removes a request locator only if it still belongs to that exact record.

@@ -244,6 +244,247 @@ bool RequireNoAuthorizationEvidence(WalletBatch& batch, const uint256& commit_ke
     return false;
 }
 
+namespace {
+bool RequireNoProviderPaymentSignature(WalletBatch& batch, const uint256& key,
+    const PaymasterId& provider, const XOnlyPubKey& identity_key, std::string& error)
+{
+    ProviderCommitRecord commit;
+    PaymasterResult result;
+    const auto commit_status = batch.ReadPaymasterProviderCommitWithStatus(key, commit);
+    const auto result_status = batch.ReadPaymasterResultWithStatus(key, result);
+    if (commit_status != DatabaseReadStatus::NOT_FOUND ||
+        (result_status != DatabaseReadStatus::NOT_FOUND && result_status != DatabaseReadStatus::FOUND)) {
+        error = commit_status == DatabaseReadStatus::FOUND
+            ? "PAYMASTER_PROVIDER_SIGNATURE_MAY_EXIST" : "PAYMASTER_SUBMIT_AUTHORIZATION_DATABASE_READ";
+        return false;
+    }
+    if (result_status == DatabaseReadStatus::FOUND &&
+        (!ValidatePaymasterResult(result, Params().GenesisBlock().GetHash(), provider,
+             key, identity_key, 1, error) || !IsNegativeTerminalResultStatus(result.status) ||
+         result.txid || result.raw_transaction_hash || result.final_transaction)) {
+        if (error.empty()) error = "PAYMASTER_PROVIDER_SIGNATURE_MAY_EXIST";
+        return false;
+    }
+    if (result_status == DatabaseReadStatus::NOT_FOUND) {
+        return RequireNoProviderSignatureEvidence(batch, key, error);
+    }
+    return true;
+}
+} // namespace
+
+bool ValidateProviderUnsignedAttempt(WalletBatch& batch, const PaymentSession& session,
+    const ProviderAttempt& attempt, std::string& error)
+{
+    ProviderIdentityRecord identity;
+    if (!session.provider_side || attempt.version != ProviderAttempt::CURRENT_VERSION ||
+        attempt.session_id != session.session_id ||
+        std::find(session.attempt_ids.begin(), session.attempt_ids.end(), attempt.attempt_id) == session.attempt_ids.end() ||
+        !session.final_txid.IsNull() || !session.recovery_txid.IsNull() ||
+        !attempt.final_txid.IsNull() || !attempt.final_transaction.empty() ||
+        attempt.provider_signed_at != 0 || !attempt.provider_signed_result.empty() ||
+        batch.ReadPaymasterIdentityWithStatus(identity) != DatabaseReadStatus::FOUND ||
+        identity.provider_id != attempt.provider_id || identity.identity_key != attempt.provider_identity_key ||
+        !RequireNoProviderPaymentSignature(batch, attempt.commit_key, attempt.provider_id,
+             attempt.provider_identity_key, error)) {
+        if (error.empty()) error = "PAYMASTER_PROVIDER_SIGNATURE_MAY_EXIST";
+        return false;
+    }
+    PaymasterQuoteRequest request;
+    PaymasterQuoteResponse response;
+    CollaborativePSBTTemplate trusted;
+    if (!LoadAttemptAuthorizationArtifacts(attempt, request, response, trusted, error) ||
+        request.intent.request_id != session.request_id ||
+        request.intent.session_id != session.session_id ||
+        Hash(CanonicalBytes(request)) != session.canonical_request_hash ||
+        !ValidateProviderAuthorizationManifest(attempt.provider_manifest, request.intent, response.quote, trusted, error)) return false;
+    if (!attempt.user_signed_psbt.empty()) {
+        PartiallySignedTransaction user_psbt;
+        if (!DecodeRawPSBT(user_psbt, MakeByteSpan(attempt.user_signed_psbt), error) ||
+            CanonicalBytes(user_psbt) != attempt.user_signed_psbt ||
+            !ValidateCollaborativePSBT(user_psbt, trusted, CollaborativeSignatureStage::USER_SIGNED, error)) return false;
+    } else if (attempt.state == AttemptState::USER_SIGNED || attempt.state == AttemptState::USER_PSBT_ACCEPTED) {
+        error = "PAYMASTER_PERSISTED_USER_PSBT_INVALID";
+        return false;
+    }
+    UserAuthorizationRecord authorization;
+    const auto status = batch.ReadPaymasterUserAuthorizationWithStatus(attempt.commit_key, authorization);
+    if (status == DatabaseReadStatus::FOUND) {
+        if (attempt.user_signed_psbt.empty() || authorization.attempt_id != attempt.attempt_id ||
+            authorization.canonical_psbt_hash != Hash(attempt.user_signed_psbt) ||
+            authorization.retry_until != attempt.retry_until || authorization.accepted_at < attempt.created_at ||
+            authorization.accepted_at > attempt.quote_expires_at || authorization.accepted_at > attempt.updated_at) {
+            error = "PAYMASTER_USER_AUTHORIZATION_CONFLICT";
+            return false;
+        }
+    } else if (status != DatabaseReadStatus::NOT_FOUND || attempt.state == AttemptState::USER_PSBT_ACCEPTED) {
+        error = "PAYMASTER_SUBMIT_AUTHORIZATION_DATABASE_READ";
+        return false;
+    }
+    return true;
+}
+
+bool ValidateProviderUnsignedRecovery(WalletBatch& batch, const AlternativeRecoveryRecord& recovery,
+    std::string& error)
+{
+    ProviderIdentityRecord identity;
+    const auto& manifest = recovery.recovery_response.manifest;
+    if (!recovery.provider_side ||
+        (recovery.phase != AlternativeRecoveryPhase::RESPONSE_VALIDATED && recovery.phase != AlternativeRecoveryPhase::USER_SIGNED) ||
+        !ValidateAlternativeRecoveryRecordShape(recovery, error) ||
+        batch.ReadPaymasterIdentityWithStatus(identity) != DatabaseReadStatus::FOUND ||
+        identity.provider_id != recovery.recovery_provider_id || identity.identity_key != recovery.recovery_provider_identity_key ||
+        !RequireNoProviderPaymentSignature(batch, recovery.recovery_response.recovery_commit_key,
+             recovery.recovery_provider_id, recovery.recovery_provider_identity_key, error)) {
+        if (error.empty()) error = "PAYMASTER_PROVIDER_SIGNATURE_MAY_EXIST";
+        return false;
+    }
+    UserAuthorizationRecord authorization;
+    if (batch.ReadPaymasterUserAuthorizationWithStatus(recovery.recovery_response.recovery_commit_key, authorization) != DatabaseReadStatus::NOT_FOUND) {
+        error = "PAYMASTER_SUBMIT_AUTHORIZATION_DATABASE_READ";
+        return false;
+    }
+    if (recovery.phase == AlternativeRecoveryPhase::RESPONSE_VALIDATED) return true;
+    CollaborativePSBTTemplate trusted;
+    if (!DecodeRawPSBT(trusted.psbt, MakeByteSpan(recovery.recovery_response.unsigned_psbt), error) ||
+        CanonicalBytes(trusted.psbt) != recovery.recovery_response.unsigned_psbt) return false;
+    const auto append_roles = [&](const std::vector<COutPoint>& inputs, InputRole role) {
+        for (const auto& input : inputs) {
+            const size_t index = trusted.input_roles.size();
+            if (!trusted.psbt.tx || index >= trusted.psbt.tx->vin.size() || trusted.psbt.tx->vin[index].prevout != input) return false;
+            trusted.input_roles.push_back(role);
+        }
+        return true;
+    };
+    if (!append_roles(manifest.user_dd_inputs, InputRole::USER_DD) ||
+        !append_roles(manifest.recovery_provider_carrier_inputs, InputRole::PROVIDER_CARRIER) ||
+        !append_roles(manifest.recovery_provider_dgb_inputs, InputRole::PROVIDER_DGB) ||
+        manifest.template_commitment != GetAlternativeRecoveryTemplateCommitment(manifest, trusted) ||
+        !ValidateCollaborativePSBT(trusted.psbt, trusted, CollaborativeSignatureStage::UNSIGNED, error)) {
+        if (error.empty()) error = "PAYMASTER_RECOVERY_TEMPLATE_MISMATCH";
+        return false;
+    }
+    if (recovery.phase == AlternativeRecoveryPhase::USER_SIGNED) {
+        AlternativeRecoverySubmit submit;
+        submit.genesis_hash = recovery.capacity_request.genesis_hash;
+        submit.request_id = recovery.request_id;
+        submit.session_id = recovery.session_id;
+        submit.recovery_id = recovery.recovery_id;
+        submit.recovery_provider_id = recovery.recovery_provider_id;
+        submit.recovery_request_hash = recovery.recovery_request_hash;
+        submit.recovery_commit_key = recovery.recovery_response.recovery_commit_key;
+        submit.template_commitment = manifest.template_commitment;
+        submit.user_psbt = recovery.user_signed_psbt;
+        PartiallySignedTransaction user_psbt;
+        AlternativeRecoveryTemplate recovery_template;
+        recovery_template.manifest = manifest;
+        recovery_template.trusted_template = std::move(trusted);
+        if (!ValidateAlternativeRecoverySubmitPayload(submit, recovery.recovery_response,
+                recovery_template, user_psbt, error)) return false;
+    }
+    return true;
+}
+
+bool ReleaseProviderUnsignedBindings(const uint256& commit_key,
+    const std::vector<COutPoint>& inputs, int64_t now,
+    std::vector<ProviderPoolEntry>& pool, ProviderBudgetLedger& ledger, std::string& error)
+{
+    std::set<COutPoint> remaining{inputs.begin(), inputs.end()};
+    if (commit_key.IsNull() || now <= 0 || remaining.empty() || remaining.size() != inputs.size() ||
+        !ValidateProviderPoolEntries(pool, error) || !ValidateProviderBudgetLedger(ledger, error)) {
+        if (error.empty()) error = "PAYMASTER_INVALID_PROVIDER_UNSIGNED_RELEASE";
+        return false;
+    }
+    for (auto& entry : pool) {
+        if (entry.reservation_id != commit_key) continue;
+        if (entry.purpose != PoolPurpose::OPERATIONAL || entry.state != PoolEntryState::RESERVED ||
+            remaining.erase(entry.outpoint) != 1) {
+            error = "PAYMASTER_PROVIDER_POOL_RELEASE_MISMATCH";
+            return false;
+        }
+        entry.state = PoolEntryState::AVAILABLE;
+        entry.reservation_id.SetNull();
+        entry.updated_at = std::max(entry.updated_at, now);
+    }
+    if (!remaining.empty()) {
+        error = "PAYMASTER_PROVIDER_POOL_RELEASE_MISMATCH";
+        return false;
+    }
+    return ReleaseProviderBudget(ledger, commit_key, now, error);
+}
+
+bool ValidateProviderAttemptReleaseBindings(const PaymentSession& session,
+    const ProviderAttempt& attempt, const std::vector<ProviderPoolEntry>& pool, std::string& error)
+{
+    PaymasterQuoteRequest request;
+    PaymasterQuoteResponse response;
+    CollaborativePSBTTemplate trusted;
+    if (!LoadAttemptAuthorizationArtifacts(attempt, request, response, trusted, error) ||
+        !session.provider_side || request.intent.request_id != session.request_id ||
+        request.intent.session_id != session.session_id) return false;
+    // Provider attempts retain the signed quote rather than a client capacity
+    // snapshot. Its authenticated resources remain closure authority after the
+    // redundant capacity-response replay cache has been compacted.
+    std::map<COutPoint, CapacityDGBInput> dgb;
+    for (const auto& input : response.quote.reserved_dgb_inputs) {
+        CapacityDGBInput resource;
+        resource.input = input;
+        if (!dgb.emplace(input.outpoint, std::move(resource)).second) {
+            error = "PAYMASTER_CAPACITY_RESOURCE_ROLE_MISMATCH";
+            return false;
+        }
+    }
+    std::optional<CapacityDDCarrier> carrier;
+    if (response.quote.reserved_carrier) {
+        carrier.emplace();
+        carrier->carrier = *response.quote.reserved_carrier;
+    }
+    std::set<COutPoint> expected_dgb;
+    for (const auto& [outpoint, resource] : dgb) expected_dgb.insert(outpoint);
+    const std::set<COutPoint> expected_carriers = carrier
+        ? std::set<COutPoint>{carrier->carrier.outpoint} : std::set<COutPoint>{};
+    if (std::set<COutPoint>{attempt.provider_manifest.provider_dgb_inputs.begin(),
+            attempt.provider_manifest.provider_dgb_inputs.end()} != expected_dgb ||
+        std::set<COutPoint>{attempt.provider_manifest.provider_carrier_inputs.begin(),
+            attempt.provider_manifest.provider_carrier_inputs.end()} != expected_carriers) {
+        error = "PAYMASTER_CAPACITY_RESOURCE_ROLE_MISMATCH";
+        return false;
+    }
+    std::set<COutPoint> matched;
+    for (const auto& entry : pool) {
+        const auto input = dgb.find(entry.outpoint);
+        const bool is_carrier = carrier && carrier->carrier.outpoint == entry.outpoint;
+        if (input != dgb.end() || is_carrier) {
+            const bool exact = input != dgb.end()
+                ? CapacityProofMatchesPoolEntry(input->second, entry)
+                : CapacityProofMatchesPoolEntry(*carrier, entry);
+            if (exact && entry.state == PoolEntryState::RESERVED &&
+                entry.reservation_id == attempt.commit_key && matched.insert(entry.outpoint).second) continue;
+        } else if (entry.reservation_id != attempt.commit_key && entry.reservation_id != attempt.client_nonce) {
+            continue;
+        }
+        error = "PAYMASTER_CAPACITY_RESERVATION_CONFLICT";
+        return false;
+    }
+    if (matched.size() != expected_dgb.size() + expected_carriers.size()) {
+        error = "PAYMASTER_OPERATIONAL_SLOT_MISSING";
+        return false;
+    }
+    return true;
+}
+
+bool ValidateProviderRecoveryReleaseBindings(const AlternativeRecoveryRecord& recovery,
+    const std::vector<ProviderPoolEntry>& pool, std::string& error)
+{
+    PaymasterCapacityProof proof;
+    if (!VerifyCapacityEvidenceArtifact(recovery.capacity_snapshot.capacity_proof,
+            recovery.capacity_request, recovery.recovery_provider_identity_key, proof)) {
+        error = "PAYMASTER_CAPACITY_SNAPSHOT_BINDING_MISMATCH";
+        return false;
+    }
+    return ValidateRecoveryCapacityResources(recovery, recovery.capacity_request, proof,
+        recovery.capacity_snapshot.capacity_proof, pool, recovery.recovery_response.recovery_commit_key, error);
+}
+
 bool HasAcceptedClientManifest(const ProviderAttempt& attempt, int64_t observation_time)
 {
     using namespace DigiDollar::Paymaster;
@@ -891,12 +1132,13 @@ bool ValidateAlternativeRecoveryRecordShape(
         error = recovery.original_provider_id == recovery.recovery_provider_id ? "PAYMASTER_RECOVERY_PROVIDER_MUST_DIFFER" : "PAYMASTER_INVALID_ALTERNATIVE_RECOVERY";
         return false;
     }
+    const bool closed_provider_submit = recovery.provider_side && recovery.phase == AlternativeRecoveryPhase::USER_SIGNED;
     if (recovery.expired &&
         ((recovery.provider_side &&
-          recovery.phase != AlternativeRecoveryPhase::RESPONSE_VALIDATED) ||
+          recovery.phase != AlternativeRecoveryPhase::RESPONSE_VALIDATED && !closed_provider_submit) ||
          (!recovery.provider_side &&
           recovery.phase > AlternativeRecoveryPhase::RESPONSE_VALIDATED) ||
-         !recovery.user_signed_psbt.empty() ||
+         (!closed_provider_submit && !recovery.user_signed_psbt.empty()) ||
          !recovery.final_transaction.empty() ||
          !recovery.expected_wtxid.IsNull())) {
         error = "PAYMASTER_INVALID_EXPIRED_RECOVERY";

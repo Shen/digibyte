@@ -112,6 +112,29 @@ std::optional<std::string> GetPermanentProviderSubmitRejection(
     int64_t now)
 {
     std::optional<std::string> reason;
+    if (attempt.state == AttemptState::REJECTED) {
+        LOCK(wallet.cs_wallet);
+        WalletBatch batch{wallet.GetDatabase()};
+        std::string error;
+        if (!paymaster_store::internal::ValidateProviderUnsignedAttempt(batch, session, attempt, error)) {
+            throw ApplicationError(ErrorKind::WALLET, error);
+        }
+        PaymasterResult rejection;
+        if (batch.ReadPaymasterResultWithStatus(attempt.commit_key, rejection) == DatabaseReadStatus::NOT_FOUND) {
+            return "PAYMASTER_SUBMIT_REJECTED";
+        }
+        // Authenticated negative results retain their existing exact replay
+        // path; cancellation without a wire result is a terminal peer answer.
+    }
+    if (attempt.state == AttemptState::QUOTE_EXPIRED && !attempt.user_signed_psbt.empty()) {
+        LOCK(wallet.cs_wallet);
+        WalletBatch batch{wallet.GetDatabase()};
+        std::string error;
+        if (!paymaster_store::internal::ValidateProviderUnsignedAttempt(batch, session, attempt, error)) {
+            throw ApplicationError(ErrorKind::WALLET, error);
+        }
+        return "PAYMASTER_SUBMIT_QUOTE_EXPIRED";
+    }
     switch (attempt.state) {
     case AttemptState::QUOTED:
         if (now > attempt.retry_until) reason = "PAYMASTER_SUBMIT_RETRY_EXPIRED";
@@ -296,6 +319,10 @@ PaymentResult SubmitPaymasterTransactionWithGuard(CWallet& target, PartiallySign
     }
     if (!already_committed && !exact_persisted_provider_signature &&
         now > attempt.retry_until) {
+        if ((attempt.state == AttemptState::USER_SIGNED || attempt.state == AttemptState::USER_PSBT_ACCEPTED) &&
+            !store.CloseExpiredProviderAttempt(attempt.attempt_id, now, attempt, error)) {
+            throw ApplicationError(ErrorKind::WALLET, error);
+        }
         throw ProviderSubmitExpired{"Paymaster retry window expired"};
     }
     if (!already_committed && attempt.state == AttemptState::QUOTE_EXPIRED) {
@@ -1040,6 +1067,14 @@ ProviderProcessingResult ProcessProviderRecoverySubmit(
             *context.paymaster, direct,
             "PAYMASTER_RECOVERY_SUBMIT_EXPIRED", "recovery_submit");
     }
+    if (recovery.phase == AlternativeRecoveryPhase::USER_SIGNED &&
+        std::min(recovery.recovery_response.expires_at, recovery.capacity_snapshot.expires_at) <= now) {
+        if (!store.CloseExpiredProviderRecovery(recovery.recovery_id, now, error)) {
+            throw ApplicationError(ErrorKind::WALLET, error);
+        }
+        return RejectProviderMessage(*context.paymaster, direct,
+            "PAYMASTER_RECOVERY_SUBMIT_EXPIRED", "recovery_submit");
+    }
 
     node::NodeContext* node_ctx = wallet->chain().context();
     if (!node_ctx || !node_ctx->chainman) {
@@ -1187,6 +1222,11 @@ ProviderProcessingResult ProcessProviderPaymentSubmit(
     }
     if (const auto reason = GetPermanentProviderSubmitRejection(
             *wallet, session, attempt, submitted_psbt, trusted, GetTime())) {
+        if ((attempt.state == AttemptState::USER_SIGNED || attempt.state == AttemptState::USER_PSBT_ACCEPTED) &&
+            (*reason == "PAYMASTER_SUBMIT_QUOTE_EXPIRED" || *reason == "PAYMASTER_SUBMIT_RETRY_EXPIRED") &&
+            !store.CloseExpiredProviderAttempt(attempt.attempt_id, GetTime(), attempt, error)) {
+            throw ApplicationError(ErrorKind::WALLET, error);
+        }
         return RejectProviderMessage(*context.paymaster, direct, *reason, "submit");
     }
 
@@ -1233,6 +1273,11 @@ ProviderProcessingResult ProcessProviderPaymentSubmit(
             }
             if (const auto reason = GetPermanentProviderSubmitRejection(
                     *wallet, current_session, current, current_submitted, current_trusted, GetTime())) {
+                if ((current.state == AttemptState::USER_SIGNED || current.state == AttemptState::USER_PSBT_ACCEPTED) &&
+                    (*reason == "PAYMASTER_SUBMIT_QUOTE_EXPIRED" || *reason == "PAYMASTER_SUBMIT_RETRY_EXPIRED") &&
+                    !store.CloseExpiredProviderAttempt(current.attempt_id, GetTime(), current, error)) {
+                    throw ApplicationError(ErrorKind::WALLET, error);
+                }
                 return RejectProviderMessage(*context.paymaster, direct, *reason, "submit");
             }
             throw;

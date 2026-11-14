@@ -1598,6 +1598,7 @@ bool RejectUnavailableTemplateInputs(
             error = "PAYMASTER_REJECTED_RESULT_MISSING";
             return false;
         }
+        if (!store.CancelProviderQuote(attempt.attempt_id, now, attempt, error)) return false;
         rejected = true;
         return true;
     }

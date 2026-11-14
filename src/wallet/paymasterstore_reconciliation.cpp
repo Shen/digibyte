@@ -9,6 +9,7 @@
 
 #include <logging/timer.h>
 #include <wallet/paymasterstore_internal.h>
+#include <wallet/paymasteridentity.h>
 #include <wallet/paymasterprovider.h>
 
 #include <chainparams.h>
@@ -1024,6 +1025,7 @@ bool PaymasterStore::PruneSession(const std::string& request_id, std::string& er
         return false;
     }
     const bool prune_unsigned = unsigned_expiry_time > 0;
+    if (prune_unsigned && session.provider_side && !CheckPaymasterProviderRestoreGuard(m_wallet, error)) return false;
     if (prune_unsigned &&
         (!session.provider_side || session.state != SessionState::FAILED ||
          session.pending_phase != PendingPhase::NONE || !session.final_txid.IsNull() ||
@@ -1119,8 +1121,7 @@ bool PaymasterStore::PruneSession(const std::string& request_id, std::string& er
             return false;
         }
         if (prune_unsigned &&
-            (records.attempt.state != AttemptState::QUOTE_EXPIRED ||
-             !records.attempt.user_signed_psbt.empty() ||
+            ((records.attempt.state != AttemptState::QUOTE_EXPIRED && records.attempt.state != AttemptState::REJECTED) ||
              !records.attempt.final_transaction.empty() || !records.attempt.final_txid.IsNull() ||
              records.attempt.provider_signed_at != 0 || !records.attempt.provider_signed_result.empty() ||
              !records.attempt.accepted_client_manifest_id.IsNull() || records.attempt.client_manifest_accepted_at != 0 ||
@@ -1227,7 +1228,8 @@ bool PaymasterStore::PruneSession(const std::string& request_id, std::string& er
         if (prune_unsigned) {
             ProviderBudgetLedger ledger;
             std::vector<ProviderPoolEntry> pool;
-            if (records.has_commit || records.has_authorization || records.has_result || records.has_outcome ||
+            if (records.has_commit || records.has_outcome ||
+                !ValidateProviderUnsignedAttempt(batch, session, records.attempt, error) ||
                 !batch.ReadPaymasterProviderBudgetLedger(ledger) || !ValidateProviderBudgetLedger(ledger, error) ||
                 !batch.ReadPaymasterProviderPool(pool) || !ValidateProviderPoolEntries(pool, error) ||
                 std::any_of(ledger.reservations.begin(), ledger.reservations.end(),
