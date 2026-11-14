@@ -546,6 +546,41 @@ git diff -w $paymasterBases.official_baseline HEAD
 
 ## Review follow-up regressions
 
+For the missing-ledger, saved Onion-arrival, announcement-size, client-recovery
+cleanup and pool-history lookup corrections, rebuild the affected sources and
+direct consumers, then run this selection from the repository root with isolated
+test data. Runtime is seconds to about one minute; require exit 0 and no failed
+selected cases:
+
+```powershell
+$reviewCases = @(
+    'paymaster_wallet_identity_tests/policy_setters_never_initialize_over_unreadable_accounting,pool_history_queries_follow_protected_sources_not_wallet_size,announcement_builder_rejects_large_admission_parents_before_publication,finite_setup_admits_after_full_terminal_history_without_recurring_approval,finite_setup_authority_and_history_commit_atomically,partial_dgb_refill_funds_whole_slots_and_preserves_recovery,partial_carrier_refill_preserves_whole_slots_and_admission_priority,carrier_withdrawal_respects_new_manual_source_lock,dgb_rebalance_respects_new_manual_source_lock,client_limits_reject_corrupt_and_unknown_disk_versions',
+    'paymaster_wallet_security_tests/provider_high_privacy_recovery_uses_saved_arrival_observation,provider_recovery_pruning_is_bounded_and_preserves_signed_records,expired_unsigned_provider_recovery_history_is_compacted_atomically,client_recovery_confirmed_before_first_result_survives_expiry_and_reload,client_recovery_mempool_final_without_result_retries_exact_authorization',
+    'paymaster_wallet_store_tests/expired_client_recoveries_are_pruned_without_erasing_replacement,historical_self_recovery_reconciliation_is_idempotent_and_reorg_safe',
+    'paymaster_directory_tests/announcement_wire_size_and_name_are_bounded_before_intake',
+    'paymaster_wire_tests/direct_arrival_observation_survives_peer_disconnection',
+    'paymaster_transport_tests/channel_handler_retains_onion_forwarding_origin_after_disconnect,channel_authentication_rejects_two_leg_bip324_relay,channel_handler_withholds_all_requests_until_authenticated',
+    'paymaster_application_tests/maintenance_inventory_pruning_preserves_spends_releases_and_atomic_history',
+    'walletdb_tests/walletdb_readkeyvalue,walletdb_read_write_deadlock',
+    'wallet_tests/ComputeTimeSmart,ListCoinsTest,BasicOutputTypesTest,WatchOnlyPubKeys',
+    'digidollar_wave17_spendability_tests'
+)
+& ./build_msvc/x64/Release/test_digibyte.exe "--run_test=$($reviewCases -join ':')" --report_level=detailed
+if ($LASTEXITCODE -ne 0) { throw 'Paymaster accounting/transport/history regression failed' }
+```
+
+These cases distinguish absent accounting from fresh enrollment, preserve finite
+setup history, deny both automatic refills over missing accounting, retain trusted
+Onion observations after disconnect and defer unknown observations. They exercise
+the publisher and exact 64 KiB receiver boundary, name limits before allocation,
+atomic unsigned-client cleanup with a newer request locator, retained signed
+recovery and legacy reconciliation. The 1,000-transaction wallet case counts
+history reads on a warm candidate index and shares one observation with coin
+selection; aborts and unsupported history remain fail-closed. Keep the existing
+pool-history reorg, manual-lock and ordinary DGB/DD/database cases in this run.
+Clean product, Qt, functional, cross-platform and sanitizer checks remain the
+separate operator selections below; a partial native link does not establish them.
+
 For the pool-history, parser-allocation and missing-result completion changes,
 rebuild the affected objects and run this focused selection. Require exit 0
 and no failed selected cases (runtime: about one minute on Windows):

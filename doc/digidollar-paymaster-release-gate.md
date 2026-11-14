@@ -4,6 +4,44 @@ There is **no complete current-revision release certification** in this record.
 The candidate below and historical checkpoints identify actual verification;
 implemented behavior alone does not establish release acceptance.
 
+## Accounting continuity, arrival observations and bounded wallet lookups
+
+AP1–AP6 following review of `47eccd5f971a4616b2bd4e8874b4b95b2b5f4f73`,
+verified in the uncommitted worktree on 2026-11-14. Contracts are in the
+[implementation guide](digidollar-paymaster-implementation.md); the exact native
+selection and separate operator checks are in the
+[focused runbook](digidollar-paymaster-testing.md#review-follow-up-regressions).
+Consensus, checkpoint guarantees and valid wire/record encodings are unchanged.
+
+| Executed check | Result and scope |
+|---|---|
+| Final combined native selection | Exit 0: **52 cases / 2,920 assertions**, no selected failures/skips. Missing policy/ledger pairing and denied automatic refills; finite setup and whole-slot refills; real authenticated BIP324 arrival classification through disconnect; unknown-origin deferral and clearnet rejection at recovery intake; publisher/receiver size bounds and name allocation; atomic unsigned-client cleanup preserving newer locators; signed alternative-recovery completion and historical reconciliation/reorgs; warm historical-source read counts with 1,000 unrelated transactions, shared selection observations and abort/future-history vetoes; ordinary DGB/DD selection, locks and wallet database behavior. |
+| Compilation | All **18 changed C++ units** freshly compiled, plus six direct consumers/support units, with MSVC toolset 14.43.34808, `/W3 /WX /Od /MT /std:c++20`, then linked. Source/object hashes checked. **11 of 12** changed production units pass C++17 `/Zs`; `wallet/interfaces.cpp` encounters the pre-existing designated initializer at its migration adapter, which MSVC requires C++20 to parse. No full C++17 build is claimed. |
+| Local controls | Dependency/cycle check, six positive/negative boundary fixtures, current changed-path/shared-Core records, JSON and whitespace checks pass. The scope record names four necessary shared adapters added to the path list for the authorized APs; dependency restrictions, forbidden paths and financial/checkpoint validation remain unchanged. |
+
+Code content through `4fa58fa83bdceeba32cc221e08632b3ae6cd391e` matches
+the tested final source. The six code commits additionally pass **24 syntax
+checks** using staged source/header snapshots: C++17 production, C++20 tests
+and the existing C++20 migration adapter. Every code prefix passes the committed
+boundary comparison against scope commit
+`eb1f58404516b7c35e9143797132721e7887bf4f`.
+Commands, commit/blob identities and source-content comparisons are retained in
+`.ai/commit-ap1-ap6-47ecc/`. These checks do not establish clean intermediate
+product builds or an additional native test run.
+
+Native SHA256:
+`2b6ad123b3e13dbaf73a212c7d99a6bb240c9dc5ec00f03784230542e3db4dff`.
+Commands, logs, source/object hashes and executable identity are retained locally
+under `.ai/implement-ap1-ap6-47ecc/`, including `verification.json` and
+`runs.jsonl`. Initial failed compile/link/test checks remain recorded; corrected
+fixtures establish real listener admission and valid provider policy/endpoint
+before exercising the unchanged production checks.
+
+This is an isolated partial link with retained dependencies and incomplete
+transitive-header provenance. Clean product builds, Qt, full native/functional
+suites, cross-platform builds, sanitizers, the repository Tidy plugin and long
+fuzz/live-network campaigns were not run; they remain operator/release checks.
+
 ## Pool history, bounded decoding and local recovery completion
 
 AP1–AP6 based on `17db53cde8423ba9790b62b0d00531d062ed8de1`, verified
