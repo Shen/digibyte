@@ -342,8 +342,13 @@ outputs; a confirmed withdrawal does not require its spent sources in current
 inventory. If a signed source becomes terminal and is pruned in one transition,
 its protected reserved/committed before-image is retained too; it cannot become
 automatic capacity. A returning unresolved source uses its retained full row. Ordinary
-reservation/balance reads point-read present unspent wallet outputs when
-history exists, preserving protection after a reorg without scanning archives.
+reservation/balance reads reuse a commit-aware historical candidate lookup.
+Cold lookup validates the history prefix; pool writes invalidate it before
+mutation and on transaction completion, and unload discards it. Each scan
+rechecks current unspent sources and their authoritative dispositions, including
+after reorgs. Unrelated wallet outputs incur no history point reads. One
+wallet-bound snapshot serves both reserves and available coins in a balance
+operation; it must not cross wallet writes or release `cs_wallet`.
 Missing disposition for an already-confirmed, unspent legacy output requires
 explicit review (`PAYMASTER_POOL_HISTORY_REVIEW_REQUIRED`); absence cannot
 undo a lost release decision. History grows with retired wallet outputs,

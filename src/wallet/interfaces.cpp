@@ -417,13 +417,14 @@ public:
         }
 
         std::set<COutPoint> pool_inputs;
-        const auto pool_status = GetPaymasterProviderPoolInputs(*m_wallet, pool_inputs);
+        PaymasterInputReservations reservations{m_wallet.get()};
+        const auto pool_status = reservations.GetProtectedPoolInputs(*m_wallet, pool_inputs);
         if (pool_status != DatabaseReadStatus::FOUND && pool_status != DatabaseReadStatus::NOT_FOUND) {
             return result; // Unknown availability must not look like a free or empty pool.
         }
         CCoinControl control;
         control.fAllowWatchOnly = true;
-        for (const auto& coin : AvailableCoins(*m_wallet, &control).All()) {
+        for (const auto& coin : AvailableCoins(*m_wallet, &control, std::nullopt, {}, reservations).All()) {
             auto& part = (m_wallet->IsMine(coin.txout) & ISMINE_SPENDABLE) ? result.spendable : result.watch_only;
             part.available += coin.txout.nValue;
         }

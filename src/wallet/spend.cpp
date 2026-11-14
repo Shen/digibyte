@@ -341,6 +341,14 @@ CoinsResult AvailableCoins(const CWallet& wallet,
                            std::optional<CFeeRate> feerate,
                            const CoinFilterParams& params)
 {
+    PaymasterInputReservations reservations{&wallet};
+    return AvailableCoins(wallet, coinControl, feerate, params, reservations);
+}
+
+CoinsResult AvailableCoins(const CWallet& wallet, const CCoinControl* coinControl,
+                           std::optional<CFeeRate> feerate, const CoinFilterParams& params,
+                           PaymasterInputReservations& reservations)
+{
     AssertLockHeld(wallet.cs_wallet);
 
     CoinsResult result;
@@ -354,7 +362,7 @@ CoinsResult AvailableCoins(const CWallet& wallet,
     std::vector<COutPoint> outpoints;
     std::set<COutPoint> paymaster_pool_inputs;
     const DatabaseReadStatus paymaster_pool_status{
-        GetPaymasterProviderPoolInputs(wallet, paymaster_pool_inputs)};
+        reservations.GetProtectedPoolInputs(wallet, paymaster_pool_inputs)};
     if (paymaster_pool_status != DatabaseReadStatus::FOUND &&
         paymaster_pool_status != DatabaseReadStatus::NOT_FOUND) {
         // An unreadable safety record cannot safely be interpreted as an empty

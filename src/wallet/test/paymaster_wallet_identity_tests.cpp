@@ -74,6 +74,10 @@ class UnreadablePaymasterDatabase : public MockableDatabase
         }
         DatabaseReadStatus ReadKey(DataStream&& key, DataStream& value) override
         {
+            DataStream decoded{key};
+            std::string type;
+            decoded >> type;
+            if (type == "pmpoolhistory") ++m_db.history_reads;
             if (Fails(key)) { ++m_db.failed_reads; return DatabaseReadStatus::READ_ERROR; }
             const auto row = m_db.m_records.find(SerializeData{key.begin(), key.end()});
             if (row == m_db.m_records.end()) return DatabaseReadStatus::NOT_FOUND;
@@ -92,6 +96,7 @@ class UnreadablePaymasterDatabase : public MockableDatabase
 public:
     std::string unreadable;
     size_t failed_reads{0};
+    size_t history_reads{0};
     std::unique_ptr<DatabaseBatch> MakeBatch(bool = true) override { return std::make_unique<Batch>(*this); }
 };
 
@@ -1143,6 +1148,58 @@ BOOST_AUTO_TEST_CASE(paymaster_input_scan_reuses_pool_without_cross_scan_cache)
         BOOST_CHECK(scan.IsReserved(reservation.outpoint));
         BOOST_CHECK(!scan.IsReserved(COutPoint{uint256::ONE, 511}));
     }
+}
+
+BOOST_AUTO_TEST_CASE(pool_history_queries_follow_protected_sources_not_wallet_size)
+{
+    auto owned = std::make_unique<UnreadablePaymasterDatabase>();
+    auto& database = *owned;
+    CWallet wallet{m_node.chain.get(), "historical-input-scan", std::move(owned)};
+    LOCK(wallet.cs_wallet);
+    CKey key;
+    key.MakeNewKey(true);
+    const auto script = GetScriptForDestination(WitnessV1Taproot{XOnlyPubKey{key.GetPubKey()}});
+    COutPoint historical;
+    for (uint32_t i = 0; i < 1000; ++i) {
+        CMutableTransaction tx;
+        tx.nLockTime = i;
+        tx.vin.emplace_back(COutPoint{uint256::ONE, i});
+        tx.vout.emplace_back(10000000, script);
+        tx.vout.emplace_back(10000000, CScript{} << OP_TRUE);
+        const auto ref = MakeTransactionRef(tx);
+        BOOST_REQUIRE(wallet.AddToWallet(ref, TxStateInactive{}));
+        if (i == 0) historical = COutPoint{ref->GetHash(), 0};
+    }
+    ProviderPoolEntry source;
+    source.outpoint = historical;
+    source.purpose = PoolPurpose::OPERATIONAL;
+    source.asset = PoolAsset::DGB;
+    source.state = PoolEntryState::SPENT;
+    source.script_pub_key = script;
+    source.dgb_value = DGBSatoshis{10000000};
+    source.confirmation_height = 1;
+    source.updated_at = 1;
+    WalletBatch batch{wallet.GetDatabase()};
+    BOOST_REQUIRE(batch.WritePaymasterProviderPool({source}));
+    BOOST_REQUIRE(batch.WritePaymasterProviderPool({}));
+    std::set<COutPoint> inputs;
+    BOOST_REQUIRE(GetPaymasterProviderPoolInputs(wallet, inputs) == DatabaseReadStatus::FOUND);
+    BOOST_CHECK(inputs.count(historical) == 1);
+    database.history_reads = 0;
+    PaymasterInputReservations snapshot{&wallet};
+    BOOST_REQUIRE(snapshot.GetProtectedPoolInputs(wallet, inputs) == DatabaseReadStatus::FOUND);
+    const auto reads = database.history_reads;
+    BOOST_CHECK_EQUAL(reads, 1U);
+    AvailableCoins(wallet, nullptr, std::nullopt, {}, snapshot);
+    BOOST_CHECK_EQUAL(database.history_reads, reads);
+    BOOST_REQUIRE(batch.TxnBegin());
+    BOOST_REQUIRE(batch.WritePaymasterProviderPool({source}));
+    BOOST_REQUIRE(batch.TxnAbort());
+    BOOST_REQUIRE(GetPaymasterProviderPoolInputs(wallet, inputs) == DatabaseReadStatus::FOUND);
+    BOOST_CHECK(inputs.count(historical) == 1);
+    auto raw = database.MakeBatch();
+    BOOST_REQUIRE(raw->Write(std::string{"pmpoolhistoryversion"}, uint16_t{65535}));
+    BOOST_CHECK(GetPaymasterProviderPoolInputs(wallet, inputs) == DatabaseReadStatus::UNSUPPORTED_VERSION);
 }
 
 BOOST_AUTO_TEST_CASE(announcement_builder_rejects_large_admission_parents_before_publication)

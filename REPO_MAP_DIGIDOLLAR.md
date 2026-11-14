@@ -855,6 +855,10 @@ unsigned firewall; only the full proof includes unindexed recovery scans.
 Confirmed provider recovery finals move to terminal archival storage after the
 existing safety depth; active scans exclude them and exact replay/finance read
 their full evidence by the recovery ID bound in the commit.
+`ReadPaymasterPoolHistoryInputs` uses the wallet-lifetime session-index registry
+for historical candidate keys and rechecks live dispositions through `WalletBatch`.
+`PaymasterInputReservations` shares one wallet-bound observation between balance
+and coin-selection callers.
 
 ### src/wallet/paymasterapplication*, paymasterservice*, paymasterclient*, paymasterprocessing*, paymasterfinance*
 

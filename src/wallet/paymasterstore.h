@@ -41,7 +41,9 @@ class WalletBatch;
 /** One read-only coin/balance scan under cs_wallet. Lazily opens one database
  * batch and validates/indexes the provider pool once. Do not retain this view
  * across wallet mutations or release cs_wallet while using it. Point reservation
- * reads remain fail-closed; nothing is cached between scans. A null wallet is
+ * reads remain fail-closed; financial records are not cached between scans.
+ * Historical candidate lookup is commit-aware and revalidates live sources.
+ * A null wallet is
  * supported by the standalone DigiDollar test wallet. */
 class PaymasterInputReservations
 {
@@ -52,6 +54,7 @@ public:
      * availability unknown. IsReserved retains the conservative selection API. */
     DatabaseReadStatus GetReservationStatus(const COutPoint& outpoint);
     bool IsReserved(const COutPoint& outpoint);
+    DatabaseReadStatus GetProtectedPoolInputs(const CWallet& wallet, std::set<COutPoint>& inputs);
 
 private:
     const CWallet* m_wallet;

@@ -53,21 +53,11 @@ DatabaseReadStatus ReadProtectedPaymasterInputs(const CWallet& wallet, WalletBat
     if (pool_status != DatabaseReadStatus::FOUND && pool_status != DatabaseReadStatus::NOT_FOUND) return pool_status;
     for (const auto& entry : pool)
         if (IsActiveProviderPoolState(entry.state)) inputs.insert(entry.outpoint);
-    const auto history_status = batch.ReadPaymasterPoolHistoryMarker();
+    std::set<COutPoint> historical;
+    const auto history_status = batch.ReadPaymasterPoolHistoryInputs(wallet, historical);
     if (history_status != DatabaseReadStatus::FOUND && history_status != DatabaseReadStatus::NOT_FOUND) return history_status;
     if (history_status == DatabaseReadStatus::FOUND) {
-        // Point-read only present, unspent wallet outputs, never the archive.
-        // A reorg must not make retired signed inputs ordinary selectable coins.
-        for (const auto& [txid, transaction] : wallet.mapWallet) {
-            for (uint32_t n{0}; n < transaction.tx->vout.size(); ++n) {
-                const COutPoint outpoint{txid, n};
-                if (wallet.IsSpent(outpoint) || inputs.count(outpoint)) continue;
-                ProviderPoolEntry retired;
-                const auto status = batch.ReadPaymasterPoolHistoryWithStatus(outpoint, retired);
-                if (status != DatabaseReadStatus::FOUND && status != DatabaseReadStatus::NOT_FOUND) return status;
-                if (status == DatabaseReadStatus::FOUND && retired.state != PoolEntryState::RELEASED) inputs.insert(outpoint);
-            }
-        }
+        inputs.insert(historical.begin(), historical.end());
     }
     PaymasterMaintenanceExecution execution;
     const auto execution_status = batch.ReadPaymasterMaintenanceExecutionWithStatus(execution);
@@ -131,8 +121,22 @@ DatabaseReadStatus GetPaymasterProviderPoolInputs(
     const CWallet& wallet, std::set<COutPoint>& inputs)
 {
     LOCK(wallet.cs_wallet);
-    WalletBatch batch{wallet.GetDatabase()};
-    return ReadProtectedPaymasterInputs(wallet, batch, inputs);
+    PaymasterInputReservations snapshot{&wallet};
+    return snapshot.GetProtectedPoolInputs(wallet, inputs);
+}
+
+DatabaseReadStatus PaymasterInputReservations::GetProtectedPoolInputs(const CWallet& wallet, std::set<COutPoint>& inputs)
+{
+    AssertLockHeld(wallet.cs_wallet);
+    inputs.clear();
+    if (m_wallet != &wallet) return DatabaseReadStatus::READ_ERROR;
+    if (!m_batch) m_batch = std::make_unique<WalletBatch>(wallet.GetDatabase());
+    if (!m_pool_loaded) {
+        m_pool_status = ReadProtectedPaymasterInputs(wallet, *m_batch, m_pool_inputs);
+        m_pool_loaded = true;
+    }
+    if (m_pool_status == DatabaseReadStatus::FOUND || m_pool_status == DatabaseReadStatus::NOT_FOUND) inputs = m_pool_inputs;
+    return m_pool_status;
 }
 
 namespace paymaster_store::internal {

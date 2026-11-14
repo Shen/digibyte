@@ -727,6 +727,9 @@ public:
     DatabaseReadStatus ReadPaymasterPoolHistoryWithStatus(
         const COutPoint& outpoint, DigiDollar::Paymaster::ProviderPoolEntry& entry);
     DatabaseReadStatus ReadPaymasterPoolHistoryMarker();
+    /** Complete commit-aware candidate lookup, with fresh authoritative
+     * disposition reads for currently unspent wallet sources. */
+    DatabaseReadStatus ReadPaymasterPoolHistoryInputs(const CWallet& wallet, std::set<COutPoint>& inputs);
     bool WritePaymasterLiquidityPolicy(
         const DigiDollar::Paymaster::ProviderLiquidityPolicy& policy,
         bool overwrite = true);

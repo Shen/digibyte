@@ -6,6 +6,7 @@
 #include <wallet/paymastercheckpoint.h>
 #include <wallet/paymastersessionindex.h>
 #include <wallet/paymasterfinancecache.h>
+#include <wallet/wallet.h>
 #include <paymaster/finance.h>
 
 #include <chainparams.h>
@@ -31,6 +32,8 @@ using FinalIds = std::pair<uint256, uint256>;
 struct SessionIndex {
     bool valid{false};
     bool commits_valid{false};
+    bool pool_history_valid{false};
+    std::set<COutPoint> pool_history_candidates;
     uint64_t revision{0};
     uint256 capacity_cleanup_after;
     std::map<PaymasterScan, PaymasterScanPosition> scans;
@@ -77,6 +80,7 @@ struct PendingSessionIndex {
     WalletDatabase* database{nullptr};
     std::map<std::string, std::optional<FinalIds>> updates;
     std::map<uint256, std::optional<uint256>> commits;
+    bool pool_history_changed{false};
 };
 
 SessionIndex BuildSessionIndex(const std::vector<DigiDollar::Paymaster::PaymentSession>& sessions)
@@ -120,6 +124,7 @@ void PaymasterSessionIndexEnd(const WalletBatch* owner, bool committed)
     const auto index = session_indexes.find(pending->second.database);
     if (index != session_indexes.end()) {
         ++index->second.revision;
+        if (pending->second.pool_history_changed) index->second.pool_history_valid = false;
         if (!committed) {
             index->second.valid = false;
             index->second.commits_valid = false;
@@ -189,6 +194,8 @@ void PrimePaymasterSessionIndex(WalletDatabase& database,
     rebuilt.commits_valid = session_indexes[&database].commits_valid;
     rebuilt.commit_transactions = std::move(session_indexes[&database].commit_transactions);
     rebuilt.commits_by_transaction = std::move(session_indexes[&database].commits_by_transaction);
+    rebuilt.pool_history_valid = session_indexes[&database].pool_history_valid;
+    rebuilt.pool_history_candidates = std::move(session_indexes[&database].pool_history_candidates);
     session_indexes[&database] = std::move(rebuilt);
 }
 
@@ -2028,6 +2035,16 @@ bool WalletBatch::WritePaymasterProviderPool(
     if (!ValidateProviderPoolEntries(entries, error)) return false;
     const bool own = !PaymasterCheckpointInTransaction(this);
     if (own && !TxnBegin()) return false;
+    {
+        // Invalidate before any mutation (including reads inside this batch).
+        // Abort/destruction invalidates again, so uncommitted candidates never
+        // become the next scan's view of committed history.
+        std::lock_guard<std::mutex> lock{session_index_mutex};
+        session_indexes[&m_database].pool_history_valid = false;
+        auto& pending = pending_session_indexes[this];
+        pending.database = &m_database;
+        pending.pool_history_changed = true;
+    }
     const auto fail = [&] {
         PaymasterCheckpointFailed(this);
         if (own) TxnAbort();
@@ -2070,6 +2087,69 @@ DatabaseReadStatus WalletBatch::ReadPaymasterPoolHistoryMarker()
     const auto status = m_batch->ReadWithStatus(std::string{"pmpoolhistoryversion"}, version);
     if (status != DatabaseReadStatus::FOUND) return status;
     return version == 1 ? status : DatabaseReadStatus::UNSUPPORTED_VERSION;
+}
+
+DatabaseReadStatus WalletBatch::ReadPaymasterPoolHistoryInputs(const CWallet& wallet, std::set<COutPoint>& inputs)
+{
+    AssertLockHeld(wallet.cs_wallet);
+    inputs.clear();
+    const auto marker = ReadPaymasterPoolHistoryMarker();
+    if (marker != DatabaseReadStatus::FOUND) return marker;
+    std::set<COutPoint> candidates;
+    bool rebuild;
+    uint64_t revision;
+    {
+        std::lock_guard<std::mutex> lock{session_index_mutex};
+        const auto& index = session_indexes[&m_database];
+        rebuild = !index.pool_history_valid;
+        revision = index.revision;
+        if (!rebuild) candidates = index.pool_history_candidates;
+    }
+    const auto fail = [&] {
+        std::lock_guard<std::mutex> lock{session_index_mutex};
+        session_indexes[&m_database].pool_history_valid = false;
+        inputs.clear();
+        return DatabaseReadStatus::READ_ERROR;
+    };
+    if (rebuild) {
+        DataStream prefix;
+        prefix << std::string{"pmpoolhistory"};
+        auto cursor = m_batch->GetNewPrefixCursor(prefix);
+        if (!cursor) return fail();
+        while (true) {
+            DataStream key, value;
+            const auto status = cursor->Next(key, value);
+            if (status == DatabaseCursor::Status::DONE) break;
+            if (status != DatabaseCursor::Status::MORE) return fail();
+            try {
+                std::string type;
+                COutPoint outpoint;
+                key >> type >> outpoint;
+                DigiDollar::Paymaster::ProviderPoolEntry entry;
+                if (!key.empty() || type != "pmpoolhistory" ||
+                    ReadPaymasterPoolHistoryWithStatus(outpoint, entry) != DatabaseReadStatus::FOUND) return fail();
+                candidates.insert(outpoint);
+            } catch (const std::ios_base::failure&) {
+                return fail();
+            }
+        }
+        std::lock_guard<std::mutex> lock{session_index_mutex};
+        auto& index = session_indexes[&m_database];
+        if (index.revision != revision) return DatabaseReadStatus::READ_ERROR;
+        index.pool_history_candidates = candidates;
+        index.pool_history_valid = true;
+    }
+    // The index selects candidates only. A reorg can make an old source live
+    // without any pool write; determine that from the current wallet and read
+    // each relevant authoritative disposition again before allowing selection.
+    for (const auto& outpoint : candidates) {
+        const auto* transaction = wallet.GetWalletTx(outpoint.hash);
+        if (!transaction || outpoint.n >= transaction->tx->vout.size() || wallet.IsSpent(outpoint)) continue;
+        DigiDollar::Paymaster::ProviderPoolEntry entry;
+        if (ReadPaymasterPoolHistoryWithStatus(outpoint, entry) != DatabaseReadStatus::FOUND) return fail();
+        if (entry.state != DigiDollar::Paymaster::PoolEntryState::RELEASED) inputs.insert(outpoint);
+    }
+    return DatabaseReadStatus::FOUND;
 }
 
 DatabaseReadStatus WalletBatch::ReadPaymasterPoolHistoryWithStatus(
