@@ -546,6 +546,61 @@ git diff -w $paymasterBases.official_baseline HEAD
 
 ## Review follow-up regressions
 
+For provider-only closure, independent lock owners, client history repair and
+carrier headroom, rebuild the changed sources and direct consumers, including
+shared-wallet consumers after wallet layout changes. From the repository root,
+run this focused native selection with isolated test data. Runtime is seconds
+to a few minutes; require exit 0 and no failed selected cases:
+
+The operator's clean Windows rebuild uses the configured dependencies and static
+Qt installation from [the MSVC guide](../build_msvc/README.md), in an x64 developer
+shell at the repository root:
+
+```powershell
+msbuild build_msvc\digibyte.sln -target:Rebuild -property:Configuration=Release -property:Platform=x64 -maxCpuCount:2 -verbosity:minimal
+if ($LASTEXITCODE -ne 0) { throw 'Clean product rebuild failed' }
+```
+
+This is a full product build (minutes or longer), including wallet allocation
+sites affected by `sizeof(CWallet)`. Require exit 0 before using those binaries
+for the native and functional commands below. Isolated partial links do not
+replace this operator check.
+
+```powershell
+$authorityCases = @(
+    'paymaster_provider_tests/carrier_headroom_respects_fee_cap_and_shared_capacity,full_carriers_do_not_supply_new_payment_capacity',
+    'paymaster_wallet_identity_tests/capacity_skips_full_carriers_and_preserves_bound_replay,carrier_withdrawal_respects_new_manual_source_lock,dgb_rebalance_respects_new_manual_source_lock',
+    'paymaster_wallet_security_tests/provider_unsigned_close_preserves_bindings_and_is_atomic,provider_user_only_deadlines_close_and_prune,provider_user_only_recovery_expiry_is_atomic_and_cannot_resurrect,provider_final_commit_spends_budget_atomically,provider_recovery_pruning_is_bounded_and_preserves_signed_records,normal_submit_classifies_peer_payload_and_local_authority',
+    'paymaster_wallet_store_tests/provider_quote_cancellation_rejects_client_session_without_releasing_pool,provider_quote_expiry_requires_authenticated_provider_evidence,digidollar_manual_and_paymaster_locks_preserve_each_owner,client_reservation_distinguishes_internal_and_manual_dd_locks,legacy_ambiguous_lock_record_is_preserved_as_manual,unknown_lock_owners_fail_closed_without_releasing_reservations,client_history_*',
+    'paymaster_wallet_psbt_tests/new_signature_locks_follow_validated_asset_roles,wallet_with_both_keys_signs_only_requested_role,provider_execution_firewall_revalidates_durable_authority,v5_provider_commit_preserves_exact_signed_authority',
+    'digidollar_wave17_spendability_tests/dd_selection_distinguishes_internal_protection_and_manual_veto',
+    'digidollar_mint_cleanup_tests/mint_cleanup_preserves_independent_manual_and_legacy_lock_ownership,unlock_all_removes_manual_veto_without_removing_internal_dd_protection,lockunspent_rpc_changes_only_manual_dd_lock_ownership'
+)
+& ./build_msvc/x64/Release/test_digibyte.exe "--run_test=$($authorityCases -join ':')" --report_level=detailed
+if ($LASTEXITCODE -ne 0) { throw 'Paymaster closure/locks/history/carrier regression failed' }
+```
+
+Use the same Boost selection with a rebuilt `./src/test/test_digibyte` on Unix.
+The synthetic store cancellation/expiry fixtures reject client-side or
+unauthenticated evidence; the security fixtures prove authenticated USER-only release, write/commit
+rollback, negative/future evidence handling, restart/pruning and a stale recovery
+final losing to expiry, restore quarantine, and exact rejection replay. Lock cases distinguish DD protection from a manual veto
+at reservation and signing. History cases require an observed exact payment and
+preserve unrelated rows. Carrier cases cover fee caps 1/99/uncapped, aggregate
+recovery, a full first candidate and exact bound-proof replay after policy change.
+
+With rebuilt daemons/CLI and the configured functional dependencies described
+under [Functional selection](#functional-selection), also run:
+
+```powershell
+python test/functional/test_runner.py --jobs=1 wallet_paymaster_locks.py
+if ($LASTEXITCODE -ne 0) { throw 'Paymaster manual-lock functional regression failed' }
+```
+
+This functional check takes minutes and requires exit 0 with no failed variants.
+It exercises real RPC manual lock/unlock, DD and DGB readiness/signing and reload;
+native fixture results do not replace it.
+
 For the missing-ledger, saved Onion-arrival, announcement-size, client-recovery
 cleanup and pool-history lookup corrections, rebuild the affected sources and
 direct consumers, then run this selection from the repository root with isolated
@@ -822,12 +877,14 @@ unless another suite is named. Test names describe coverage, not executed passes
 | Persisted read errors and action gating | Store `client_view_*`, `session_payment_snapshot_*`, status-getter and result-read cases cover corrupt/future records, unreadable/latest-attempt terms, valid unquoted fallback, dangling recovery indexes, full result binding/signature checks, structured get/list/resolve errors, retained result messages and unchanged protected state. Security recovery-read cases reach the application operations through their normal readiness gates. |
 | Client result durability | Store `client_result_local_write_failure_retains_incoming_message` injects begin/write/commit failures and retries the same signed result; `client_final_preflight_failure_retains_incoming_message` retains exact final bytes on local preflight failure. `client_result_corrupt_predecessor_retains_incoming_message` covers readable but unauthenticated predecessor sequences, signatures and bindings. Security `client_recovery_result_commit_failure_survives_ttl_and_exact_retry` uses mined inputs and real signatures, corrupts local recovery bindings/signatures and fails the final DB commit; the original result survives both TTLs and is retried through ordinary mempool validation without a second fee charge. Forged remote signatures remain rejectable with intact local authority. Wire `manager_authenticated_results_survive_failed_scope_and_delayed_pruning` covers both result types, enqueue/replay pruning and queue-incarnation checks. |
 | Provider finalization and index progress | Security `provider_final_commit_spends_budget_atomically` freezes the validation queue and advances the tip after commit. Exact commit recovery must complete before queue release, preserve the spent budget and permit accounting-neutral replay; the test releases the queue on the blocking negative path so teardown can finish. `wallet_paymaster_provider.py` also advances the tip during an automatic submit. |
-| Provider manual locks | `wallet_paymaster_locks.py` checks DGB and carrier readiness, transient/persistent locks, reload and locks added after capacity reservation; DGB unlock permits the same signed client payment. The ordinary DD-token RPC unlock prohibition remains enforced; transient carrier locks clear on reload and persistent ones keep blocking new signatures. Identity capacity lifecycle covers both reservation APIs; wallet PSBT role signing preserves the unsigned provider artifact and its independent reservation lock. |
+| Provider-only unsigned closure | Security `provider_unsigned_close_preserves_bindings_and_is_atomic`, `provider_user_only_deadlines_close_and_prune` and `provider_user_only_recovery_expiry_is_atomic_and_cannot_resurrect`: authenticated USER-only normal/recovery deadlines, exact provider release, independent corrupt/future evidence, rollback, restart/pruning and refusal of stale final commits after closure. Client signed authority and committed provider finals remain protected. |
+| Manual, DD and Paymaster lock ownership | `wallet_paymaster_locks.py` checks DGB and carrier readiness, transient/persistent manual locks, reload and locks added after capacity reservation. RPC manual unlock permits the same payment on DD or DGB while retaining independent DD/Paymaster protection. Store owner/reload/legacy cases, PSBT `new_signature_locks_follow_validated_asset_roles` and ordinary DD `dd_selection_distinguishes_internal_protection_and_manual_veto` cover the role-specific rule. |
+| Client recipient history | Store `client_history_*` requires a local non-abandoned transaction with authenticated exact payment/witness bindings; stored finals and self-recovery cannot fabricate a recipient send. Shared repair and exact legacy phantom-row cleanup are retryable and retain unrelated history. |
 | Pending-mint balance consistency | Mint cleanup `pending_balance_excludes_expired_mints_without_position_records` checks both pending APIs across expiry, reorg, mempool and unknown metadata/height; run ordinary DD spendability and Paymaster reservation-balance cases alongside it. |
 | Exact DD execution and unavailable classification | Spendability `w17_15_selected_dd_planner_is_non_mutating` checks stale reserved DD with a sufficient unrelated balance, locked DGB fee inputs, fee-plan changes and duplicate inputs. Identity `unreadable_paymaster_locks_fail_closed_for_coin_selection` and Qt `overviewPaymasterReservationUsesConditionalBalanceBreakdown` retain owned totals while marking availability unknown. |
 | Atomic authorization side effects | Store client final/ambiguous-state atomicity and security `provider_final_commit_spends_budget_atomically`, `client_recovery_result_commit_failure_survives_ttl_and_exact_retry` cover the shared downgrade fence, first alternative-provider signature, flag-write/commit rollback, reload and exact replay repair. Cancellation, unavailable-submit rejection and unsigned recovery expiry tests inject malformed/future commit, result and authorization records before any release. |
 | Signed recovery and reorg accounting | Recovery/reservation/store suites; `wallet_paymaster_reorg.py`, `wallet_paymaster_lifecycle.py`; provider tests retain exposure at 1/239 confirmations and release at safety depth 240 without double charging. |
-| Finite setup and whole-slot refill | Setup/identity/load/store suites; `wallet_paymaster_pool_setup.py`, `wallet_paymaster_partial_capacity.py`, `wallet_paymaster_readiness.py`, `wallet_paymaster_operator.py`; both assets and usable capacity below target. |
+| Finite setup and whole-slot refill | Setup/identity/load/store suites; `wallet_paymaster_pool_setup.py`, `wallet_paymaster_partial_capacity.py`, `wallet_paymaster_readiness.py`, `wallet_paymaster_operator.py`; both assets and usable capacity below target. Provider `carrier_headroom_respects_fee_cap_and_shared_capacity`, `full_carriers_do_not_supply_new_payment_capacity` and identity `capacity_skips_full_carriers_and_preserves_bound_replay` cover policy-aware headroom, full-carrier exclusion and protected exact replay without new spending approval. |
 | Monotonic maintenance time | `maintenance_reconciliation_preserves_accounting_time`, application `maintenance_rpc_budget_matches_authorization_after_clock_rollback`, provider `maintenance_budget_usage_*`; pool/lifecycle/provider functional tests cover confirmed stages, clock rollback, restart and absence of duplicates. |
 | Setup parity and funding observations | `paymaster_setup_tests`; pool setup `--funding-diagnostics-only`; Qt `paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep`, `paymasterPoolPreparationDiagnostics`, `paymasterPoolPreparationStoredFeeDiagnostics`: approvals, shortfalls, malformed/missing observations and read-only refresh. |
 | Backup, adoption and stale copies | Identity `provider_backup_serializes_copy_completion_and_configuration`, `provider_finance_and_backup_metadata_follow_the_identity`; `wallet_paymaster_backup.py`, `wallet_paymaster_backup_adoption.py`, `wallet_paymaster_backup_exit.py`, `wallet_paymaster_checkpoint_rollback.py`. |

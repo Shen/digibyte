@@ -4,6 +4,45 @@ There is **no complete current-revision release certification** in this record.
 The candidate below and historical checkpoints identify actual verification;
 implemented behavior alone does not establish release acceptance.
 
+## Provider closure, independent locks and client payment history
+
+AP1–AP4 following review of `ecc7ad72cf8678f72c1fe778fecdbc3c6fe8aa81`,
+verified in the uncommitted worktree on 2026-11-14. Contracts are in the
+[implementation guide](digidollar-paymaster-implementation.md); operator build
+and test commands are in the [focused runbook](digidollar-paymaster-testing.md#review-follow-up-regressions).
+
+| Executed check | Result and scope |
+|---|---|
+| Focused native selection | Exit 0: **30 cases / 2,892 assertions**. Authenticated provider-only normal/recovery closure, exact pool/budget release, USER-only deadlines, write/commit rollback, unknown evidence, restore quarantine, cache compaction, restart/pruning, stale final commits and exact negative-result replay. Independent manual/DD/Paymaster locks through actual RPC and reload; late client-signature veto; authenticated local history repair and exact phantom-row removal; full-carrier exclusion and bound-capacity replay. |
+| Adjacent native regressions | Exit 0 on the same binary: **42 cases / 1,825 assertions**. Checkpoint recovery, ordinary DD mint cleanup/persistence/spendability and lock-order safety, ordinary DGB/manual coin control, wallet creation and database cursors; refill, withdrawal, retirement, historical self-recovery and client final observation. No selected failures or skips in either run. |
+| Compilation | All **30 changed C++ units** freshly compiled, plus eight reached allocators, fixture definitions and ordinary-wallet test consumers; **38 fresh units** linked with MSVC 14.43.34808, `/W3 /WX /Od /MT /std:c++20`. Current source/object hashes checked. **20 of 21** changed production units pass C++17 `/Zs`; the existing designated `RPCArgOptions` initializer in `wallet/rpc/coins.cpp` requires C++20 under MSVC. No complete C++17 build is claimed. |
+| Local controls | Working-tree dependency/cycle check, six positive/negative boundary fixtures, changed-path/shared-Core records, JSON, functional Python syntax and whitespace checks pass. Committed prefixes pass the trusted-base boundary comparison using the explicit scope commit below. Its three authorized shared-path additions preserve forbidden paths, dependency rules and checkpoint guarantees. |
+
+Code content through `8b559c144b47d5cfc461677ccc9afed95ecdc709` matches
+the tested final source. The four code commits also pass **39 syntax checks**
+using their own source/header snapshots: C++17 production, C++20 tests and the
+existing C++20 RPC adapter. Every code prefix passes the committed boundary
+comparison against scope commit `1892bbad259f9f75e4eb5097a1b6d217dabb891f`;
+that scope commit itself passes against the review baseline. Commands, snapshot
+hashes and committed-content comparisons are retained locally under
+`.ai/commit-review-ecc7/`. These checks do not establish clean intermediate
+product builds or an additional native test run.
+
+Native SHA256:
+`c1963988b1ad0fa749185a1bf254342c8d4d3ea94329cc08c42675523245867d`.
+Exact selections, commands, complete logs, source/object hashes and failed initial
+checks remain locally under `.ai/implement-review-ecc7/`, including
+`verification.json` and `runs.jsonl`. Final checks use Boost seed `20261114` and
+`RANDOM_CTX_SEED=0000000000000000000000000000000000000000000000000000000000000001`.
+
+This is an isolated partial link with retained dependencies and incomplete
+transitive-header provenance. The new DD lock owner extends the lock-value codec
+and changes `sizeof(CWallet)`; reached native allocators and fixtures were rebuilt.
+A clean complete product/Qt/tools rebuild, functional manual-lock scenario,
+complete suites, cross-platform builds, sanitizers and repository Tidy/plugin
+checks were not run and remain operator checks. Implementation and independent
+source checks do not establish release certification.
+
 ## Accounting continuity, arrival observations and bounded wallet lookups
 
 AP1–AP6 following review of `47eccd5f971a4616b2bd4e8874b4b95b2b5f4f73`,
