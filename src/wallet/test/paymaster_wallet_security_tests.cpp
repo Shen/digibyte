@@ -17,6 +17,7 @@
 #include <net.h>
 #include <net_processing.h>
 #include <netbase.h>
+#include <node/context.h>
 #include <node/transaction.h>
 #include <oracle/bundle_manager.h>
 #include <oracle/mock_oracle.h>
@@ -41,6 +42,7 @@
 #include <validation.h>
 #include <validationinterface.h>
 #include <wallet/context.h>
+#include <wallet/paymasterapplication_internal.h>
 #include <wallet/paymasteridentity.h>
 #include <wallet/paymasterfinance.h>
 #include <wallet/paymastercheckpoint.h>
@@ -7074,11 +7076,328 @@ static void ExerciseFirstProviderRecoveryCommit(node::NodeContext& node,
     }
 }
 
+static void ExerciseDurablePaymentExecutor(wallet::CWallet& client, ProviderQuoteFixture& original,
+    PaymentSession session, const PaymasterResult& result, const CMutableTransaction& final_transaction,
+    int64_t now, WalletContext& context)
+{
+    BOOST_REQUIRE(context.paymaster);
+    auto& manager = *context.paymaster;
+    const CTransaction final{final_transaction};
+    const auto bytes = SerializePaymasterSecurityObject(final_transaction);
+    std::string error;
+    PaymasterStore store{client};
+    ClientSafetyPolicy policy;
+    policy.updated_at = now;
+    ClientFeeLedger fees;
+    fees.accounting_time_high_water = now;
+    BOOST_REQUIRE_MESSAGE(ReserveClientFee(fees, policy, original.attempt.commit_key,
+        original.attempt.client_manifest.service_fee, now, error), error);
+    BOOST_REQUIRE_MESSAGE(SpendClientFee(fees, original.attempt.commit_key, now + 1, error), error);
+    const auto spent_fees = SerializePaymasterSecurityObject(fees);
+    {
+        LOCK(client.cs_wallet);
+        WalletBatch batch{client.GetDatabase()};
+        UserAuthorizationRecord authorization;
+        authorization.commit_key = original.attempt.commit_key;
+        authorization.attempt_id = original.attempt.attempt_id;
+        authorization.canonical_psbt_hash = Hash(original.attempt.user_signed_psbt);
+        authorization.accepted_at = original.attempt.client_manifest_accepted_at;
+        authorization.retry_until = original.attempt.retry_until;
+        BOOST_REQUIRE(batch.WritePaymasterSession(session));
+        BOOST_REQUIRE(batch.WritePaymasterSessionId(session.session_id, session.request_id));
+        BOOST_REQUIRE(batch.WritePaymasterAttempt(original.attempt));
+        BOOST_REQUIRE(batch.WritePaymasterTemplate(original.attempt.template_commitment, original.attempt.attempt_id));
+        BOOST_REQUIRE(batch.WritePaymasterUnsignedTx(original.attempt.unsigned_txid, original.attempt.attempt_id));
+        BOOST_REQUIRE(batch.WritePaymasterResult(result, false));
+        BOOST_REQUIRE(batch.WritePaymasterUserAuthorization(authorization));
+        BOOST_REQUIRE(batch.WritePaymasterClientSafetyPolicy(policy));
+        BOOST_REQUIRE(batch.WritePaymasterClientFeeLedger(fees));
+        BOOST_REQUIRE(batch.WritePaymasterReservation({InputReservation::CURRENT_VERSION,
+            session.user_inputs.front(), session.request_id, session.session_id,
+            ReservationRole::USER_DD, true, now}));
+        BOOST_REQUIRE(batch.WritePaymasterLockedUTXO(session.user_inputs.front()));
+        client.LockPaymasterCoin(session.user_inputs.front());
+    }
+    auto& database = GetMockableDatabase(client);
+    const auto retained = database.m_records;
+    // An unavailable index is a local retry, without a conflict marker or a
+    // change to the original signed bytes or input protection.
+    auto saved_index = std::move(g_txindex);
+    BOOST_CHECK_EXCEPTION(paymaster_app::ExecuteDurableClientFinal(client, final.GetHash(), now + 1,
+        &manager, ExactFinalTxIndexMode::NONBLOCKING), ApplicationError,
+        [](const ApplicationError& failure) {
+            return failure.kind == ErrorKind::WALLET && failure.code == "PAYMASTER_TXINDEX_NOT_READY";
+        });
+    g_txindex = std::move(saved_index);
+    BOOST_CHECK(database.m_records == retained);
+    BOOST_CHECK(IsPaymasterInputReserved(client, session.user_inputs.front()));
+
+    // A warmed derived locator cannot authorize a payment after the canonical
+    // session changes. Raw storage intentionally leaves that locator stale.
+    {
+        LOCK(client.cs_wallet);
+        WalletBatch batch{client.GetDatabase()};
+        std::vector<PaymentSession> indexed;
+        BOOST_REQUIRE(ListPaymasterFinalSessions(batch, client.GetDatabase(), final.GetHash(), indexed));
+        BOOST_REQUIRE_EQUAL(indexed.size(), 1U);
+        PaymentSession unbound{session};
+        unbound.final_txid.SetNull();
+        BOOST_REQUIRE(client.GetDatabase().MakeBatch()->Write(
+            std::make_pair(DBKeys::PAYMASTER_SESSION, session.request_id), unbound));
+    }
+    const auto unbound_rows = database.m_records;
+    BOOST_CHECK_EXCEPTION(paymaster_app::ExecuteDurableClientFinal(client, final.GetHash(), now + 1,
+        nullptr), ApplicationError, [](const ApplicationError& failure) {
+            return failure.kind == ErrorKind::WALLET && failure.code == "PAYMASTER_SESSION_DATABASE_READ";
+        });
+    BOOST_CHECK(database.m_records == unbound_rows);
+    BOOST_REQUIRE(WalletBatch{client.GetDatabase()}.WritePaymasterSession(session));
+
+    // The common firewall retains the ordinary payment's accepted time and
+    // canonical request binding before any transaction reaches broadcast.
+    for (int scenario = 0; scenario < 4; ++scenario) {
+        BOOST_TEST_CONTEXT("durable payment authorization binding " << scenario) {
+            PaymentSession changed{session};
+            ProviderAttempt attempt{original.attempt};
+            if (scenario == 0) changed.canonical_request_hash = uint256S("a409");
+            if (scenario == 1) changed.updated_at = attempt.client_manifest_accepted_at - 1;
+            if (scenario == 2) attempt.client_manifest_accepted_at = now + 10;
+            if (scenario == 3) changed.session_id = uint256S("a410");
+            {
+                LOCK(client.cs_wallet);
+                WalletBatch batch{client.GetDatabase()};
+                BOOST_REQUIRE(batch.WritePaymasterSession(changed));
+                BOOST_REQUIRE(batch.WritePaymasterAttempt(attempt));
+            }
+            const auto corrupt_rows = database.m_records;
+            BOOST_CHECK(!store.ValidateClientDurableFinalForBroadcast(final, now + 1, nullptr, error));
+            BOOST_CHECK_EQUAL(error, "PAYMASTER_CLIENT_AUTHORIZATION_NOT_ACCEPTED");
+            BOOST_CHECK(database.m_records == corrupt_rows);
+            BOOST_CHECK(IsPaymasterInputReserved(client, session.user_inputs.front()));
+        }
+    }
+    BOOST_REQUIRE(WalletBatch{client.GetDatabase()}.WritePaymasterSession(session));
+    BOOST_REQUIRE(WalletBatch{client.GetDatabase()}.WritePaymasterAttempt(original.attempt));
+
+    // A durable final with a conflicting local witness gets a bound conflict
+    // marker; original authority and reservations remain available to recovery.
+    {
+        wallet::CWallet conflicted{client.chain().context()->chain.get(), "executor-witness-conflict",
+            DuplicateSecurityFixtureDatabase(client.GetDatabase())};
+        BOOST_REQUIRE(conflicted.LoadWallet() == DBErrors::LOAD_OK);
+        CMutableTransaction altered{final_transaction};
+        BOOST_REQUIRE(!altered.vin.front().scriptWitness.stack.empty());
+        altered.vin.front().scriptWitness.stack.front().back() ^= 1;
+        {
+            LOCK(conflicted.cs_wallet);
+            BOOST_REQUIRE(conflicted.AddToWallet(MakeTransactionRef(altered), TxStateInactive{}));
+        }
+        BOOST_CHECK_EXCEPTION(paymaster_app::ExecuteDurableClientFinal(conflicted, final.GetHash(), now + 1,
+            nullptr), ApplicationError, [](const ApplicationError& failure) {
+                return failure.kind == ErrorKind::REJECTED && failure.code == "PAYMASTER_FINAL_WITNESS_CONFLICT";
+            });
+        PaymasterStore conflict_store{conflicted};
+        PaymentSession conflict_session;
+        ProviderAttempt attempt;
+        BOOST_REQUIRE(conflict_store.GetSessionByRequestId(session.request_id, conflict_session));
+        BOOST_REQUIRE(conflict_store.GetAttempt(original.attempt.attempt_id, attempt));
+        BOOST_CHECK(conflict_session.state == SessionState::CONFLICTED);
+        BOOST_CHECK(attempt.state == AttemptState::CONFLICTED);
+        BOOST_CHECK(attempt.final_transaction == bytes);
+        BOOST_CHECK(IsPaymasterInputReserved(conflicted, session.user_inputs.front()));
+    }
+
+    // Temporary local admission policy does not revoke an exact signed final.
+    // A negative fee delta changes the real node's admission policy without
+    // bypassing any of its consensus, script or mempool checks.
+    {
+        auto& pool = *client.chain().context()->mempool;
+        struct ClearFeeDelta {
+            MockableDatabase& database;
+            CTxMemPool& pool;
+            uint256 txid;
+            ~ClearFeeDelta()
+            {
+                database.m_on_write = {};
+                LOCK(pool.cs);
+                pool.ClearPrioritisation(txid);
+            }
+        } clear_fee_delta{database, pool, final.GetHash()};
+        pool.PrioritiseTransaction(final.GetHash(), -COIN);
+        const auto rejected = WITH_LOCK(cs_main,
+            return client.chain().context()->chainman->ProcessTransaction(
+                MakeTransactionRef(final_transaction), /*test_accept=*/true));
+        BOOST_REQUIRE(rejected.m_result_type == MempoolAcceptResult::ResultType::INVALID);
+        BOOST_CHECK(rejected.m_state.GetResult() == TxValidationResult::TX_MEMPOOL_POLICY);
+        const auto policy_rows = database.m_records;
+        ExactFinalTransactionPreflight observation;
+        BOOST_CHECK(!PreflightExactPaymasterFinalTransaction(client, MakeTransactionRef(final_transaction),
+            ExactFinalTxIndexMode::NONBLOCKING, observation, error));
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_FINAL_MEMPOOL_POLICY");
+        BOOST_CHECK_EXCEPTION(paymaster_app::ExecuteDurableClientFinal(client, final.GetHash(), now + 1,
+            &manager, ExactFinalTxIndexMode::NONBLOCKING), ApplicationError,
+            [](const ApplicationError& failure) {
+                return failure.kind == ErrorKind::WALLET &&
+                    failure.disposition == ErrorDisposition::RECONCILE &&
+                    failure.code == "PAYMASTER_FINAL_MEMPOOL_POLICY";
+            });
+        const auto recovery = RecoverDurablePaymasterCommits(client, now + 1);
+        BOOST_CHECK_EQUAL(recovery.candidates, 1U);
+        BOOST_CHECK_EQUAL(recovery.recovered, 0U);
+        BOOST_REQUIRE_EQUAL(recovery.errors.size(), 1U);
+        BOOST_CHECK_EQUAL(recovery.errors.front(), "PAYMASTER_FINAL_MEMPOOL_POLICY");
+        BOOST_CHECK(database.m_records == policy_rows);
+        BOOST_CHECK(!pool.get(final.GetHash()));
+        BOOST_CHECK(IsPaymasterInputReserved(client, session.user_inputs.front()));
+        ProviderAttempt retained_attempt;
+        BOOST_REQUIRE(store.GetAttempt(original.attempt.attempt_id, retained_attempt));
+        BOOST_CHECK(retained_attempt.state == original.attempt.state);
+        BOOST_CHECK(retained_attempt.final_transaction == bytes);
+        ClientFeeLedger observed_fees;
+        BOOST_REQUIRE(WalletBatch{client.GetDatabase()}.ReadPaymasterClientFeeLedger(observed_fees));
+        BOOST_CHECK(SerializePaymasterSecurityObject(observed_fees) == spent_fees);
+        {
+            LOCK(pool.cs);
+            pool.ClearPrioritisation(final.GetHash());
+        }
+        BOOST_REQUIRE_MESSAGE(PreflightExactPaymasterFinalTransaction(client, MakeTransactionRef(final_transaction),
+            ExactFinalTxIndexMode::NONBLOCKING, observation, error), error);
+
+        // Change policy only after InsertAndBroadcast's own preflight, at the
+        // wallet WriteTx boundary. Its untyped broadcast failure must acquire
+        // the same retryable classification through a fresh typed preflight.
+        DataStream transaction_key;
+        transaction_key << std::make_pair(DBKeys::TX, final.GetHash());
+        bool policy_changed{false};
+        database.m_on_write = [&](Span<const std::byte> key) {
+            if (policy_changed || key.size() != transaction_key.size() ||
+                !std::equal(key.begin(), key.end(), transaction_key.begin())) return;
+            policy_changed = true;
+            pool.PrioritiseTransaction(final.GetHash(), -COIN);
+        };
+        BOOST_CHECK_EXCEPTION(paymaster_app::ExecuteDurableClientFinal(client, final.GetHash(), now + 1,
+            &manager, ExactFinalTxIndexMode::NONBLOCKING), ApplicationError,
+            [](const ApplicationError& failure) {
+                return failure.kind == ErrorKind::WALLET &&
+                    failure.disposition == ErrorDisposition::RECONCILE &&
+                    failure.code == "PAYMASTER_FINAL_MEMPOOL_POLICY";
+            });
+        database.m_on_write = {};
+        BOOST_REQUIRE(policy_changed);
+        BOOST_CHECK(!pool.get(final.GetHash()));
+        BOOST_CHECK(IsPaymasterInputReserved(client, session.user_inputs.front()));
+        PaymentSession retained_session;
+        BOOST_REQUIRE(store.GetSessionByRequestId(session.request_id, retained_session));
+        BOOST_CHECK(retained_session.state == session.state);
+        BOOST_REQUIRE(store.GetAttempt(original.attempt.attempt_id, retained_attempt));
+        BOOST_CHECK(retained_attempt.state == original.attempt.state);
+        BOOST_CHECK(retained_attempt.final_transaction == bytes);
+        BOOST_REQUIRE(WalletBatch{client.GetDatabase()}.ReadPaymasterClientFeeLedger(observed_fees));
+        BOOST_CHECK(SerializePaymasterSecurityObject(observed_fees) == spent_fees);
+        {
+            LOCK(pool.cs);
+            pool.ClearPrioritisation(final.GetHash());
+        }
+        BOOST_REQUIRE_MESSAGE(PreflightExactPaymasterFinalTransaction(client, MakeTransactionRef(final_transaction),
+            ExactFinalTxIndexMode::NONBLOCKING, observation, error), error);
+    }
+
+    // A clock rollback cannot turn a fully signed historical authorization
+    // into a permanent conflict. Execute and retry its exact bytes while the
+    // clock is behind acceptance, then retry after it moves forward again.
+    {
+        struct RestoreMockTime {
+            const std::chrono::seconds previous{GetMockTime()};
+            ~RestoreMockTime() { SetMockTime(previous); }
+        } restore_time;
+        const int64_t accepted_at = original.attempt.client_manifest_accepted_at;
+        BOOST_REQUIRE_GT(accepted_at, 1);
+        const int64_t rolled_back = accepted_at - 1;
+        // Prospective authorization retains its current-time gate. The
+        // historical normalization applies only to exact durable finals.
+        BOOST_CHECK(!paymaster_app::HasDurableClientAuthorization(original.attempt, rolled_back));
+        for (const int64_t observed_at : {rolled_back, rolled_back, accepted_at + 1}) {
+            BOOST_TEST_CONTEXT("durable final clock observation " << observed_at) {
+                SetMockTime(observed_at);
+                ExactFinalTransactionPreflight observation;
+                BOOST_REQUIRE_MESSAGE(PreflightExactPaymasterFinalTransaction(client,
+                    MakeTransactionRef(final_transaction), ExactFinalTxIndexMode::NONBLOCKING,
+                    observation, error), error);
+                BOOST_REQUIRE_MESSAGE(store.ValidateClientDurableFinalForBroadcast(
+                    final, GetTime(), observation.final_proof ? &*observation.final_proof : nullptr, error), error);
+                const auto replay = paymaster_app::ExecuteDurableClientFinal(client,
+                    final.GetHash(), GetTime(), &manager, ExactFinalTxIndexMode::NONBLOCKING);
+                BOOST_REQUIRE(replay.transaction);
+                BOOST_CHECK(SerializePaymasterSecurityObject(*replay.transaction) == bytes);
+                BOOST_CHECK(!replay.already_confirmed);
+                BOOST_CHECK(client.chain().context()->mempool->get(final.GetHash()));
+                BOOST_CHECK(IsPaymasterInputReserved(client, session.user_inputs.front()));
+                ProviderAttempt retained_attempt;
+                PaymentSession retained_session;
+                BOOST_REQUIRE(store.GetAttempt(original.attempt.attempt_id, retained_attempt));
+                BOOST_REQUIRE(store.GetSessionByRequestId(session.request_id, retained_session));
+                BOOST_CHECK(retained_attempt.state == AttemptState::MEMPOOL);
+                BOOST_CHECK(retained_session.state == SessionState::MEMPOOL);
+                BOOST_CHECK(retained_attempt.final_transaction == bytes);
+                BOOST_CHECK_EQUAL(retained_attempt.client_manifest_accepted_at, accepted_at);
+                BOOST_CHECK(retained_attempt.accepted_client_manifest_id == original.attempt.accepted_client_manifest_id);
+                ClientFeeLedger observed_fees;
+                BOOST_REQUIRE(WalletBatch{client.GetDatabase()}.ReadPaymasterClientFeeLedger(observed_fees));
+                BOOST_CHECK(SerializePaymasterSecurityObject(observed_fees) == spent_fees);
+            }
+        }
+    }
+
+    const auto executed = paymaster_app::ExecuteDurableClientFinal(client, final.GetHash(), now + 1, &manager);
+    BOOST_REQUIRE(executed.transaction);
+    BOOST_CHECK(SerializePaymasterSecurityObject(*executed.transaction) == bytes);
+    BOOST_CHECK(!executed.already_confirmed);
+    BOOST_CHECK(client.chain().context()->mempool->get(final.GetHash()));
+    const auto replayed = paymaster_app::ExecuteDurableClientFinal(client, final.GetHash(), now + 2,
+        nullptr, ExactFinalTxIndexMode::NONBLOCKING);
+    BOOST_REQUIRE(replayed.transaction);
+    BOOST_CHECK(SerializePaymasterSecurityObject(*replayed.transaction) == bytes);
+    BOOST_CHECK(IsPaymasterInputReserved(client, session.user_inputs.front()));
+    PaymasterResultMessage message;
+    message.request_id = session.request_id;
+    message.session_id = session.session_id;
+    message.result = result;
+    const auto encoded_result = SerializePaymasterSecurityObject(message);
+    BOOST_REQUIRE(manager.EnqueueDirectMessage(47, Hash(encoded_result), encoded_result.size(),
+        DirectPayload{message}, GetTime()));
+    const auto processed = paymaster_app::ProcessPaymasterResult(context, client, session.request_id);
+    BOOST_CHECK(processed.processed.value_or(false));
+    const auto retried = paymaster_app::ResolvePaymasterSession(context, client,
+        paymaster_app::ClientSessionLookup{session.request_id}, "retry_same", {});
+    BOOST_CHECK(retried.broadcast.value_or(false));
+    ProviderAttempt retained_attempt;
+    BOOST_REQUIRE(store.GetAttempt(original.attempt.attempt_id, retained_attempt));
+    BOOST_CHECK(retained_attempt.final_transaction == bytes);
+    BOOST_REQUIRE(WalletBatch{client.GetDatabase()}.ReadPaymasterClientFeeLedger(fees));
+    BOOST_CHECK(SerializePaymasterSecurityObject(fees) == spent_fees);
+    wallet::CWallet reopened{client.chain().context()->chain.get(), "executor-payment-reopened",
+        DuplicateSecurityFixtureDatabase(client.GetDatabase())};
+    BOOST_REQUIRE(reopened.LoadWallet() == DBErrors::LOAD_OK);
+    const auto resumed = paymaster_app::ExecuteDurableClientFinal(reopened, final.GetHash(), now + 3, nullptr);
+    BOOST_REQUIRE(resumed.transaction);
+    BOOST_CHECK(SerializePaymasterSecurityObject(*resumed.transaction) == bytes);
+    BOOST_CHECK(IsPaymasterInputReserved(reopened, session.user_inputs.front()));
+    const auto recovered = RecoverDurablePaymasterCommits(reopened, now + 4);
+    BOOST_CHECK(recovered.errors.empty());
+    BOOST_CHECK_EQUAL(recovered.candidates, 1U);
+    BOOST_CHECK_EQUAL(recovered.recovered, 1U);
+    BOOST_REQUIRE(PaymasterStore{reopened}.GetAttempt(original.attempt.attempt_id, retained_attempt));
+    BOOST_CHECK(retained_attempt.final_transaction == bytes);
+    BOOST_REQUIRE(WalletBatch{reopened.GetDatabase()}.ReadPaymasterClientFeeLedger(fees));
+    BOOST_CHECK(SerializePaymasterSecurityObject(fees) == spent_fees);
+}
+
 static void ExerciseClientRecoveryResult(ClientRecoveryReadSetup& setup, bool confirmed_before_result,
                                          bool exercise_provider_history = false,
                                          bool exercise_quote_intake = false,
                                          bool observe_without_result = false,
-                                         bool permanent_provider_loss = false)
+                                         bool permanent_provider_loss = false,
+                                         bool exercise_payment_executor = false)
 {
     auto& m_node = setup.m_node;
     auto& context = setup.context;
@@ -7245,6 +7564,17 @@ static void ExerciseClientRecoveryResult(ClientRecoveryReadSetup& setup, bool co
         CMutableTransaction unused_final;
         BOOST_REQUIRE_MESSAGE(BuildDurableClientFinalFixture(client, environment, original,
             now, session, unused_result, unused_final, error), error);
+        if (exercise_payment_executor) {
+            {
+                LOCK(client.cs_wallet);
+                BOOST_REQUIRE(client.AddToWallet(funding.vtx.at(3),
+                    TxStateConfirmed{funding.GetHash(), mint_height - 1, 3}));
+                BOOST_REQUIRE(client.AddToWallet(minted.vtx.at(1),
+                    TxStateConfirmed{minted.GetHash(), mint_height, 1}));
+            }
+            ExerciseDurablePaymentExecutor(client, original, session, unused_result, unused_final, now, context);
+            return;
+        }
         attempt.state = AttemptState::USER_SIGNED;
         attempt.final_transaction.clear();
         attempt.final_txid.SetNull();
@@ -7830,6 +8160,40 @@ static void ExerciseClientRecoveryResult(ClientRecoveryReadSetup& setup, bool co
     BOOST_CHECK_EQUAL(spent_fees, 100);
     BOOST_CHECK_EQUAL(released_fees, 0);
     const auto spent_ledger = SerializePaymasterSecurityObject(ledger);
+    const auto exact_replay = paymaster_app::ExecuteDurableClientFinal(client, *result.result.txid,
+        GetTime(), nullptr, ExactFinalTxIndexMode::NONBLOCKING);
+    BOOST_REQUIRE(exact_replay.transaction);
+    BOOST_CHECK(SerializePaymasterSecurityObject(*exact_replay.transaction) == recovery.final_transaction);
+    BOOST_CHECK_EQUAL(exact_replay.already_confirmed, confirmed_before_result);
+    BOOST_REQUIRE(WalletBatch{client.GetDatabase()}.ReadPaymasterClientFeeLedger(ledger));
+    BOOST_CHECK(SerializePaymasterSecurityObject(ledger) == spent_ledger);
+    if (!confirmed_before_result) {
+        wallet::CWallet conflicted{m_node.chain.get(), "executor-recovery-witness-conflict",
+            DuplicateSecurityFixtureDatabase(client.GetDatabase())};
+        BOOST_REQUIRE(conflicted.LoadWallet() == DBErrors::LOAD_OK);
+        {
+            LOCK(conflicted.cs_wallet);
+            auto& local = conflicted.mapWallet.at(*result.result.txid);
+            CMutableTransaction altered{*local.tx};
+            altered.vin.front().scriptWitness.stack.front().back() ^= 1;
+            local.tx = MakeTransactionRef(altered);
+        }
+        BOOST_CHECK_EXCEPTION(paymaster_app::ExecuteDurableClientFinal(conflicted, *result.result.txid,
+            GetTime(), nullptr), ApplicationError, [](const ApplicationError& failure) {
+                return failure.kind == ErrorKind::REJECTED && failure.code == "PAYMASTER_FINAL_WITNESS_CONFLICT";
+            });
+        PaymasterStore conflict_store{conflicted};
+        PaymentSession conflicted_session;
+        AlternativeRecoveryRecord retained_recovery;
+        BOOST_REQUIRE(conflict_store.GetSessionByRequestId(session.request_id, conflicted_session));
+        BOOST_CHECK(conflicted_session.state == SessionState::CONFLICTED);
+        BOOST_REQUIRE(conflict_store.GetAlternativeRecovery(session.request_id, retained_recovery));
+        BOOST_CHECK(retained_recovery.final_transaction == recovery.final_transaction);
+        BOOST_CHECK(IsPaymasterInputReserved(conflicted, session.user_inputs.front()));
+        ClientFeeLedger retained_ledger;
+        BOOST_REQUIRE(WalletBatch{conflicted.GetDatabase()}.ReadPaymasterClientFeeLedger(retained_ledger));
+        BOOST_CHECK(SerializePaymasterSecurityObject(retained_ledger) == spent_ledger);
+    }
     const auto replay = invoke();
     BOOST_CHECK(replay.broadcast.value_or(false));
     BOOST_REQUIRE(WalletBatch{client.GetDatabase()}.ReadPaymasterClientFeeLedger(ledger));
@@ -7858,6 +8222,24 @@ static void ExerciseClientRecoveryResult(ClientRecoveryReadSetup& setup, bool co
         ClientFeeLedger reloaded_ledger;
         BOOST_REQUIRE(WalletBatch{reopened.GetDatabase()}.ReadPaymasterClientFeeLedger(reloaded_ledger));
         BOOST_CHECK(SerializePaymasterSecurityObject(reloaded_ledger) == spent_ledger);
+        const auto direct = paymaster_app::ExecuteDurableClientFinal(reopened, *result.result.txid,
+            GetTime(), nullptr, ExactFinalTxIndexMode::NONBLOCKING);
+        BOOST_REQUIRE(direct.transaction);
+        BOOST_CHECK(direct.already_confirmed);
+        BOOST_CHECK(SerializePaymasterSecurityObject(*direct.transaction) == recovery.final_transaction);
+    } else {
+        wallet::CWallet reopened{m_node.chain.get(), "executor-recovery-reopened",
+            DuplicateSecurityFixtureDatabase(client.GetDatabase())};
+        BOOST_REQUIRE(reopened.LoadWallet() == DBErrors::LOAD_OK);
+        const auto direct = paymaster_app::ExecuteDurableClientFinal(reopened, *result.result.txid,
+            GetTime(), nullptr, ExactFinalTxIndexMode::NONBLOCKING);
+        BOOST_REQUIRE(direct.transaction);
+        BOOST_CHECK(!direct.already_confirmed);
+        BOOST_CHECK(SerializePaymasterSecurityObject(*direct.transaction) == recovery.final_transaction);
+        BOOST_CHECK(IsPaymasterInputReserved(reopened, session.user_inputs.front()));
+        ClientFeeLedger reloaded_ledger;
+        BOOST_REQUIRE(WalletBatch{reopened.GetDatabase()}.ReadPaymasterClientFeeLedger(reloaded_ledger));
+        BOOST_CHECK(SerializePaymasterSecurityObject(reloaded_ledger) == spent_ledger);
     }
 }
 
@@ -7865,6 +8247,15 @@ BOOST_FIXTURE_TEST_CASE(client_recovery_result_commit_failure_survives_ttl_and_e
                         ClientRecoveryReadSetup)
 {
     ExerciseClientRecoveryResult(*this, /*confirmed_before_result=*/false);
+}
+
+BOOST_FIXTURE_TEST_CASE(durable_client_final_executor_revalidates_authority_and_replays_exact_payment,
+                        ClientRecoveryReadSetup)
+{
+    ExerciseClientRecoveryResult(*this, /*confirmed_before_result=*/true,
+        /*exercise_provider_history=*/false, /*exercise_quote_intake=*/false,
+        /*observe_without_result=*/false, /*permanent_provider_loss=*/false,
+        /*exercise_payment_executor=*/true);
 }
 
 BOOST_FIXTURE_TEST_CASE(client_recovery_quote_intake_retains_local_failures_and_retries_before_signing,

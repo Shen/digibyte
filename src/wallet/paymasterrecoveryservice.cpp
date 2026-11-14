@@ -296,24 +296,6 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
         }
         return result;
     };
-    const auto fail_after_recovery_store =
-        [&](const AlternativeRecoveryRecord& durable_recovery,
-            const CTransaction& exact_final, ErrorKind rpc_code,
-            const std::string& failure) -> void {
-        std::string persistence_error;
-        if (!store.RecordClientAlternativeRecoveryConflict(
-                durable_recovery.request_id, durable_recovery.recovery_id,
-                exact_final.GetHash(), exact_final.GetWitnessHash(), now,
-                persistence_error)) {
-            throw ApplicationError(
-                ErrorKind::WALLET,
-                persistence_error.empty() ? "PAYMASTER_RECOVERY_FINAL_CONFLICT_NOT_PERSISTED" : persistence_error);
-        }
-        throw ApplicationError(
-            rpc_code,
-            failure.empty() ? "PAYMASTER_RECOVERY_BROADCAST_AUTHORIZATION_INVALID" : failure);
-    };
-
     if (recovery.phase == AlternativeRecoveryPhase::CAPACITY_PENDING) {
         auto proof_lease = context.paymaster->LeaseCapacityProofs(
             recovery.recovery_provider_id, recovery.client_nonce,
@@ -887,101 +869,8 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
             node->connman->ReleasePaymasterConnection({wallet.m_paymaster_transport_owner.GetHex(),
                 "recovery:" + recovery.recovery_id.GetHex(), true, recovery.recovery_provider_id});
 
-            // The final commit above performs database work and spends the
-            // client fee reservation. Rebuild every authority from the exact
-            // durable bytes and repeat the chainstate/mempool firewall before
-            // handing the transaction to the node.
-            AlternativeRecoveryRecord broadcast_recovery;
-            AlternativeRecoveryParameters broadcast_parameters;
-            AlternativeRecoveryTemplate broadcast_trusted;
-            PartiallySignedTransaction broadcast_unsigned_psbt;
-            FinalTransactionPresence broadcast_presence{
-                FinalTransactionPresence::NONE};
-            std::optional<ExactFinalTransactionProof> broadcast_proof;
-            if (!store.GetAlternativeRecovery(
-                    recovery.request_id, broadcast_recovery)) {
-                throw ApplicationError(
-                    ErrorKind::WALLET,
-                    "PAYMASTER_RECOVERY_FINAL_STATE_RELOAD_FAILED");
-            }
-            if (broadcast_recovery.phase !=
-                    AlternativeRecoveryPhase::FINAL_COMMITTED ||
-                broadcast_recovery.recovery_id != recovery.recovery_id ||
-                broadcast_recovery.final_transaction !=
-                    SerializeTransaction(final_transaction) ||
-                broadcast_recovery.expected_wtxid !=
-                    CTransaction{final_transaction}.GetWitnessHash()) {
-                fail_after_recovery_store(
-                    recovery, CTransaction{final_transaction},
-                    ErrorKind::REJECTED,
-                    "PAYMASTER_RECOVERY_BROADCAST_AUTHORIZATION_INVALID");
-            }
-            if (!PreflightFinalPaymasterTransaction(
-                    wallet, final_ref, broadcast_presence, error,
-                    ExactFinalTxIndexMode::WAIT_FOR_SYNC, &broadcast_proof)) {
-                if (IsTransientPaymasterFinalizationError(error)) {
-                    throw ApplicationError(ErrorKind::WALLET, error);
-                }
-                fail_after_recovery_store(
-                    recovery, CTransaction{final_transaction},
-                    ErrorKind::REJECTED, error);
-            }
-            if (!BuildRecoveryParametersFromRecord(
-                    wallet, broadcast_recovery, broadcast_parameters, error) ||
-                !ValidateAuthorizedAlternativeRecoveryResponseTemplateAgainstChainstate(
-                    broadcast_recovery.recovery_response,
-                    broadcast_recovery.recovery_request,
-                    broadcast_recovery.recovery_provider_identity_key,
-                    broadcast_parameters, Params(), *node->chainman,
-                    authorization_time, observation_time,
-                    broadcast_proof ? &*broadcast_proof : nullptr,
-                    broadcast_trusted,
-                    broadcast_unsigned_psbt, error)) {
-                if (IsTransientPaymasterFinalizationError(error)) {
-                    throw ApplicationError(ErrorKind::WALLET, error);
-                }
-                fail_after_recovery_store(
-                    recovery, CTransaction{final_transaction},
-                    ErrorKind::REJECTED,
-                    error.empty() ? "PAYMASTER_RECOVERY_BROADCAST_AUTHORIZATION_INVALID" : error);
-            }
-            if (!ValidateAuthorizedFinalAlternativeRecoveryAgainstChainstate(
-                    final_transaction, broadcast_recovery.expected_wtxid,
-                    broadcast_trusted, broadcast_parameters, Params(),
-                    *node->chainman, authorization_time, observation_time,
-                    broadcast_proof ? &*broadcast_proof : nullptr,
-                    error)) {
-                if (IsTransientPaymasterFinalizationError(error)) {
-                    throw ApplicationError(ErrorKind::WALLET, error);
-                }
-                fail_after_recovery_store(
-                    recovery, CTransaction{final_transaction},
-                    ErrorKind::REJECTED,
-                    error.empty() ? "PAYMASTER_RECOVERY_BROADCAST_AUTHORIZATION_INVALID" : error);
-            }
-            recovery = std::move(broadcast_recovery);
-            bool already_confirmed{false};
-            std::string broadcast_error;
-            const bool broadcast = InsertAndBroadcastPaymasterTransaction(
-                wallet, final_ref, already_confirmed, broadcast_error);
-            if (!broadcast) {
-                if (IsTransientPaymasterFinalizationError(broadcast_error)) {
-                    throw ApplicationError(
-                        ErrorKind::WALLET,
-                        broadcast_error.empty() ? "PAYMASTER_RECOVERY_FINAL_BROADCAST_UNAVAILABLE" : broadcast_error);
-                }
-                fail_after_recovery_store(
-                    recovery, CTransaction{final_transaction},
-                    ErrorKind::REJECTED,
-                    broadcast_error.empty() ? "PAYMASTER_RECOVERY_FINAL_BROADCAST_REJECTED" : strprintf("PAYMASTER_RECOVERY_FINAL_BROADCAST_REJECTED: %s", broadcast_error));
-            }
-            if (broadcast && !store.ReconcileFinalTransaction(
-                                 *final_ref, already_confirmed ? 1 : 0,
-                                 !already_confirmed, now, error)) {
-                throw ApplicationError(ErrorKind::WALLET, error);
-            }
-            return make_result(recovery, RecoveryQueueState{}, broadcast,
-                               broadcast_error);
+            ExecuteDurableClientFinal(wallet, final_ref->GetHash(), now, context.paymaster);
+            return make_result(recovery, RecoveryQueueState{}, true);
         }
         // Process/retain a received signed result before local completion can
         // fail. Without a result, deep local evidence replaces transport retry.
@@ -1002,84 +891,11 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
     }
 
     if (recovery.phase == AlternativeRecoveryPhase::FINAL_COMMITTED) {
-        CMutableTransaction final_transaction;
-        try {
-            SpanReader stream{::PROTOCOL_VERSION,
-                              recovery.final_transaction};
-            stream >> final_transaction;
-            if (!stream.empty()) {
-                throw std::ios_base::failure("trailing recovery transaction");
-            }
-        } catch (const std::ios_base::failure&) {
-            throw ApplicationError(ErrorKind::WALLET,
-                               "PAYMASTER_PERSISTED_RECOVERY_CORRUPT");
+        if (!recovery.signed_result.txid) {
+            throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_PERSISTED_RECOVERY_CORRUPT");
         }
-        const CTransactionRef final_ref =
-            MakeTransactionRef(final_transaction);
-        FinalTransactionPresence presence{FinalTransactionPresence::NONE};
-        std::optional<ExactFinalTransactionProof> final_proof;
-        if (!PreflightFinalPaymasterTransaction(
-                wallet, final_ref, presence, error,
-                ExactFinalTxIndexMode::WAIT_FOR_SYNC, &final_proof)) {
-            if (IsTransientPaymasterFinalizationError(error)) {
-                throw ApplicationError(ErrorKind::WALLET, error);
-            }
-            fail_after_recovery_store(
-                recovery, CTransaction{final_transaction},
-                ErrorKind::REJECTED, error);
-        }
-        AlternativeRecoveryParameters parameters;
-        AlternativeRecoveryTemplate trusted;
-        PartiallySignedTransaction unsigned_psbt;
-        const int64_t authorization_time =
-            recovery.recovery_authorization_accepted_at;
-        const int64_t observation_time{
-            std::max(now, authorization_time)};
-        if (!BuildRecoveryParametersFromRecord(
-                wallet, recovery, parameters, error) ||
-            authorization_time <= 0 ||
-            !ValidateAuthorizedAlternativeRecoveryResponseTemplateAgainstChainstate(
-                recovery.recovery_response, recovery.recovery_request,
-                recovery.recovery_provider_identity_key, parameters,
-                Params(), *node->chainman, authorization_time,
-                observation_time,
-                final_proof ? &*final_proof : nullptr,
-                trusted, unsigned_psbt, error) ||
-            !ValidateAuthorizedFinalAlternativeRecoveryAgainstChainstate(
-                final_transaction, recovery.expected_wtxid, trusted,
-                parameters, Params(), *node->chainman,
-                authorization_time, observation_time,
-                final_proof ? &*final_proof : nullptr,
-                error)) {
-            if (IsTransientPaymasterFinalizationError(error)) {
-                throw ApplicationError(ErrorKind::WALLET, error);
-            }
-            fail_after_recovery_store(
-                recovery, CTransaction{final_transaction},
-                ErrorKind::REJECTED, error);
-        }
-        bool already_confirmed{false};
-        std::string broadcast_error;
-        const bool broadcast = InsertAndBroadcastPaymasterTransaction(
-            wallet, final_ref, already_confirmed, broadcast_error);
-        if (!broadcast) {
-            if (IsTransientPaymasterFinalizationError(broadcast_error)) {
-                throw ApplicationError(
-                    ErrorKind::WALLET,
-                    broadcast_error.empty() ? "PAYMASTER_RECOVERY_FINAL_BROADCAST_UNAVAILABLE" : broadcast_error);
-            }
-            fail_after_recovery_store(
-                recovery, CTransaction{final_transaction},
-                ErrorKind::REJECTED,
-                broadcast_error.empty() ? "PAYMASTER_RECOVERY_FINAL_BROADCAST_REJECTED" : strprintf("PAYMASTER_RECOVERY_FINAL_BROADCAST_REJECTED: %s", broadcast_error));
-        }
-        if (broadcast && !store.ReconcileFinalTransaction(
-                             *final_ref, already_confirmed ? 1 : 0,
-                             !already_confirmed, now, error)) {
-            throw ApplicationError(ErrorKind::WALLET, error);
-        }
-        return make_result(recovery, RecoveryQueueState{}, broadcast,
-                           broadcast_error);
+        ExecuteDurableClientFinal(wallet, *recovery.signed_result.txid, now, context.paymaster);
+        return make_result(recovery, RecoveryQueueState{}, true);
     }
     throw ApplicationError(ErrorKind::WALLET,
                        "PAYMASTER_ALTERNATIVE_RECOVERY_STATE_INVALID");
@@ -1228,57 +1044,10 @@ ClientRecoveryResult ResolvePaymasterSession(WalletContext& context, CWallet& ta
     if (!attempt.final_transaction.empty() &&
         !attempt.final_txid.IsNull()) {
         bool broadcast{false};
-        bool already_confirmed{false};
         std::string broadcast_error;
         if (action == "retry_same") {
-            const int64_t now{GetTime()};
-            CMutableTransaction decoded;
-            try {
-                SpanReader stream{::PROTOCOL_VERSION,
-                                  attempt.final_transaction};
-                stream >> decoded;
-                if (!stream.empty() ||
-                    SerializeTransaction(decoded) !=
-                        attempt.final_transaction ||
-                    CTransaction{decoded}.GetHash() !=
-                        attempt.final_txid) {
-                    throw std::ios_base::failure(
-                        "non-canonical client final transaction");
-                }
-            } catch (const std::ios_base::failure&) {
-                throw ApplicationError(
-                    ErrorKind::WALLET,
-                    "PAYMASTER_PERSISTED_FINAL_ARTIFACT_CORRUPT");
-            }
-            const CTransactionRef exact_transaction =
-                MakeTransactionRef(decoded);
-            FinalTransactionPresence presence{
-                FinalTransactionPresence::NONE};
-            std::optional<ExactFinalTransactionProof> final_proof;
-            std::string validation_error;
-            if (!PreflightFinalPaymasterTransaction(
-                    *wallet, exact_transaction, presence,
-                    validation_error, ExactFinalTxIndexMode::WAIT_FOR_SYNC, &final_proof) ||
-                !store.ValidateClientDurableFinalForBroadcast(
-                    *exact_transaction, now,
-                    final_proof ? &*final_proof : nullptr,
-                    validation_error)) {
-                throw ApplicationError(
-                    ErrorKind::REJECTED,
-                    validation_error.empty()
-                        ? "PAYMASTER_CLIENT_FINAL_AUTHORIZATION_REQUIRED"
-                        : validation_error);
-            }
-            broadcast = InsertAndBroadcastPaymasterTransaction(
-                *wallet, exact_transaction, already_confirmed,
-                broadcast_error);
-            std::string reconcile_error;
-            if (broadcast && !store.ReconcileFinalTransaction(
-                                 *exact_transaction,
-                                 already_confirmed ? 1 : 0,
-                                 !already_confirmed, now, reconcile_error)) {
-                throw ApplicationError(ErrorKind::WALLET, reconcile_error);
-            }
+            ExecuteDurableClientFinal(*wallet, attempt.final_txid, GetTime(), context.paymaster);
+            broadcast = true;
         }
         if (!store.GetSessionByRequestId(session.request_id,
                                          session)) {

@@ -7853,6 +7853,8 @@ BOOST_AUTO_TEST_CASE(transient_finalization_errors_remain_retryable)
         {"PAYMASTER_FINAL_BLOCK_READ", false, true},
         {"PAYMASTER_WALLET_TRANSACTION_DATABASE_WRITE", false, true},
         {"PAYMASTER_RECOVERY_USER_PREVOUT_NOT_FOUND", false, true},
+        {"PAYMASTER_FINAL_MEMPOOL_POLICY", false, true},
+        {"PAYMASTER_FINAL_BROADCAST_UNAVAILABLE", false, true},
         {"PAYMASTER_FINAL_TRANSACTION_CONFLICT", false, false},
         {"PAYMASTER_FINAL_WITNESS_CONFLICT", false, false},
         {"PAYMASTER_FINAL_MEMPOOL_REJECTED: bad-txns-inputs-missingorspent", false, false},

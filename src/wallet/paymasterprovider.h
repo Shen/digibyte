@@ -2,7 +2,7 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
-/** \file Durable provider-commit recovery and wallet transaction integration. */
+/** \file Durable commit recovery and exact wallet transaction integration. */
 
 #ifndef DIGIBYTE_WALLET_PAYMASTERPROVIDER_H
 #define DIGIBYTE_WALLET_PAYMASTERPROVIDER_H
@@ -21,6 +21,8 @@
 #include <string>
 #include <string_view>
 #include <vector>
+
+namespace DigiDollar::Paymaster { class Manager; }
 
 namespace wallet {
 
@@ -93,6 +95,22 @@ bool PreflightExactPaymasterFinalTransaction(
     ExactFinalTxIndexMode txindex_mode,
     ExactFinalTransactionPreflight& result,
     std::string& error);
+
+namespace paymaster_app {
+struct ClientFinalExecutionResult {
+    CTransactionRef transaction;
+    bool already_confirmed{false};
+};
+/** Resume an exact durable client final. The txid is only a locator: authoritative
+ * bytes, payment/recovery binding and accepted authorization are reloaded before
+ * execution. All client entry points use this operation after their atomic commit.
+ * Throws ApplicationError on failure, retaining signed authority and reservations.
+ * Startup uses NONBLOCKING; neither mode authorizes safety-depth pruning. */
+ClientFinalExecutionResult ExecuteDurableClientFinal(
+    CWallet& wallet, const uint256& txid, int64_t now,
+    DigiDollar::Paymaster::Manager* manager,
+    ExactFinalTxIndexMode txindex_mode = ExactFinalTxIndexMode::WAIT_FOR_SYNC);
+} // namespace paymaster_app
 
 /** Classify infrastructure failures at the legacy string boundary. Durable
  * results retain additional retryable storage/observation failures; callers

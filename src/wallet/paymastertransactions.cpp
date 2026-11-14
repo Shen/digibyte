@@ -42,6 +42,7 @@
 #include <wallet/paymasterpsbt.h>
 #include <wallet/paymasterstore.h>
 #include <wallet/paymasterstore_internal.h>
+#include <wallet/paymastersessionindex.h>
 #include <wallet/spend.h>
 
 #include <util/overflow.h>
@@ -1536,6 +1537,120 @@ bool PreflightFinalPaymasterTransaction(CWallet& wallet,
     presence = preflight.presence;
     if (final_proof) *final_proof = preflight.final_proof;
     return true;
+}
+
+ClientFinalExecutionResult ExecuteDurableClientFinal(
+    CWallet& wallet, const uint256& txid, int64_t now,
+    Manager* manager,
+    ExactFinalTxIndexMode txindex_mode)
+{
+    using namespace paymaster_store::internal;
+    PaymasterStore store{wallet};
+    PaymentSession session;
+    std::optional<ProviderAttempt> payment_attempt;
+    std::optional<AlternativeRecoveryRecord> recovery;
+    ExactFinalArtifact artifact;
+    std::string error;
+    {
+        LOCK(wallet.cs_wallet);
+        WalletBatch batch{wallet.GetDatabase()};
+        std::vector<PaymentSession> candidates;
+        if (!ListPaymasterFinalSessions(batch, wallet.GetDatabase(), txid, candidates)) {
+            throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SESSION_DATABASE_READ");
+        }
+        bool found{false};
+        for (const PaymentSession& candidate : candidates) {
+            if (candidate.provider_side || candidate.state == SessionState::FAILED) continue;
+            ExactFinalArtifact payment_artifact;
+            ExactFinalArtifact recovery_artifact;
+            std::optional<ProviderAttempt> attempt;
+            if (!LoadPaymentFinalArtifact(batch, candidate, payment_artifact, attempt, error) ||
+                !LoadRecoveryFinalArtifact(batch, candidate, recovery_artifact, error)) {
+                throw ApplicationError(ErrorKind::WALLET, error);
+            }
+            const bool recovering = !recovery_artifact.txid.IsNull();
+            const ExactFinalArtifact& selected = recovering ? recovery_artifact : payment_artifact;
+            if (selected.txid != txid || txid.IsNull()) continue;
+            if (found) {
+                throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_CLIENT_FINAL_AUTHORIZATION_CONFLICT");
+            }
+            found = true;
+            session = candidate;
+            artifact = selected;
+            if (recovering) {
+                AlternativeRecoveryRecord durable_recovery;
+                if (!store.GetAlternativeRecovery(candidate.request_id, durable_recovery) ||
+                    durable_recovery.provider_side ||
+                    durable_recovery.session_id != candidate.session_id ||
+                    durable_recovery.phase != AlternativeRecoveryPhase::FINAL_COMMITTED ||
+                    durable_recovery.final_transaction != artifact.bytes ||
+                    durable_recovery.expected_wtxid != artifact.wtxid) {
+                    throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_RECOVERY_FINAL_STATE_RELOAD_FAILED");
+                }
+                recovery = std::move(durable_recovery);
+            } else {
+                if (!attempt) {
+                    throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_FINAL_STATE_RELOAD_FAILED");
+                }
+                payment_attempt = std::move(attempt);
+            }
+        }
+        if (!found) {
+            throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_CLIENT_FINAL_AUTHORIZATION_REQUIRED");
+        }
+    }
+
+    // Only an authenticated, exactly bound final can acquire a conflict marker.
+    // Local availability failures leave its durable state intact for retry.
+    const auto fail = [&](const std::string& failure) -> void {
+        if (IsTransientPaymasterFinalizationError(failure)) {
+            throw ApplicationError(ErrorKind::WALLET, failure);
+        }
+        std::string persistence_error;
+        const bool recorded = recovery ?
+            store.RecordClientAlternativeRecoveryConflict(
+                session.request_id, recovery->recovery_id, artifact.txid,
+                artifact.wtxid, now, persistence_error) :
+            store.RecordClientFinalConflict(
+                session.request_id, payment_attempt->attempt_id, artifact.txid,
+                artifact.wtxid, now, persistence_error);
+        if (!recorded) {
+            throw ApplicationError(ErrorKind::WALLET,
+                persistence_error.empty() ? "PAYMASTER_FINAL_CONFLICT_NOT_PERSISTED" : persistence_error);
+        }
+        throw ApplicationError(ErrorKind::REJECTED,
+            failure.empty() ? "PAYMASTER_CLIENT_BROADCAST_AUTHORIZATION_INVALID" : failure);
+    };
+
+    const CTransactionRef transaction = MakeTransactionRef(artifact.transaction);
+    ExactFinalTransactionPreflight preflight;
+    // Index/chain waits remain outside cs_wallet. The store validator is the
+    // single financial firewall for both normal and alternative client finals.
+    if (!PreflightExactPaymasterFinalTransaction(wallet, transaction, txindex_mode, preflight, error) ||
+        !store.ValidateClientDurableFinalForBroadcast(
+            *transaction, now, preflight.final_proof ? &*preflight.final_proof : nullptr, error)) {
+        fail(error);
+    }
+    if (manager) {
+        if (!DrainClientSessionEquivocations(*manager, store, session, error) ||
+            (recovery && !DrainAlternativeRecoveryCapacityEquivocations(
+                *manager, store, *recovery, error, EquivocationBlockPolicy::OBSERVE_ONLY))) {
+            throw ApplicationError(ErrorKind::WALLET, error);
+        }
+    }
+    ClientFinalExecutionResult result{transaction};
+    if (!InsertAndBroadcastPaymasterTransaction(wallet, transaction, result.already_confirmed, error)) {
+        fail(error.empty() ? "PAYMASTER_FINAL_BROADCAST_UNAVAILABLE" : error);
+    }
+    ExactFinalTransactionPreflight observation;
+    if (!PreflightExactPaymasterFinalTransaction(wallet, transaction, txindex_mode, observation, error) ||
+        !store.ReconcileFinalTransaction(
+            *transaction, observation.presence == ExactFinalTransactionPresence::CONFIRMED ? 1 : 0,
+            observation.presence == ExactFinalTransactionPresence::MEMPOOL, now, error)) {
+        throw ApplicationError(ErrorKind::WALLET, error);
+    }
+    result.already_confirmed = observation.presence == ExactFinalTransactionPresence::CONFIRMED;
+    return result;
 }
 
 bool MarkFinalValidationFailureRecoverable(

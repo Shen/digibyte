@@ -10,6 +10,7 @@
  */
 
 #include <wallet/paymasterprovider.h>
+#include <paymaster/error.h>
 
 #include <chainparams.h>
 #include <hash.h>
@@ -456,6 +457,12 @@ bool PreflightExactPaymasterFinalTransactionImpl(
         error = "PAYMASTER_FINAL_WITNESS_CONFLICT";
         return false;
     }
+    if (preflight.m_state.GetResult() == TxValidationResult::TX_MEMPOOL_POLICY) {
+        wallet.WalletLogPrintf("Paymaster exact final deferred by local mempool policy: %s\n",
+            preflight.m_state.ToString());
+        error = "PAYMASTER_FINAL_MEMPOOL_POLICY";
+        return false;
+    }
     error = strprintf("PAYMASTER_FINAL_MEMPOOL_REJECTED: %s",
                       preflight.m_state.ToString());
     return false;
@@ -660,6 +667,8 @@ PaymasterFinalizationFailure ClassifyPaymasterFinalizationFailure(
         (error == "PAYMASTER_NODE_RUNTIME_UNAVAILABLE" ||
          error == "PAYMASTER_FINAL_BLOCK_READ" ||
          error == "PAYMASTER_WALLET_TRANSACTION_DATABASE_WRITE" ||
+         error == "PAYMASTER_FINAL_MEMPOOL_POLICY" ||
+         error == "PAYMASTER_FINAL_BROADCAST_UNAVAILABLE" ||
          error == "PAYMASTER_RECOVERY_USER_PREVOUT_NOT_FOUND")) {
         return PaymasterFinalizationFailure::LOCAL_UNAVAILABLE;
     }
@@ -710,6 +719,18 @@ bool InsertAndBroadcastExactPaymasterTransaction(
         *node, transaction, error);
     if (broadcast != TransactionError::OK &&
         broadcast != TransactionError::ALREADY_IN_CHAIN) {
+        // Wallet insertion can outlive a policy change after preflight. The
+        // broadcast API exposes only a coarse result and diagnostic text;
+        // classify current admissibility through the canonical typed preflight.
+        wallet.WalletLogPrintf("Paymaster exact final broadcast deferred or rejected: %s\n", error);
+        ExactFinalTransactionPreflight current;
+        std::string current_error;
+        if (PreflightExactPaymasterFinalTransaction(wallet, transaction,
+                ExactFinalTxIndexMode::NONBLOCKING, current, current_error)) {
+            error = "PAYMASTER_FINAL_BROADCAST_UNAVAILABLE";
+        } else {
+            error = std::move(current_error);
+        }
         return false;
     }
 
@@ -1177,27 +1198,14 @@ DurablePaymasterRecoveryReport RecoverDurablePaymasterCommits(
         }
         ++report.candidates;
         bool already_confirmed{false};
-        std::string recovery_error;
-        ExactFinalTransactionPreflight authority_preflight;
-        if (!PreflightExactPaymasterFinalTransaction(
-                wallet, transaction, ExactFinalTxIndexMode::NONBLOCKING,
-                authority_preflight, recovery_error) ||
-            !store.ValidateClientDurableFinalForBroadcast(
-                *transaction, now,
-                authority_preflight.final_proof ? &*authority_preflight.final_proof : nullptr,
-                recovery_error) ||
-            !InsertAndBroadcastExactPaymasterTransaction(
-                wallet, transaction, already_confirmed, recovery_error)) {
-            report.errors.push_back(std::move(recovery_error));
-            continue;
-        }
-        ExactFinalTransactionPreflight observation;
-        if (!PreflightExactPaymasterFinalTransaction(
-                wallet, transaction, ExactFinalTxIndexMode::NONBLOCKING,
-                observation, recovery_error) ||
-            !ReconcileDurableFinalObservation(
-                store, transaction, observation, now, recovery_error)) {
-            report.errors.push_back(std::move(recovery_error));
+        try {
+            const auto* node = wallet.chain().context();
+            const auto execution = paymaster_app::ExecuteDurableClientFinal(
+                wallet, transaction->GetHash(), now, node ? node->paymaster.get() : nullptr,
+                ExactFinalTxIndexMode::NONBLOCKING);
+            already_confirmed = execution.already_confirmed;
+        } catch (const ApplicationError& failure) {
+            report.errors.push_back(failure.what());
             continue;
         }
         ++report.recovered;

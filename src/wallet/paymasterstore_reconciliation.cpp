@@ -400,6 +400,7 @@ bool PaymasterStore::ValidateClientDurableFinalForBroadcast(
     }
 
     std::optional<ProviderAttempt> payment_attempt;
+    std::optional<PaymentSession> payment_session;
     std::optional<UserAuthorizationRecord> user_authorization;
     std::optional<PaymasterResult> persisted_payment_result;
     std::optional<AlternativeRecoveryRecord> alternative_recovery;
@@ -462,6 +463,7 @@ bool PaymasterStore::ValidateClientDurableFinalForBroadcast(
                     return false;
                 }
                 user_authorization = std::move(authorization);
+                payment_session = session;
                 payment_attempt = std::move(*observed_attempt);
                 continue;
             }
@@ -536,6 +538,21 @@ bool PaymasterStore::ValidateClientDurableFinalForBroadcast(
             }
             return false;
         }
+        // This exact final already has durable acceptance, signed user inputs
+        // and a provider result. A local clock rollback must not revoke that
+        // historical authority; keep every recorded acceptance-time bound.
+        const int64_t authorization_time =
+            payment_attempt->client_manifest_accepted_at;
+        const int64_t observation_time{
+            std::max(now, authorization_time)};
+        if (!payment_session ||
+            payment_attempt->session_id != payment_session->session_id ||
+            payment_attempt->client_manifest.canonical_request_hash != payment_session->canonical_request_hash ||
+            !HasAcceptedClientManifest(*payment_attempt, observation_time) ||
+            payment_attempt->client_manifest_accepted_at > payment_session->updated_at) {
+            error = "PAYMASTER_CLIENT_AUTHORIZATION_NOT_ACCEPTED";
+            return false;
+        }
         const UserAuthorizationRecord& authorization = *user_authorization;
         if (authorization.version != UserAuthorizationRecord::CURRENT_VERSION ||
             authorization.commit_key != payment_attempt->commit_key ||
@@ -583,10 +600,6 @@ bool PaymasterStore::ValidateClientDurableFinalForBroadcast(
             error = "PAYMASTER_CAPACITY_SNAPSHOT_BINDING_MISMATCH";
             return false;
         }
-        const int64_t authorization_time =
-            payment_attempt->client_manifest_accepted_at;
-        const int64_t observation_time{
-            std::max(now, authorization_time)};
         // Durable bytes alone cannot justify reconstructing spent prevouts.
         // Only the canonical preflight's transaction-bound evidence can do so.
         if (!ValidateAuthorizedCapacityRetryAgainstChainstate(
