@@ -1965,6 +1965,20 @@ uint8_t SupportedProviderPoolFundingModels(const ProviderPoolReadiness& pool, co
     return models;
 }
 
+bool IsProviderCarrierUsable(DDCents carrier, const ProviderPolicy* policy)
+{
+    std::string error;
+    if (policy && !ValidateProviderPolicy(*policy, error)) return false;
+    if (carrier.value < 100 || carrier.value > MAX_DD_OUTPUT_CENTS) return false;
+    // Zero-rate offers retain the existing carrier-pool requirement, although
+    // their actual Capacity requests do not consume a fee carrier.
+    if (policy && policy->fee_rate_bps == 0) return true;
+    const DDCents headroom{policy && policy->maximum_user_paid_service_fee.value > 0
+                              ? std::min<int64_t>(99, policy->maximum_user_paid_service_fee.value)
+                              : 99};
+    return ComputeCarrierSuccessor(carrier, headroom, error).has_value();
+}
+
 ProviderPoolReadiness EvaluateProviderPoolReadiness(
     const std::vector<ProviderPoolEntry>& entries,
     const ProviderPolicy& policy,
@@ -1997,7 +2011,8 @@ ProviderPoolReadiness EvaluateProviderPoolReadiness(
         } else if (entry.asset == PoolAsset::DGB &&
                    entry.dgb_value.value >= policy.maximum_network_fee.value) {
             ++result.operational_dgb;
-        } else if (entry.purpose == PoolPurpose::OPERATIONAL && entry.asset == PoolAsset::DD_CARRIER) {
+        } else if (entry.purpose == PoolPurpose::OPERATIONAL && entry.asset == PoolAsset::DD_CARRIER &&
+                   IsProviderCarrierUsable(entry.carrier_value, &policy)) {
             ++result.operational_carriers;
         }
     }

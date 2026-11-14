@@ -34,6 +34,16 @@ The provider receives carrier principal plus fee; the principal is not charged
 to the client. Free sponsorship does not need a carrier for a service fee.
 All resulting DD outputs must still satisfy ordinary validation.
 
+`IsProviderCarrierUsable` uses `ComputeCarrierSuccessor` before new Capacity
+binding. A positive fee rate requires headroom for every permitted sub-minimum
+fee: 99 cents, or the smaller positive provider fee cap. Ordinary payment bounds
+cannot reduce it because the same capacity serves aggregate recovery inputs.
+Readiness, both slot selectors, `CountLiquiditySlots`, finite setup and refill
+share this rule. A zero fee rate preserves the existing paid-pool requirement
+without fee headroom. An already bound Capacity proof replays unchanged.
+Full carriers remain protected; replacing them still requires the existing
+funding approval, and withdrawal still requires its explicit approval.
+
 Fee deduction treats the entered amount as the exact total. Rounded cent gaps
 fail with `PAYMASTER_NO_EXACT_GROSS_OFFER`, rather than silently changing that
 total. Sweep uses spendable, unreserved inputs and the same authorization rules.

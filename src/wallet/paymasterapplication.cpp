@@ -766,6 +766,17 @@ LiquiditySlotCounts CountLiquiditySlots(
     size_t target,
     int64_t minimum_dgb_value)
 {
+    return CountLiquiditySlots(entries, purpose, asset, target, minimum_dgb_value, nullptr);
+}
+
+LiquiditySlotCounts CountLiquiditySlots(
+    const std::vector<DigiDollar::Paymaster::ProviderPoolEntry>& entries,
+    DigiDollar::Paymaster::PoolPurpose purpose,
+    DigiDollar::Paymaster::PoolAsset asset,
+    size_t target,
+    int64_t minimum_dgb_value,
+    const DigiDollar::Paymaster::ProviderPolicy* provider_policy)
+{
     using namespace DigiDollar::Paymaster;
     LiquiditySlotCounts result;
     for (const ProviderPoolEntry& entry : entries) {
@@ -780,6 +791,10 @@ LiquiditySlotCounts CountLiquiditySlots(
         // stale or undersized output suppress automatic replenishment.
         if (asset == PoolAsset::DGB &&
             entry.dgb_value.value < minimum_dgb_value) {
+            continue;
+        }
+        if (purpose == PoolPurpose::OPERATIONAL && asset == PoolAsset::DD_CARRIER &&
+            !IsProviderCarrierUsable(entry.carrier_value, provider_policy)) {
             continue;
         }
         ++result.target_counted;
@@ -808,6 +823,9 @@ DigiDollar::Paymaster::ProviderLiquidityPolicy SuggestedLiquidityPolicy(
                     readiness.pool_entries.begin(), readiness.pool_entries.end(),
                     [&](const ProviderPoolEntry& entry) {
                         return entry.purpose == purpose && entry.asset == asset &&
+                               (purpose != PoolPurpose::OPERATIONAL || asset != PoolAsset::DD_CARRIER ||
+                                IsProviderCarrierUsable(entry.carrier_value,
+                                    readiness.have_policy ? &readiness.policy : nullptr)) &&
                                IsActiveProviderPoolState(entry.state);
                     })));
     };
@@ -2725,7 +2743,8 @@ ProviderAutomationSnapshot CaptureProviderAutomationStatus(const CWallet& wallet
             CountLiquiditySlots(readiness.pool_entries, PoolPurpose::ADMISSION, PoolAsset::DGB, policy.target_admission_dgb).missing == 0 &&
             CountLiquiditySlots(readiness.pool_entries, PoolPurpose::ADMISSION, PoolAsset::DD_CARRIER, policy.target_admission_carriers).missing == 0 &&
             CountLiquiditySlots(readiness.pool_entries, PoolPurpose::OPERATIONAL, PoolAsset::DGB, policy.target_operational_dgb, minimum_operational_dgb).missing == 0 &&
-            CountLiquiditySlots(readiness.pool_entries, PoolPurpose::OPERATIONAL, PoolAsset::DD_CARRIER, policy.target_operational_carriers).missing == 0;
+            CountLiquiditySlots(readiness.pool_entries, PoolPurpose::OPERATIONAL, PoolAsset::DD_CARRIER, policy.target_operational_carriers,
+                                0, readiness.have_policy ? &readiness.policy : nullptr).missing == 0;
         if (!faulted && !pending && !planned && !readiness.ready && payment_in_use && targets_accounted_for &&
             readiness.errors.size() == 1 && readiness.errors.front() == "PAYMASTER_OPERATIONAL_SLOT_MISSING" &&
             (reason.empty() || reason == "PAYMASTER_LIQUIDITY_CONFIRMATION_PENDING")) {

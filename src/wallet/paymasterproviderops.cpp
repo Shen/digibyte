@@ -790,6 +790,8 @@ PoolPreparationResult PreparePaymasterPool(WalletContext& context, CWallet& wall
                                                   return entry.purpose == purpose && entry.asset == asset &&
                                                          (asset != PoolAsset::DGB ||
                                                           entry.dgb_value.value >= minimum_dgb_value) &&
+                                                         (purpose != PoolPurpose::OPERATIONAL || asset != PoolAsset::DD_CARRIER ||
+                                                          IsProviderCarrierUsable(entry.carrier_value, &policy)) &&
                                                          (entry.state == PoolEntryState::AVAILABLE ||
                                                           entry.state == PoolEntryState::RESERVED ||
                                                           entry.state == PoolEntryState::PENDING_SUCCESSOR);

@@ -199,7 +199,8 @@ UniValue ProviderLiquidityStatusToJSON(const ProviderReadiness& readiness,
         PoolAsset::DD_CARRIER, policy.target_admission_carriers);
     const auto operational_carriers = CountLiquiditySlots(
         readiness.pool_entries, PoolPurpose::OPERATIONAL,
-        PoolAsset::DD_CARRIER, policy.target_operational_carriers);
+        PoolAsset::DD_CARRIER, policy.target_operational_carriers, 0,
+        readiness.have_policy ? &readiness.policy : nullptr);
     const size_t missing = admission_dgb.missing + operational_dgb.missing +
                            admission_carriers.missing +
                            operational_carriers.missing;

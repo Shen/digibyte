@@ -2300,7 +2300,8 @@ bool ReservePaymasterOperationalSlot(CWallet& wallet,
         if (!dgb_index && entry.asset == PoolAsset::DGB &&
             entry.dgb_value.value >= policy.maximum_network_fee.value) {
             dgb_index = index;
-        } else if (require_carrier && !carrier_index && entry.asset == PoolAsset::DD_CARRIER) {
+        } else if (require_carrier && !carrier_index && entry.asset == PoolAsset::DD_CARRIER &&
+                   IsProviderCarrierUsable(entry.carrier_value, &policy)) {
             carrier_index = index;
         }
     }
@@ -2638,7 +2639,8 @@ bool ReserveAndBuildPaymasterCapacityProof(
             entry.dgb_value.value >= policy.maximum_network_fee.value) {
             dgb_index = index;
         } else if (require_carrier && !carrier_index &&
-                   entry.asset == PoolAsset::DD_CARRIER) {
+                   entry.asset == PoolAsset::DD_CARRIER &&
+                   IsProviderCarrierUsable(entry.carrier_value, &policy)) {
             carrier_index = index;
         }
     }

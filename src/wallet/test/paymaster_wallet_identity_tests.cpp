@@ -6131,5 +6131,138 @@ BOOST_AUTO_TEST_CASE(accepted_legacy_finite_setup_executes_across_journal_migrat
     }
 }
 
+BOOST_AUTO_TEST_CASE(capacity_skips_full_carriers_and_preserves_bound_replay)
+{
+    ScopedPaymasterMockTime clock{112};
+    for (const bool full_first : {true, false}) {
+        CWallet wallet{m_node.chain.get(), full_first ? "full-carrier-first" : "full-carrier-last",
+                       CreateMockableWalletDatabase()};
+        {
+            LOCK(wallet.cs_wallet);
+            wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+            wallet.SetupDescriptorScriptPubKeyMans();
+        }
+        ProviderIdentityRecord identity;
+        std::string error;
+        BOOST_REQUIRE(CreatePaymasterIdentity(wallet, "Carrier headroom", 100, identity, error));
+        ProviderPolicy policy;
+        policy.funding_models = FUNDING_MODEL_USER_PAID;
+        policy.fee_rate_bps = 50;
+        policy.min_payment = DDCents{100};
+        policy.max_payment = DDCents{1000000};
+        policy.maximum_network_fee = DGBSatoshis{MIN_ADMISSION_DGB_SATOSHIS};
+        policy.maximum_user_paid_service_fee = DDCents{1};
+        BOOST_REQUIRE(SetPaymasterProviderPolicy(wallet, policy, 101, error));
+        FundingSafetyLimits limits;
+        limits.maximum_network_fee_per_transaction = policy.maximum_network_fee;
+        limits.maximum_reserved_network_fee = DGBSatoshis{20000000};
+        limits.maximum_network_fee_per_hour = DGBSatoshis{100000000};
+        limits.maximum_network_fee_per_day = DGBSatoshis{1000000000};
+        limits.maximum_completed_per_hour = 10;
+        limits.maximum_completed_per_day = 100;
+        ProviderSafetyPolicy safety;
+        safety.user_paid = limits;
+        safety.maximum_active_quotes_total = 10;
+        safety.maximum_active_quotes_per_netgroup = 5;
+        safety.maximum_active_quotes_per_recipient = 2;
+        safety.maximum_quote_requests_per_netgroup_per_minute = 30;
+        BOOST_REQUIRE(SetPaymasterProviderSafetyPolicy(wallet, safety, 101, error));
+
+        CMutableTransaction parent;
+        parent.SetDigiDollarType(::DD_TX_TRANSFER);
+        parent.vin.emplace_back(COutPoint{uint256::ONE, 9});
+        parent.vout.emplace_back(20000000, identity.identity_script);
+        parent.vout.emplace_back(0, identity.identity_script);
+        parent.vout.emplace_back(0, identity.identity_script);
+        parent.vout.emplace_back(0, CScript{} << OP_RETURN << std::vector<unsigned char>{'D', 'D'}
+            << CScriptNum(::DD_TX_TRANSFER)
+            << CScriptNum(full_first ? MAX_DD_OUTPUT_CENTS : MAX_DD_OUTPUT_CENTS - 1)
+            << CScriptNum(full_first ? MAX_DD_OUTPUT_CENTS - 1 : MAX_DD_OUTPUT_CENTS));
+        const auto transaction = MakeTransactionRef(parent);
+        {
+            LOCK(wallet.cs_wallet);
+            BOOST_REQUIRE(wallet.AddToWallet(transaction, TxStateInMempool{}));
+        }
+        ProviderPoolEntry dgb;
+        dgb.outpoint = COutPoint{transaction->GetHash(), 0};
+        dgb.purpose = PoolPurpose::OPERATIONAL;
+        dgb.asset = PoolAsset::DGB;
+        dgb.script_pub_key = identity.identity_script;
+        dgb.dgb_value = DGBSatoshis{20000000};
+        dgb.confirmation_height = 90;
+        dgb.updated_at = 101;
+        ProviderPoolEntry full = dgb;
+        full.outpoint.n = full_first ? 1 : 2;
+        full.asset = PoolAsset::DD_CARRIER;
+        full.dgb_value = DGBSatoshis{0};
+        full.carrier_value = DDCents{MAX_DD_OUTPUT_CENTS};
+        ProviderPoolEntry usable = full;
+        usable.outpoint.n = full_first ? 2 : 1;
+        usable.carrier_value = DDCents{MAX_DD_OUTPUT_CENTS - 1};
+        {
+            LOCK(wallet.cs_wallet);
+            // Internal DD protection prevents ordinary DGB use, while a
+            // validated carrier operation may still use the token.
+            BOOST_REQUIRE(wallet.LockDigiDollarCoin(full.outpoint));
+            BOOST_REQUIRE(wallet.LockDigiDollarCoin(usable.outpoint));
+        }
+        BOOST_REQUIRE(SetPaymasterProviderPoolEntries(wallet, {full, dgb}, error));
+
+        const auto full_counts = paymaster_app::CountLiquiditySlots(
+            {full, dgb}, PoolPurpose::OPERATIONAL, PoolAsset::DD_CARRIER, 1, 0, &policy);
+        BOOST_CHECK_EQUAL(full_counts.ready, 0U);
+        BOOST_CHECK_EQUAL(full_counts.missing, 1U);
+        BOOST_CHECK(IsPaymasterInputReserved(wallet, full.outpoint));
+        PaymasterCapacityRequest request;
+        request.genesis_hash = Params().GenesisBlock().GetHash();
+        request.provider_id = identity.provider_id;
+        request.request_id = "550e8400-e29b-41d4-a716-4466554400d4";
+        request.session_id = uint256S("d4");
+        request.client_nonce = uint256S("d5");
+        request.funding_model = FundingModel::USER_PAID;
+        request.requires_carrier = true;
+        request.created_at = 110;
+        request.expires_at = 170;
+        const std::vector<unsigned char> netgroup{1, 2, 3, 4};
+        PaymasterCapacityProof proof;
+        std::vector<ProviderPoolEntry> reserved;
+        const auto unchanged = GetMockableDatabase(wallet).m_records;
+        BOOST_CHECK(!ReserveAndBuildPaymasterCapacityProof(wallet, identity, request,
+            request.genesis_hash, request.genesis_hash, 100, 1, netgroup, 112, proof, reserved, error));
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_OPERATIONAL_SLOT_MISSING");
+        BOOST_CHECK(GetMockableDatabase(wallet).m_records == unchanged);
+        BOOST_REQUIRE(SetPaymasterProviderPoolEntries(wallet, {full, dgb, usable}, error));
+        BOOST_REQUIRE_MESSAGE(ReserveAndBuildPaymasterCapacityProof(wallet, identity, request,
+            request.genesis_hash, request.genesis_hash, 100, 1, netgroup, 112, proof, reserved, error), error);
+        BOOST_REQUIRE(proof.liquidity_slots.front().carrier);
+        BOOST_CHECK(proof.liquidity_slots.front().carrier->carrier.outpoint == usable.outpoint);
+        std::vector<ProviderPoolEntry> pool;
+        BOOST_REQUIRE(GetPaymasterProviderPoolEntries(wallet, pool));
+        const auto full_entry = std::find_if(pool.begin(), pool.end(), [&](const auto& entry) {
+            return entry.outpoint == full.outpoint;
+        });
+        BOOST_REQUIRE(full_entry != pool.end());
+        BOOST_CHECK(full_entry->state == PoolEntryState::AVAILABLE);
+        BOOST_CHECK(IsPaymasterInputReserved(wallet, full.outpoint));
+
+        // New policy requires more headroom. It does not replace or silently
+        // release the exact resource already bound by the saved proof.
+        policy.maximum_user_paid_service_fee = DDCents{99};
+        BOOST_REQUIRE(SetPaymasterProviderPolicy(wallet, policy, 113, error));
+        const auto bound_counts = paymaster_app::CountLiquiditySlots(
+            pool, PoolPurpose::OPERATIONAL, PoolAsset::DD_CARRIER, 1, 0, &policy);
+        BOOST_CHECK_EQUAL(bound_counts.target_counted, 0U);
+        BOOST_CHECK_EQUAL(bound_counts.missing, 1U);
+        PaymasterCapacityProof retry;
+        BOOST_REQUIRE_MESSAGE(ReserveAndBuildPaymasterCapacityProof(wallet, identity, request,
+            request.genesis_hash, request.genesis_hash, 100, 1, netgroup, 113, retry, reserved, error), error);
+        BOOST_CHECK(retry.snapshot_id == proof.snapshot_id);
+        BOOST_CHECK(retry.identity_signature == proof.identity_signature);
+        BOOST_CHECK(retry.liquidity_slots.front().carrier->carrier.outpoint == usable.outpoint);
+        BOOST_CHECK(IsPaymasterInputReserved(wallet, usable.outpoint));
+        BOOST_CHECK(IsPaymasterInputReserved(wallet, full.outpoint));
+    }
+}
+
 BOOST_AUTO_TEST_SUITE_END()
 } // namespace wallet

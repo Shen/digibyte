@@ -977,6 +977,13 @@ bool ValidateProviderPoolEntries(const std::vector<ProviderPoolEntry>& entries,
 /** States that still dedicate an outpoint to Paymaster operation and must
  * therefore be excluded from ordinary wallet coin selection. */
 bool IsActiveProviderPoolState(PoolEntryState state);
+/** Return whether a carrier can receive every sub-minimum fee permitted by
+ * the policy before a Capacity request discloses its payment amount. Recovery
+ * uses aggregate inputs outside the ordinary payment range, so min/max payment
+ * cannot reduce the required headroom. A missing policy uses the conservative
+ * full 99-cent headroom. This is eligibility for new work, never a reason to
+ * release a protected carrier or change an already bound Capacity snapshot. */
+bool IsProviderCarrierUsable(DDCents carrier, const ProviderPolicy* policy = nullptr);
 bool ValidateProviderLiquidityPolicy(const ProviderLiquidityPolicy& policy,
                                      std::string& error);
 /** Return whether the saved targets can ever satisfy the advertised

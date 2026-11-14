@@ -510,7 +510,8 @@ void RunPaymasterProviderServiceCycleImpl(WalletContext& context, CWallet& walle
                 liquidity_policy.target_admission_carriers);
             const auto operational_carriers = CountLiquiditySlots(
                 liquidity.pool_entries, PoolPurpose::OPERATIONAL, PoolAsset::DD_CARRIER,
-                liquidity_policy.target_operational_carriers);
+                liquidity_policy.target_operational_carriers, 0,
+                liquidity.have_policy ? &liquidity.policy : nullptr);
             const size_t missing_dgb = admission_dgb.missing + operational_dgb.missing;
             const size_t missing_carriers = admission_carriers.missing +
                                             operational_carriers.missing;

@@ -237,6 +237,13 @@ LiquiditySlotCounts CountLiquiditySlots(
     DigiDollar::Paymaster::PoolAsset asset,
     size_t target,
     int64_t minimum_dgb_value = 0);
+LiquiditySlotCounts CountLiquiditySlots(
+    const std::vector<DigiDollar::Paymaster::ProviderPoolEntry>& entries,
+    DigiDollar::Paymaster::PoolPurpose purpose,
+    DigiDollar::Paymaster::PoolAsset asset,
+    size_t target,
+    int64_t minimum_dgb_value,
+    const DigiDollar::Paymaster::ProviderPolicy* provider_policy);
 DigiDollar::Paymaster::ProviderLiquidityPolicy SuggestedLiquidityPolicy(
     const ProviderReadiness& readiness,
     int64_t now);

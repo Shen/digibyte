@@ -495,6 +495,68 @@ BOOST_AUTO_TEST_CASE(pure_sponsor_needs_no_carrier_pool)
     BOOST_CHECK_EQUAL(readiness.admission_carriers, 0U);
 }
 
+BOOST_AUTO_TEST_CASE(carrier_headroom_respects_fee_cap_and_shared_capacity)
+{
+    ProviderPolicy policy = UserPaidPolicy(50);
+    for (const int64_t cap : {0, 1, 99, 100}) {
+        policy.maximum_user_paid_service_fee = DDCents{cap};
+        const int64_t required = cap == 1 ? 1 : 99;
+        BOOST_CHECK(IsProviderCarrierUsable(DDCents{MAX_DD_OUTPUT_CENTS - required}, &policy));
+        BOOST_CHECK(!IsProviderCarrierUsable(DDCents{MAX_DD_OUTPUT_CENTS - required + 1}, &policy));
+        BOOST_CHECK(!IsProviderCarrierUsable(DDCents{MAX_DD_OUTPUT_CENTS}, &policy));
+        BOOST_CHECK(!IsProviderCarrierUsable(DDCents{99}, &policy));
+        BOOST_CHECK(!IsProviderCarrierUsable(DDCents{MAX_DD_OUTPUT_CENTS + 1}, &policy));
+    }
+    // A narrow ordinary payment range cannot remove recovery's possible fee
+    // exposure: recovery prices aggregate original inputs using this Capacity.
+    policy.min_payment = policy.max_payment = DDCents{1000000};
+    BOOST_CHECK(!IsProviderCarrierUsable(DDCents{MAX_DD_OUTPUT_CENTS - 98}, &policy));
+    BOOST_CHECK(IsProviderCarrierUsable(DDCents{MAX_DD_OUTPUT_CENTS - 99}, &policy));
+    BOOST_CHECK(!IsProviderCarrierUsable(DDCents{MAX_DD_OUTPUT_CENTS}));
+    policy.fee_rate_bps = 0;
+    BOOST_CHECK(IsProviderCarrierUsable(DDCents{MAX_DD_OUTPUT_CENTS}, &policy));
+    policy.fee_rate_bps = MAX_RATE_BPS + 1;
+    BOOST_CHECK(!IsProviderCarrierUsable(DDCents{100}, &policy));
+}
+
+BOOST_AUTO_TEST_CASE(full_carriers_do_not_supply_new_payment_capacity)
+{
+    ProviderPolicy policy = UserPaidPolicy(50);
+    policy.funding_models = FUNDING_MODEL_USER_PAID;
+    std::vector<ProviderPoolEntry> entries;
+    for (uint32_t index = 0; index < REQUIRED_ADMISSION_SLOTS; ++index) {
+        entries.push_back(PoolEntry(index, PoolPurpose::ADMISSION, PoolAsset::DGB,
+                                    MIN_ADMISSION_DGB_SATOSHIS));
+        // Admission proves capital control without receiving a service fee.
+        entries.push_back(PoolEntry(index + 3, PoolPurpose::ADMISSION, PoolAsset::DD_CARRIER,
+                                    MAX_DD_OUTPUT_CENTS));
+    }
+    entries.push_back(PoolEntry(6, PoolPurpose::OPERATIONAL, PoolAsset::DGB,
+                                policy.maximum_network_fee.value));
+    entries.push_back(PoolEntry(7, PoolPurpose::OPERATIONAL, PoolAsset::DD_CARRIER,
+                                MAX_DD_OUTPUT_CENTS));
+    const auto full = EvaluateProviderPoolReadiness(entries, policy, 100, 1);
+    BOOST_CHECK(!full.ready);
+    BOOST_CHECK_EQUAL(full.admission_carriers, REQUIRED_ADMISSION_SLOTS);
+    BOOST_CHECK_EQUAL(full.operational_carriers, 0U);
+    BOOST_CHECK_EQUAL(full.complete_operational_slots, 0U);
+    BOOST_CHECK(IsActiveProviderPoolState(entries.back().state));
+
+    entries.push_back(PoolEntry(8, PoolPurpose::OPERATIONAL, PoolAsset::DD_CARRIER,
+                                MAX_DD_OUTPUT_CENTS - 1));
+    BOOST_CHECK(!EvaluateProviderPoolReadiness(entries, policy, 100, 1).ready);
+    policy.maximum_user_paid_service_fee = DDCents{1};
+    BOOST_CHECK(EvaluateProviderPoolReadiness(entries, policy, 100, 1).ready);
+    policy.maximum_user_paid_service_fee = DDCents{99};
+    entries.back().carrier_value = DDCents{MAX_DD_OUTPUT_CENTS - 99};
+    BOOST_CHECK(EvaluateProviderPoolReadiness(entries, policy, 100, 1).ready);
+    policy.funding_models = FUNDING_MODEL_ALL;
+    entries.pop_back();
+    const auto sponsor = EvaluateProviderPoolReadiness(entries, policy, 100, 1);
+    BOOST_CHECK(sponsor.ready);
+    BOOST_CHECK_EQUAL(SupportedProviderPoolFundingModels(sponsor, policy), FUNDING_MODEL_SPONSORED);
+}
+
 BOOST_AUTO_TEST_CASE(pool_successor_provenance_and_active_states_are_fail_closed)
 {
     ProviderPoolEntry successor{
