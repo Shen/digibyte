@@ -36,6 +36,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <future>
 #include <thread>
 #include <vector>
 
@@ -462,6 +463,12 @@ BOOST_FIXTURE_TEST_CASE(created_payment_resume_selects_original_unreserved_walle
     BOOST_CHECK((amounts == std::vector<CAmount>{1400, 1600}));
     BOOST_CHECK(std::find(selected.begin(), selected.end(), new_input) == selected.end());
     BOOST_CHECK(CanonicalClientRequestHash(original, DDCents{3000}, selected) == session.canonical_request_hash);
+    AutomaticPaymentParameters sweep;
+    static_cast<ClientPaymentOptions&>(sweep) = original;
+    sweep.amount = 3000;
+    const auto joined_sweep = SelectOrJoinClientPaymentOrder(m_wallet, dd_wallet, sweep, DDCents{3000}, GetTime());
+    BOOST_CHECK(joined_sweep.original_inputs == original_inputs);
+    BOOST_CHECK(joined_sweep.session.session_id == session.session_id);
     BOOST_CHECK(!IsPaymasterInputReserved(m_wallet, first));
     BOOST_CHECK(!IsPaymasterInputReserved(m_wallet, second));
     {
@@ -519,6 +526,94 @@ BOOST_FIXTURE_TEST_CASE(created_payment_resume_selects_original_unreserved_walle
     BOOST_CHECK(selected == ordinary_inputs);
     BOOST_CHECK_EQUAL(total, 2000);
     BOOST_CHECK(CanonicalClientRequestHash(ordinary, DDCents{500}, selected) == session.canonical_request_hash);
+}
+
+BOOST_FIXTURE_TEST_CASE(client_order_selection_and_join_are_atomic_and_keep_original_inputs, WalletTestingSetup)
+{
+    for (const bool spare : {false, true}) {
+        CWallet owner{m_node.chain.get(), "concurrent-order", CreateMockableWalletDatabase()};
+        BOOST_REQUIRE(owner.LoadWallet() == DBErrors::LOAD_OK);
+        DigiDollarWallet dd_wallet{&owner};
+        CKey key;
+        key.MakeNewKey(true);
+        const auto script = GetScriptForDestination(WitnessV1Taproot{XOnlyPubKey{key.GetPubKey()}});
+        const auto add_input = [&](const uint256& nonce, CAmount value) {
+            CMutableTransaction tx;
+            tx.vin.emplace_back(COutPoint{nonce, 0});
+            tx.vout.emplace_back(0, script);
+            const auto ref = MakeTransactionRef(tx);
+            const auto* tip = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Tip());
+            {
+                LOCK(owner.cs_wallet);
+                owner.SetLastBlockProcessed(tip->nHeight, tip->GetBlockHash());
+                BOOST_REQUIRE(owner.AddToWallet(ref, TxStateConfirmed{tip->GetBlockHash(), tip->nHeight, 0}));
+            }
+            const COutPoint input{ref->GetHash(), 0};
+            dd_wallet.AddDDUTXO(input, value);
+            return input;
+        };
+        const auto first = add_input(uint256S("31"), 500);
+        std::vector<COutPoint> other;
+        if (spare) other.push_back(add_input(uint256S("32"), 600));
+        AutomaticPaymentParameters input;
+        input.request_id = "550e8400-e29b-41d4-a716-446655440031";
+        input.address = EncodeDigiDollarAddress(WitnessV1Taproot{XOnlyPubKey{key.GetPubKey()}});
+        input.amount = 500;
+        auto& database = GetMockableDatabase(owner);
+        DataStream session_key;
+        session_key << std::make_pair(DBKeys::PAYMASTER_SESSION, input.request_id);
+        std::optional<ClientPaymentReplay> result[2];
+        std::exception_ptr failure[2];
+        std::promise<void> started;
+        auto ready = started.get_future();
+        std::thread second;
+        database.m_on_write = [&](Span<const std::byte> candidate) {
+            if (second.joinable() || candidate.size() != session_key.size() ||
+                !std::equal(candidate.begin(), candidate.end(), session_key.begin())) return;
+            second = std::thread([&] {
+                started.set_value();
+                try { result[1] = SelectOrJoinClientPaymentOrder(owner, dd_wallet, input, DDCents{500}, GetTime()); }
+                catch (...) { failure[1] = std::current_exception(); }
+            });
+            ready.wait(); // B is started; it must wait for A's local mutation.
+        };
+        try { result[0] = SelectOrJoinClientPaymentOrder(owner, dd_wallet, input, DDCents{500}, GetTime()); }
+        catch (...) { failure[0] = std::current_exception(); }
+        if (second.joinable()) second.join();
+        database.m_on_write = {};
+        BOOST_REQUIRE(!failure[0] && !failure[1]);
+        BOOST_REQUIRE(result[0] && result[1]);
+        BOOST_CHECK(result[0]->session.session_id == result[1]->session.session_id);
+        BOOST_CHECK(result[0]->original_inputs == result[1]->original_inputs);
+        BOOST_CHECK(result[0]->original_inputs == std::vector<COutPoint>{first});
+        PaymasterStore store{owner};
+        std::string error;
+        BOOST_REQUIRE_MESSAGE(store.ReserveInputs(input.request_id, {{first, ReservationRole::USER_DD}},
+            FeeMode::PAYMASTER, GetTime(), error), error);
+        const auto replay = SelectOrJoinClientPaymentOrder(owner, dd_wallet, input, DDCents{500}, GetTime());
+        BOOST_CHECK(replay.original_inputs == result[0]->original_inputs);
+        BOOST_CHECK(replay.session.state == SessionState::INPUTS_RESERVED);
+        if (spare) {
+            BOOST_CHECK_EXCEPTION(SelectOrJoinClientPaymentOrder(owner, dd_wallet, input, DDCents{500}, GetTime(), &other),
+                ApplicationError, [](const ApplicationError& e) { return e.code == "PAYMASTER_REQUEST_ID_CONFLICT"; });
+            for (int stage = 0; stage < 3; ++stage) {
+                auto retried = input;
+                retried.request_id.back() = static_cast<char>('2' + stage);
+                const auto before = database.m_records;
+                if (stage == 0) database.m_txn_pass = false;
+                if (stage == 1) database.FailWriteAt(0);
+                if (stage == 2) database.FailCommit();
+                BOOST_CHECK_THROW(SelectOrJoinClientPaymentOrder(owner, dd_wallet, retried, DDCents{500}, GetTime()), ApplicationError);
+                database.m_txn_pass = true;
+                database.ClearFailureInjection();
+                BOOST_CHECK(database.m_records == before);
+                const auto repaired = SelectOrJoinClientPaymentOrder(owner, dd_wallet, retried, DDCents{500}, GetTime());
+                const auto repeated = SelectOrJoinClientPaymentOrder(owner, dd_wallet, retried, DDCents{500}, GetTime());
+                BOOST_CHECK(repaired.session.session_id == repeated.session.session_id);
+                BOOST_CHECK(repaired.original_inputs == other);
+            }
+        }
+    }
 }
 
 BOOST_FIXTURE_TEST_CASE(client_replay_conflicts_precede_preparation_and_preserve_reservations, WalletTestingSetup)

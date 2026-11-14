@@ -553,6 +553,77 @@ bool TryCommitClientQuoteResponse(
 }
 } // namespace
 
+ClientPaymentReplay SelectOrJoinClientPaymentOrder(CWallet& owner, DigiDollarWallet& dd,
+    const AutomaticPaymentParameters& input, DDCents target, int64_t now,
+    const std::vector<COutPoint>* preset_inputs)
+{
+    // Selection and the first immutable order binding form one local operation.
+    // No transport, index wait or chain synchronization runs under this lock.
+    LOCK(owner.cs_wallet);
+    CWallet* const wallet = &owner;
+    DigiDollarWallet* const dd_wallet = &dd;
+    PaymasterStore store{owner};
+    std::string error;
+    std::vector<COutPoint> selected_inputs;
+    std::vector<CAmount> selected_amounts;
+    CAmount selected_total{0};
+    bool inputs_ok{false};
+    // Re-read after selection: another identical caller may have created or
+    // reserved this order while the directory was inspected. Its original
+    // input binding always wins over another free coin selection.
+    const auto replay = LoadClientPaymentReplay(*wallet, store, input,
+        DDCents{input.amount}, preset_inputs);
+    if (replay && replay->session.state != SessionState::CREATED) return *replay;
+    if (replay && replay->session.state == SessionState::CREATED) {
+        inputs_ok = SelectCreatedClientPaymentInputs(*wallet, *dd_wallet, replay->session,
+            replay->original_inputs, target, selected_inputs,
+            selected_total, &selected_amounts, error);
+    } else if (input.send_all) {
+        if (dd_wallet->GetSpendableDDBalance() != input.amount) {
+            error = "PAYMASTER_SWEEP_BALANCE_CHANGED";
+        } else if (preset_inputs) {
+            inputs_ok = dd_wallet->SelectDDCoins(
+                target.value, *preset_inputs, selected_inputs,
+                selected_total, &selected_amounts, &error);
+            if (inputs_ok && selected_total != input.amount) {
+                inputs_ok = false;
+                error = "PAYMASTER_SWEEP_BALANCE_CHANGED";
+            }
+        } else {
+            inputs_ok = dd_wallet->SelectAllSpendableDDCoins(
+                input.amount, selected_inputs, selected_total, &selected_amounts,
+                error);
+        }
+    } else if (preset_inputs) {
+        inputs_ok = dd_wallet->SelectDDCoins(target.value, *preset_inputs,
+                                             selected_inputs, selected_total,
+                                             &selected_amounts, &error);
+    } else {
+        inputs_ok = dd_wallet->SelectDDCoins(target.value, selected_inputs,
+                                             selected_total, &selected_amounts, &error);
+    }
+    if (!inputs_ok) {
+        // Preserve the upstream selection reason and give GUI/CLI clients a
+        // stable category. Session existence still requires a separate lookup.
+        throw ApplicationError(ErrorKind::INSUFFICIENT_FUNDS,
+                           "PAYMASTER_DD_INPUT_SELECTION_FAILED: " +
+                               (error.empty() ? "Insufficient confirmed DigiDollar inputs" : error));
+    }
+    if (replay) return *replay;
+    const auto order = BuildClientPaymentOrder(input, DDCents{input.amount}, selected_inputs);
+    PaymentSession session;
+    const auto created = store.CreateOrJoinSession(input.request_id,
+        CanonicalClientRequestHash(input, DDCents{input.amount}, selected_inputs), input.mode,
+        now, session, error, order ? &*order : nullptr);
+    if (created == CreatePaymasterSessionResult::CONFLICT || created == CreatePaymasterSessionResult::DATABASE_ERROR)
+        throw ApplicationError(ErrorKind::WALLET, error);
+    if (!order && !store.BindClientPaymentOrder(input.request_id, DDCents{input.amount},
+            input.subtract_fee, input.send_all, error))
+        throw ApplicationError(ErrorKind::WALLET, error);
+    return {std::move(session), std::move(selected_inputs)};
+}
+
+
 namespace {
 // Call-local phase state. Only PaymasterStore grants or changes durable authority.
 struct ClientQuoteOperation {
@@ -579,6 +650,7 @@ struct ClientQuoteOperation {
     node::NodeContext* node{nullptr};
     bool queued{false};
     bool connection_pending{false};
+    bool automatic_selection{false};
 };
 
 struct ClientQuoteRequest {
@@ -917,7 +989,7 @@ std::optional<PaymentResult> JoinClientQuoteSession(ClientQuoteOperation& operat
         }
         return CaptureSessionPayment(session, &store);
     }
-    if (!store.BindClientPaymentOrder(
+    if (!order && !store.BindClientPaymentOrder(
             request_id, DDCents{requested_amount}, subtract_fee,
             send_all, error)) {
         throw ApplicationError(ErrorKind::WALLET, error);
@@ -926,6 +998,21 @@ std::optional<PaymentResult> JoinClientQuoteSession(ClientQuoteOperation& operat
     session.subtract_paymaster_fee_from_amount = subtract_fee;
     session.send_all_spendable_dd = send_all;
     return std::nullopt;
+}
+
+PaymentResult CaptureJoinedClientQuote(const PaymentSession& session, const ProviderAttempt& attempt,
+    const PaymentIntent& intent, const PaymasterStore& store)
+{
+    auto result = CaptureSessionPayment(session, &store);
+    if (!result.provider_id) result.provider_id = intent.provider_id;
+    if (!result.offer_id) result.offer_id = intent.offer_id;
+    if (!result.policy_hash) result.policy_hash = intent.policy_hash;
+    if (!result.funding_model) result.funding_model = intent.funding_model;
+    if (!result.payment_cents) result.payment_cents = intent.recipient_amount;
+    result.expires_at = intent.expires_at;
+    result.capacity_pending = attempt.capacity_snapshot.snapshot_id.IsNull();
+    result.queued = false;
+    return result;
 }
 
 std::optional<PaymentResult> PrepareClientQuoteAttempt(ClientQuoteOperation& operation)
@@ -952,39 +1039,62 @@ std::optional<PaymentResult> PrepareClientQuoteAttempt(ClientQuoteOperation& ope
     auto& intent = operation.intent;
     auto& reservation_lease = operation.reservation_lease;
     bool resume_attempt{false};
-    for (auto it = session.attempt_ids.rbegin(); it != session.attempt_ids.rend(); ++it) {
-        ProviderAttempt existing;
-        if (!store.GetAttempt(*it, existing) || existing.unsigned_intent.empty()) {
-            throw ApplicationError(ErrorKind::WALLET,
-                               "PAYMASTER_PERSISTED_INTENT_CORRUPT");
+    std::optional<PaymentResult> joined;
+    const auto load_current_attempt = [&] {
+        if (!FindClientSession(request_id, store, session))
+            throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SESSION_NOT_FOUND");
+        if (IsTerminal(session.state)) {
+            joined = CaptureSessionPayment(session, &store);
+            return;
         }
-        PaymentIntent existing_intent;
-        try {
-            SpanReader stream{::PROTOCOL_VERSION, existing.unsigned_intent};
-            stream >> existing_intent;
-            if (!stream.empty()) throw std::ios_base::failure("trailing intent data");
-        } catch (const std::ios_base::failure&) {
-            throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_PERSISTED_INTENT_CORRUPT");
-        }
-        if (existing.provider_id == provider_id &&
-            existing_intent.offer_id == candidate.terms.offer_id &&
-            existing.state != AttemptState::REJECTED &&
-            existing.state != AttemptState::QUOTE_EXPIRED) {
-            if (existing_intent.canonical_request_hash != canonical_request_hash ||
-                existing_intent.requested_fee_mode != requested_mode ||
-                existing_intent.privacy_profile != privacy ||
-                existing_intent.selection_mode != selection ||
-                existing.privacy_profile != privacy) {
-                throw ApplicationError(
-                    ErrorKind::WALLET,
-                    "PAYMASTER_PERSISTED_CLIENT_ORDER_CONFLICT");
+        for (auto it = session.attempt_ids.rbegin(); it != session.attempt_ids.rend(); ++it) {
+            ProviderAttempt existing;
+            if (!store.GetAttempt(*it, existing) || existing.unsigned_intent.empty()) {
+                throw ApplicationError(ErrorKind::WALLET,
+                                   "PAYMASTER_PERSISTED_INTENT_CORRUPT");
             }
-            attempt = std::move(existing);
-            intent = std::move(existing_intent);
-            resume_attempt = true;
-            break;
+            PaymentIntent existing_intent;
+            try {
+                SpanReader stream{::PROTOCOL_VERSION, existing.unsigned_intent};
+                stream >> existing_intent;
+                if (!stream.empty()) throw std::ios_base::failure("trailing intent data");
+            } catch (const std::ios_base::failure&) {
+                throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_PERSISTED_INTENT_CORRUPT");
+            }
+            if (existing.state != AttemptState::REJECTED &&
+                existing.state != AttemptState::QUOTE_EXPIRED) {
+                if (existing_intent.canonical_request_hash != canonical_request_hash ||
+                    existing_intent.requested_fee_mode != requested_mode ||
+                    existing_intent.privacy_profile != privacy ||
+                    existing_intent.selection_mode != selection ||
+                    existing.privacy_profile != privacy) {
+                    throw ApplicationError(
+                        ErrorKind::WALLET,
+                        "PAYMASTER_PERSISTED_CLIENT_ORDER_CONFLICT");
+                }
+                if (existing.provider_id != provider_id || existing_intent.offer_id != candidate.terms.offer_id) {
+                    if (!operation.automatic_selection)
+                        throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SESSION_INPUT_CONFLICT");
+                    joined = CaptureJoinedClientQuote(session, existing, existing_intent, store);
+                    return;
+                }
+                if (!existing.user_signed_psbt.empty() || !existing.final_transaction.empty() ||
+                    !session.final_txid.IsNull()) {
+                    joined = CaptureJoinedClientQuote(session, existing, existing_intent, store);
+                    return;
+                }
+                attempt = std::move(existing);
+                intent = std::move(existing_intent);
+                resume_attempt = true;
+                break;
+            }
         }
+    };
+    {
+        LOCK(wallet->cs_wallet);
+        load_current_attempt();
     }
+    if (joined) return joined;
     if (input.retry_transport) {
         if (const auto* node = wallet->chain().context(); node && node->connman) {
             node->connman->RetryPaymasterConnection(PaymentChannelKey(*wallet, session, provider_id));
@@ -999,6 +1109,12 @@ std::optional<PaymentResult> PrepareClientQuoteAttempt(ClientQuoteOperation& ope
         if (!transport_node || !transport_node->connman) throw ApplicationError(ErrorKind::INTERNAL, "Node context unavailable");
         const auto transport = transport_node->connman->RequestPaymasterConnection(
             PaymentChannelKey(*wallet, session, provider_id), candidate.endpoint, privacy == PrivacyProfile::HIGH);
+        // Another caller can finish preparation while transport is acquired.
+        // Re-read and join before selecting inputs, allocating change or nonce.
+        LOCK(wallet->cs_wallet);
+        load_current_attempt();
+        if (joined) return joined;
+        if (resume_attempt) return std::nullopt;
         if (transport.state != DirectState::READY || !transport.lease) {
             if (!transport.Pending()) throw ApplicationError(ErrorKind::NODE_CAPACITY, PaymasterTransportError(transport.state));
             PaymentResult result = CaptureSessionPayment(session);
@@ -1127,48 +1243,55 @@ std::optional<PaymentResult> AdvanceClientQuoteCapacity(ClientQuoteOperation& op
         throw ApplicationError(ErrorKind::INTERNAL, "Node context unavailable");
     }
     PaymasterCapacityRequest capacity_request;
-    if (attempt.capacity_request.empty()) {
-        capacity_request.genesis_hash = Params().GenesisBlock().GetHash();
-        capacity_request.provider_id = provider_id;
-        capacity_request.request_id = request_id;
-        capacity_request.session_id = session.session_id;
-        capacity_request.client_nonce = attempt.client_nonce;
-        capacity_request.funding_model = intent.funding_model;
-        capacity_request.requires_carrier =
-            intent.funding_model == FundingModel::USER_PAID &&
-            candidate.service_fee.value > 0 &&
-            candidate.service_fee.value < 100;
-        capacity_request.requested_slots = 1;
-        capacity_request.created_at = now;
-        capacity_request.expires_at = std::min(
-            intent.expires_at,
-            SaturatingAddSeconds(now, MAX_DIRECT_MESSAGE_TTL_SECONDS));
-        if (capacity_request.expires_at <= now) {
-            throw ApplicationError(ErrorKind::WALLET,
-                               "PAYMASTER_CAPACITY_REQUEST_EXPIRED");
-        }
-        const std::vector<unsigned char> capacity_bytes =
-            SerializeCapacityRequest(capacity_request);
-        if (!store.PrepareCapacityRequest(request_id, attempt.attempt_id,
-                                          capacity_bytes, now, error) ||
-            !store.GetAttempt(attempt.attempt_id, attempt)) {
-            throw ApplicationError(ErrorKind::WALLET,
-                               error.empty() ? "PAYMASTER_ATTEMPT_NOT_FOUND" : error);
-        }
-    } else {
-        try {
-            CDataStream stream{attempt.capacity_request, SER_NETWORK,
-                               ::PROTOCOL_VERSION};
-            stream >> capacity_request;
-            if (!stream.empty() ||
-                SerializeCapacityRequest(capacity_request) !=
-                    attempt.capacity_request) {
-                throw std::ios_base::failure("non-canonical capacity request");
+    {
+        LOCK(wallet->cs_wallet);
+        if (!FindClientSession(request_id, store, session) || !store.GetAttempt(attempt.attempt_id, attempt))
+            throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SESSION_ATTEMPT_DATABASE_READ");
+        if (IsTerminal(session.state)) return CaptureSessionPayment(session, &store);
+        if (attempt.capacity_request.empty()) {
+            capacity_request.genesis_hash = Params().GenesisBlock().GetHash();
+            capacity_request.provider_id = provider_id;
+            capacity_request.request_id = request_id;
+            capacity_request.session_id = session.session_id;
+            capacity_request.client_nonce = attempt.client_nonce;
+            capacity_request.funding_model = intent.funding_model;
+            capacity_request.requires_carrier =
+                intent.funding_model == FundingModel::USER_PAID &&
+                candidate.service_fee.value > 0 &&
+                candidate.service_fee.value < 100;
+            capacity_request.requested_slots = 1;
+            capacity_request.created_at = now;
+            capacity_request.expires_at = std::min(
+                intent.expires_at,
+                SaturatingAddSeconds(now, MAX_DIRECT_MESSAGE_TTL_SECONDS));
+            if (capacity_request.expires_at <= now) {
+                throw ApplicationError(ErrorKind::WALLET,
+                                   "PAYMASTER_CAPACITY_REQUEST_EXPIRED");
             }
-        } catch (const std::ios_base::failure&) {
-            throw ApplicationError(ErrorKind::WALLET,
-                               "PAYMASTER_PERSISTED_CAPACITY_REQUEST_CORRUPT");
+            const std::vector<unsigned char> capacity_bytes =
+                SerializeCapacityRequest(capacity_request);
+            if (!store.PrepareCapacityRequest(request_id, attempt.attempt_id,
+                                              capacity_bytes, now, error) ||
+                !store.GetAttempt(attempt.attempt_id, attempt)) {
+                throw ApplicationError(ErrorKind::WALLET,
+                                   error.empty() ? "PAYMASTER_ATTEMPT_NOT_FOUND" : error);
+            }
+        } else {
+            try {
+                CDataStream stream{attempt.capacity_request, SER_NETWORK,
+                                   ::PROTOCOL_VERSION};
+                stream >> capacity_request;
+                if (!stream.empty() ||
+                    SerializeCapacityRequest(capacity_request) !=
+                        attempt.capacity_request) {
+                    throw std::ios_base::failure("non-canonical capacity request");
+                }
+            } catch (const std::ios_base::failure&) {
+                throw ApplicationError(ErrorKind::WALLET,
+                                   "PAYMASTER_PERSISTED_CAPACITY_REQUEST_CORRUPT");
+            }
         }
+
     }
 
     if (capacity_request.expires_at <= now && attempt.capacity_snapshot.snapshot_id.IsNull()) {
@@ -1270,6 +1393,9 @@ ClientQuoteRequest PrepareClientQuoteRequest(ClientQuoteOperation& operation)
     auto& session = operation.session;
     auto& attempt = operation.attempt;
     auto& intent = operation.intent;
+    LOCK(wallet->cs_wallet);
+    if (!FindClientSession(request_id, store, session) || !store.GetAttempt(attempt.attempt_id, attempt))
+        throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SESSION_ATTEMPT_DATABASE_READ");
     PaymasterQuoteRequest quote_request;
     std::vector<unsigned char> request_bytes;
     if (attempt.quote_request.empty()) {
@@ -1960,78 +2086,6 @@ void SelectAutomaticPaymentOffer(AutomaticPaymentOperation& operation)
     }
 }
 
-std::vector<COutPoint> SelectAutomaticPaymentInputs(AutomaticPaymentOperation& operation)
-{
-    CWallet* const wallet = &operation.wallet;
-    auto& error = operation.error;
-    const auto& send_all = operation.input.send_all;
-    const auto& amount = operation.input.amount;
-    auto& persisted_inputs = operation.persisted_inputs;
-    auto& selected = operation.selected;
-    auto& preset_inputs = operation.preset_inputs;
-    DigiDollarWallet* dd_wallet = wallet->GetDDWallet();
-    if (!dd_wallet) throw ApplicationError(ErrorKind::WALLET, "DigiDollar wallet not initialized");
-    std::vector<COutPoint> selected_inputs;
-    std::vector<CAmount> selected_amounts;
-    CAmount selected_total{0};
-    bool inputs_ok{false};
-    // Re-read after selection: another identical caller may have created or
-    // reserved this order while the directory was inspected. Its original
-    // input binding always wins over another free coin selection.
-    const auto replay = LoadClientPaymentReplay(*wallet, operation.store, operation.input,
-        DDCents{amount}, preset_inputs);
-    if (replay) {
-        operation.persisted_session = replay->session;
-        operation.have_persisted_session = true;
-        persisted_inputs = replay->original_inputs;
-    }
-    if (replay && replay->session.state == SessionState::CREATED) {
-        inputs_ok = SelectCreatedClientPaymentInputs(*wallet, *dd_wallet, replay->session,
-            replay->original_inputs, selected->user_total, selected_inputs,
-            selected_total, &selected_amounts, error);
-    } else if (persisted_inputs && !persisted_inputs->empty()) {
-        // This request already owns hard reservations for these exact inputs.
-        // Reusing the persisted binding is the only safe automatic resume;
-        // ordinary coin selection must continue to hide every reservation.
-        if (preset_inputs && *preset_inputs != *persisted_inputs) {
-            throw ApplicationError(ErrorKind::WALLET,
-                               "PAYMASTER_PERSISTED_INPUT_CONFLICT");
-        }
-        selected_inputs = *persisted_inputs;
-        inputs_ok = !selected_inputs.empty();
-    } else if (send_all) {
-        if (dd_wallet->GetSpendableDDBalance() != amount) {
-            error = "PAYMASTER_SWEEP_BALANCE_CHANGED";
-        } else if (preset_inputs) {
-            inputs_ok = dd_wallet->SelectDDCoins(
-                selected->user_total.value, *preset_inputs, selected_inputs,
-                selected_total, &selected_amounts, &error);
-            if (inputs_ok && selected_total != amount) {
-                inputs_ok = false;
-                error = "PAYMASTER_SWEEP_BALANCE_CHANGED";
-            }
-        } else {
-            inputs_ok = dd_wallet->SelectAllSpendableDDCoins(
-                amount, selected_inputs, selected_total, &selected_amounts,
-                error);
-        }
-    } else if (preset_inputs) {
-        inputs_ok = dd_wallet->SelectDDCoins(selected->user_total.value, *preset_inputs,
-                                             selected_inputs, selected_total,
-                                             &selected_amounts, &error);
-    } else {
-        inputs_ok = dd_wallet->SelectDDCoins(selected->user_total.value, selected_inputs,
-                                             selected_total, &selected_amounts, &error);
-    }
-    if (!inputs_ok) {
-        // Preserve the upstream selection reason and give GUI/CLI clients a
-        // stable category. Session existence still requires a separate lookup.
-        throw ApplicationError(ErrorKind::INSUFFICIENT_FUNDS,
-                           "PAYMASTER_DD_INPUT_SELECTION_FAILED: " +
-                               (error.empty() ? "Insufficient confirmed DigiDollar inputs" : error));
-    }
-    return selected_inputs;
-}
 
 PaymentResult AuthorizeAutomaticPaymentQuote(AutomaticPaymentOperation& operation, PaymentResult quote_result)
 {
@@ -2145,9 +2199,11 @@ PaymentResult AuthorizeAutomaticPaymentQuote(AutomaticPaymentOperation& operatio
 
 } // namespace
 
-PaymentResult RequestPaymasterQuote(WalletContext& context, CWallet& wallet, const QuoteParameters& input)
+static PaymentResult RequestPaymasterQuoteImpl(WalletContext& context, CWallet& wallet,
+    const QuoteParameters& input, bool automatic_selection)
 {
     ClientQuoteOperation operation{context, wallet, input};
+    operation.automatic_selection = automatic_selection;
     ValidateClientQuotePreparation(operation);
     if (auto resumed = TryResumeClientQuoteAuthorization(operation)) return std::move(*resumed);
     PrepareClientQuoteSponsorship(operation);
@@ -2160,6 +2216,11 @@ PaymentResult RequestPaymasterQuote(WalletContext& context, CWallet& wallet, con
     return CaptureClientQuoteProgress(operation);
 }
 
+PaymentResult RequestPaymasterQuote(WalletContext& context, CWallet& wallet, const QuoteParameters& input)
+{
+    return RequestPaymasterQuoteImpl(context, wallet, input, false);
+}
+
 PaymentResult RequestAutomaticPaymasterPayment(WalletContext& context, CWallet& wallet,
     const AutomaticPaymentParameters& input, const std::vector<COutPoint>* preset_inputs)
 {
@@ -2170,7 +2231,12 @@ PaymentResult RequestAutomaticPaymasterPayment(WalletContext& context, CWallet& 
     PrepareAutomaticPaymentSponsorship(operation);
     if (auto completed = ResumeAutomaticPaymentSelection(operation)) return std::move(*completed);
     SelectAutomaticPaymentOffer(operation);
-    auto inputs = SelectAutomaticPaymentInputs(operation);
+    auto* dd_wallet = wallet.GetDDWallet();
+    if (!dd_wallet) throw ApplicationError(ErrorKind::WALLET, "DigiDollar wallet not initialized");
+    auto joined = SelectOrJoinClientPaymentOrder(wallet, *dd_wallet, input,
+        operation.selected->user_total, operation.now, preset_inputs);
+    if (IsTerminal(joined.session.state)) return CaptureSessionPayment(joined.session, &operation.store);
+    auto inputs = std::move(joined.original_inputs);
     QuoteParameters quote;
     static_cast<ClientPaymentOptions&>(quote) = input;
     quote.provider_id = operation.selected->provider_id;
@@ -2178,7 +2244,7 @@ PaymentResult RequestAutomaticPaymasterPayment(WalletContext& context, CWallet& 
     quote.payment = operation.selected->payment.value;
     quote.requested_amount = input.amount;
     quote.inputs = std::move(inputs);
-    return AuthorizeAutomaticPaymentQuote(operation, RequestPaymasterQuote(context, wallet, quote));
+    return AuthorizeAutomaticPaymentQuote(operation, RequestPaymasterQuoteImpl(context, wallet, quote, true));
 }
 
 } // namespace wallet::paymaster_app

@@ -20,6 +20,7 @@ class CConnman;
 class DigiDollarWallet;
 namespace wallet::paymaster_app {
 struct ClientPaymentOptions;
+struct AutomaticPaymentParameters;
 /** Resolve only the captured locator tip while it remains on the active chain.
  * Callers compare a fresh tip hash after inspecting wallet/index snapshots. */
 std::optional<interfaces::BlockKey> ResolvePaymasterActiveTip(
@@ -34,6 +35,11 @@ struct ClientPaymentReplay {
     DigiDollar::Paymaster::PaymentSession session;
     std::vector<COutPoint> original_inputs;
 };
+/** Atomically select or revalidate the original inputs and create/join their
+ * immutable order. Network work and index waits belong outside this operation. */
+ClientPaymentReplay SelectOrJoinClientPaymentOrder(CWallet& wallet, DigiDollarWallet& dd_wallet,
+    const AutomaticPaymentParameters& input, DigiDollar::Paymaster::DDCents target,
+    int64_t now, const std::vector<COutPoint>* preset_inputs = nullptr);
 /** Read and bind an existing order before any preparation mutation. Explicit
  * original inputs also support exact legacy replay without optional metadata. */
 std::optional<ClientPaymentReplay> LoadClientPaymentReplay(
