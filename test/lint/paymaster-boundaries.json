@@ -47,6 +47,7 @@
     "src/qt/clientmodel.h",
     "src/qt/digidollaroverviewwidget.cpp",
     "src/qt/digidollaroverviewwidget.h",
+    "src/qt/digidollarsendwidget.cpp",
     "src/qt/test/wallettests.cpp",
     "src/qt/test/wallettests.h",
     "src/qt/test/digidollarwidgettests.cpp",
