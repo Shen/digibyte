@@ -385,11 +385,11 @@ bool ValidateProviderUnsignedRecovery(WalletBatch& batch, const AlternativeRecov
 }
 
 bool ReleaseProviderUnsignedBindings(const uint256& commit_key,
-    const std::vector<COutPoint>& inputs, int64_t now,
-    std::vector<ProviderPoolEntry>& pool, ProviderBudgetLedger& ledger, std::string& error)
+    const std::vector<COutPoint>& inputs, int64_t now, int64_t capacity_expires_at,
+    std::vector<ProviderPoolEntry>& pool, ProviderBudgetLedger& ledger, std::string& error, bool already_closed)
 {
     std::set<COutPoint> remaining{inputs.begin(), inputs.end()};
-    if (commit_key.IsNull() || now <= 0 || remaining.empty() || remaining.size() != inputs.size() ||
+    if (commit_key.IsNull() || now <= 0 || capacity_expires_at <= 0 || remaining.empty() || remaining.size() != inputs.size() ||
         !ValidateProviderPoolEntries(pool, error) || !ValidateProviderBudgetLedger(ledger, error)) {
         if (error.empty()) error = "PAYMASTER_INVALID_PROVIDER_UNSIGNED_RELEASE";
         return false;
@@ -401,15 +401,28 @@ bool ReleaseProviderUnsignedBindings(const uint256& commit_key,
             error = "PAYMASTER_PROVIDER_POOL_RELEASE_MISMATCH";
             return false;
         }
-        entry.state = PoolEntryState::AVAILABLE;
-        entry.reservation_id.SetNull();
-        entry.updated_at = std::max(entry.updated_at, now);
+        // Closing financial authority cannot revoke an already signed proof.
+        // The ordinary RESERVED state protects every selection/withdrawal path.
+        if (now >= capacity_expires_at) {
+            entry.state = PoolEntryState::AVAILABLE;
+            entry.reservation_id.SetNull();
+            entry.updated_at = std::max(entry.updated_at, now);
+        }
     }
     if (!remaining.empty()) {
         error = "PAYMASTER_PROVIDER_POOL_RELEASE_MISMATCH";
         return false;
     }
-    return ReleaseProviderBudget(ledger, commit_key, now, error);
+    if (!already_closed) return ReleaseProviderBudget(ledger, commit_key, now, error);
+    // Closed owners may outlive the bounded released-budget history. Its
+    // absence grants no new spending authority; any nonreleased row vetoes it.
+    if (std::any_of(ledger.reservations.begin(), ledger.reservations.end(), [&](const auto& entry) {
+            return entry.commit_key == commit_key && entry.state != BudgetReservationState::RELEASED;
+        })) {
+        error = "PAYMASTER_PROVIDER_POOL_RELEASE_MISMATCH";
+        return false;
+    }
+    return true;
 }
 
 bool ValidateProviderAttemptReleaseBindings(const PaymentSession& session,

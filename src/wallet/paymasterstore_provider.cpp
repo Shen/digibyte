@@ -1560,9 +1560,9 @@ bool PaymasterStore::CloseProviderAttempt(const uint256& attempt_id, ProviderClo
         if (error.empty()) error = "PAYMASTER_INVALID_PROVIDER_BUDGET_STATE";
         return false;
     }
+    const bool held = std::any_of(pool.begin(), pool.end(), [&](const auto& entry) { return entry.reservation_id == attempt.commit_key; });
     if (closed) {
-        if (std::any_of(pool.begin(), pool.end(), [&](const auto& entry) { return entry.reservation_id == attempt.commit_key; }) ||
-            std::any_of(ledger.reservations.begin(), ledger.reservations.end(), [&](const auto& entry) {
+        if (std::any_of(ledger.reservations.begin(), ledger.reservations.end(), [&](const auto& entry) {
                 return entry.commit_key == attempt.commit_key && entry.state != BudgetReservationState::RELEASED;
             })) {
             error = "PAYMASTER_PROVIDER_POOL_RELEASE_MISMATCH";
@@ -1572,20 +1572,44 @@ bool PaymasterStore::CloseProviderAttempt(const uint256& attempt_id, ProviderClo
             error = "PAYMASTER_RESULT_NOT_FOUND";
             return false;
         }
-        return true;
+        if (!held) return true;
     }
-    if (!ValidateProviderBudgetState(attempt, ProviderSafetyPolicy{}, ledger,
-            BudgetReservationState::RESERVED, /*allow_historical_policy=*/true, error) ||
-        !ValidateProviderAttemptReleaseBindings(session, attempt, pool, error)) return false;
+    if (!closed && !ValidateProviderBudgetState(attempt, ProviderSafetyPolicy{}, ledger,
+            BudgetReservationState::RESERVED, /*allow_historical_policy=*/true, error)) return false;
+    if (!ValidateProviderAttemptReleaseBindings(session, attempt, pool, error)) return false;
+    ProviderIdentityRecord identity;
+    PaymasterCapacityRequest capacity_request;
+    PaymasterCapacityProof capacity_proof;
+    uint256 capacity_hash;
+    if (batch.ReadPaymasterIdentityWithStatus(identity) != DatabaseReadStatus::FOUND) {
+        error = "PAYMASTER_CAPACITY_IDENTITY_MISSING";
+        return false;
+    }
+    const auto capacity_status = ReadProviderCapacityRequestForContinuationWithStatus(batch,
+        identity, Params().GenesisBlock().GetHash(), attempt.provider_id, session.request_id,
+        session.session_id, attempt.client_nonce, now, capacity_request, capacity_proof, capacity_hash, error);
+    // A normal quote can only consume a then-current proof (60s lifetime and
+    // 60s allowed clock skew). After this authenticated upper bound a pruned
+    // wire cache cannot represent a live resource promise.
+    int64_t capacity_expires_at = SaturatingAddSeconds(attempt.quote_expires_at, 2 * MAX_QUOTE_TTL_SECONDS);
+    if (capacity_status == ProviderCapacityProofStatus::FOUND || capacity_status == ProviderCapacityProofStatus::EXPIRED) {
+        capacity_expires_at = capacity_proof.expires_at;
+    } else if (capacity_status != ProviderCapacityProofStatus::NOT_FOUND || now <= capacity_expires_at) {
+        return false;
+    }
+    error.clear();
+    if (closed && now < capacity_expires_at) return true;
     auto inputs = attempt.provider_manifest.provider_carrier_inputs;
     inputs.insert(inputs.end(), attempt.provider_manifest.provider_dgb_inputs.begin(), attempt.provider_manifest.provider_dgb_inputs.end());
-    if (!ReleaseProviderUnsignedBindings(attempt.commit_key, inputs, now, pool, ledger, error)) return false;
+    if (!ReleaseProviderUnsignedBindings(attempt.commit_key, inputs, now, capacity_expires_at, pool, ledger, error, closed)) return false;
     if (!batch.TxnBegin()) return Abort(batch, error, "PAYMASTER_DATABASE_BEGIN");
-    attempt.state = reason == ProviderClosure::EXPIRED ? AttemptState::QUOTE_EXPIRED : AttemptState::REJECTED;
-    attempt.updated_at = std::max(attempt.updated_at, now);
-    session.state = SessionState::FAILED;
-    session.pending_phase = PendingPhase::NONE;
-    session.updated_at = std::max(session.updated_at, now);
+    if (!closed) {
+        attempt.state = reason == ProviderClosure::EXPIRED ? AttemptState::QUOTE_EXPIRED : AttemptState::REJECTED;
+        attempt.updated_at = std::max(attempt.updated_at, now);
+        session.state = SessionState::FAILED;
+        session.pending_phase = PendingPhase::NONE;
+        session.updated_at = std::max(session.updated_at, now);
+    }
     if (!batch.WritePaymasterAttempt(attempt) || !batch.WritePaymasterSession(session) ||
         !batch.WritePaymasterProviderPool(pool) || !batch.WritePaymasterProviderBudgetLedger(ledger) ||
         (result && result_status == DatabaseReadStatus::NOT_FOUND && !batch.WritePaymasterResult(*result))) {
@@ -1930,6 +1954,57 @@ bool PaymasterStore::ExpireProviderCapacityReservations(
                     return entry.request_key == admission_key;
                 });
         };
+        // Closed owners retain physical exclusivity through the signed proof
+        // expiry. Finish that transition before considering cache compaction,
+        // even when cleanup was delayed past its replay-retention horizon.
+        if (proof.expires_at <= now) {
+            const auto held_by = [&](const uint256& key) {
+                return std::any_of(pool.begin(), pool.end(), [&](const auto& entry) {
+                    return entry.reservation_id == key;
+                });
+            };
+            bool released_hold{false};
+            PaymentSession owner;
+            const auto owner_status = batch.ReadPaymasterSessionWithStatus(proof.request_id, owner);
+            if (owner_status != DatabaseReadStatus::FOUND && owner_status != DatabaseReadStatus::NOT_FOUND) {
+                error = "PAYMASTER_SESSION_DATABASE_READ";
+                return false;
+            }
+            if (owner_status == DatabaseReadStatus::FOUND && owner.provider_side && owner.session_id == proof.session_id) {
+                for (const auto& attempt_id : owner.attempt_ids) {
+                    ProviderAttempt attempt;
+                    if (batch.ReadPaymasterAttemptWithStatus(attempt_id, attempt) != DatabaseReadStatus::FOUND) {
+                        error = "PAYMASTER_ATTEMPT_SESSION_CONFLICT";
+                        return false;
+                    }
+                    if (attempt.client_nonce == proof.client_nonce && held_by(attempt.commit_key) &&
+                        (attempt.state == AttemptState::REJECTED || attempt.state == AttemptState::QUOTE_EXPIRED)) {
+                        if (!CloseProviderAttempt(attempt_id, ProviderClosure::EXPIRED, now, std::nullopt, attempt, error)) return false;
+                        released_hold = true;
+                    }
+                }
+            }
+            AlternativeRecoveryRecord recovery;
+            const auto recovery_id = GetAlternativeRecoveryId(proof.request_id, proof.session_id, proof.provider_id, proof.client_nonce);
+            const auto recovery_status = batch.ReadPaymasterAlternativeRecoveryWithStatus(recovery_id, recovery);
+            if (recovery_status != DatabaseReadStatus::FOUND && recovery_status != DatabaseReadStatus::NOT_FOUND) {
+                error = "PAYMASTER_RECOVERY_DATABASE_READ";
+                return false;
+            }
+            if (recovery_status == DatabaseReadStatus::FOUND && recovery.provider_side && recovery.expired &&
+                held_by(recovery.recovery_response.recovery_commit_key)) {
+                if (!CloseExpiredProviderRecovery(recovery_id, now, error)) return false;
+                released_hold = true;
+            }
+            if (released_hold) {
+                if (batch.ReadPaymasterProviderPoolWithStatus(pool) != DatabaseReadStatus::FOUND ||
+                    batch.ReadPaymasterProviderBudgetLedgerWithStatus(budget_ledger) != DatabaseReadStatus::FOUND) {
+                    error = "PAYMASTER_INVALID_PROVIDER_BUDGET_STATE";
+                    return false;
+                }
+                ++expired_reservations;
+            }
+        }
         const auto admission = find_admission(budget_ledger);
         if (admission != budget_ledger.capacity_admissions.end() &&
             (admission->request_hash != request_hash || admission->funding_model != proof.funding_model ||

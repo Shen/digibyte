@@ -937,25 +937,29 @@ bool PaymasterStore::CloseExpiredProviderRecovery(const uint256& recovery_id, in
         return false;
     }
     const auto& key = recovery.recovery_response.recovery_commit_key;
+    const bool held = std::any_of(pool.begin(), pool.end(), [&](const auto& entry) { return entry.reservation_id == key; });
     if (recovery.expired) {
-        if (std::any_of(pool.begin(), pool.end(), [&](const auto& entry) { return entry.reservation_id == key; }) ||
-            std::any_of(ledger.reservations.begin(), ledger.reservations.end(), [&](const auto& entry) {
+        if (std::any_of(ledger.reservations.begin(), ledger.reservations.end(), [&](const auto& entry) {
                 return entry.commit_key == key && entry.state != BudgetReservationState::RELEASED;
             })) {
             error = "PAYMASTER_RECOVERY_PROVIDER_POOL_MISMATCH";
             return false;
         }
-        return true;
+        if (!held) return true;
     }
     auto inputs = recovery.recovery_response.manifest.recovery_provider_carrier_inputs;
     inputs.insert(inputs.end(), recovery.recovery_response.manifest.recovery_provider_dgb_inputs.begin(),
         recovery.recovery_response.manifest.recovery_provider_dgb_inputs.end());
-    if (!ValidateProviderAlternativeRecoveryBudgetAuthorizationImpl(recovery, nullptr, ledger,
-            BudgetReservationState::RESERVED, true, error) ||
+    if (recovery.expired && now < recovery.capacity_snapshot.expires_at)
+        return ValidateProviderRecoveryReleaseBindings(recovery, pool, error);
+    if ((!recovery.expired && !ValidateProviderAlternativeRecoveryBudgetAuthorizationImpl(recovery, nullptr, ledger,
+            BudgetReservationState::RESERVED, true, error)) ||
         !ValidateProviderRecoveryReleaseBindings(recovery, pool, error) ||
-        !ReleaseProviderUnsignedBindings(key, inputs, now, pool, ledger, error)) return false;
-    recovery.expired = true;
-    recovery.updated_at = std::max(recovery.updated_at, now);
+        !ReleaseProviderUnsignedBindings(key, inputs, now, recovery.capacity_snapshot.expires_at, pool, ledger, error, recovery.expired)) return false;
+    if (!recovery.expired) {
+        recovery.expired = true;
+        recovery.updated_at = std::max(recovery.updated_at, now);
+    }
     if (!batch.TxnBegin()) return Abort(batch, error, "PAYMASTER_DATABASE_BEGIN");
     if (!batch.WritePaymasterAlternativeRecovery(recovery) || !batch.WritePaymasterProviderPool(pool) ||
         !batch.WritePaymasterProviderBudgetLedger(ledger)) return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
@@ -1110,6 +1114,16 @@ bool PaymasterStore::ExpireAlternativeRecoveries(
             }
             continue;
         }
+        if (std::any_of(pool.begin(), pool.end(), [&](const auto& entry) {
+                return entry.reservation_id == commit_key;
+            })) {
+            if (!CloseExpiredProviderRecovery(recovery.recovery_id, now, error) ||
+                batch.ReadPaymasterProviderPoolWithStatus(pool) != DatabaseReadStatus::FOUND ||
+                batch.ReadPaymasterProviderBudgetLedgerWithStatus(provider_ledger) != DatabaseReadStatus::FOUND) {
+                if (error.empty()) error = "PAYMASTER_INVALID_PROVIDER_BUDGET_STATE";
+                return false;
+            }
+        }
         if (
             std::any_of(pool.begin(), pool.end(), [&](const ProviderPoolEntry& entry) {
                 return entry.reservation_id == commit_key || entry.origin_commit_key == commit_key;
@@ -1138,7 +1152,7 @@ bool PaymasterStore::ExpireAlternativeRecoveries(
             if (!ValidateProviderAlternativeRecoveryBudgetAuthorizationImpl(recovery, nullptr, provider_ledger,
                     BudgetReservationState::RESERVED, true, error) ||
                 !ValidateProviderRecoveryReleaseBindings(recovery, pool, error) ||
-                !ReleaseProviderUnsignedBindings(commit_key, inputs, now, pool, provider_ledger, error)) return false;
+                !ReleaseProviderUnsignedBindings(commit_key, inputs, now, recovery.capacity_snapshot.expires_at, pool, provider_ledger, error)) return false;
         } else if (!recovery.accepted_recovery_authorization_commitment.IsNull()) {
             const uint256& commit_key =
                 recovery.recovery_response.recovery_commit_key;

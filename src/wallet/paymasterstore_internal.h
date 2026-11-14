@@ -82,11 +82,14 @@ bool ValidateProviderRecoveryReleaseBindings(const AlternativeRecoveryRecord& re
     const std::vector<ProviderPoolEntry>& pool, std::string& error);
 /** Shared financial transition for normal and recovery closures. Callers first
  * authenticate the corresponding authority and budget binding, retain
- * cs_wallet, and commit this working copy together with its terminal record. */
+ * cs_wallet, and commit this working copy together with its terminal record.
+ * A live signed proof retains the physical hold independently of the budget.
+ * already_closed requires an authenticated closed owner and permits pruned
+ * released-budget history, never a missing reservation for fresh closure. */
 bool ReleaseProviderUnsignedBindings(const uint256& commit_key,
-    const std::vector<COutPoint>& inputs, int64_t now,
+    const std::vector<COutPoint>& inputs, int64_t now, int64_t capacity_expires_at,
     std::vector<ProviderPoolEntry>& pool, ProviderBudgetLedger& ledger,
-    std::string& error);
+    std::string& error, bool already_closed = false);
 /** Unsigned cancellation/expiry additionally require absent user authority. */
 bool RequireNoAuthorizationEvidence(WalletBatch& batch, const uint256& commit_key,
                                     std::string& error);

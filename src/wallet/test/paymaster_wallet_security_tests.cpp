@@ -396,7 +396,8 @@ bool BuildProviderQuoteFixture(ProviderSecurityEnvironment& environment,
                                CAmount transaction_output_value = 5500,
                                const uint256& genesis_hash = {},
                                int64_t intent_ttl = 30,
-                               int64_t quote_ttl = 30)
+                               int64_t quote_ttl = 30,
+                               int64_t capacity_ttl = 0)
 {
     fixture.attempt = ProviderAttempt{};
     fixture.pool_entry = ProviderPoolEntry{};
@@ -580,7 +581,7 @@ bool BuildProviderQuoteFixture(ProviderSecurityEnvironment& environment,
     fixture.capacity_request.requires_carrier = false;
     fixture.capacity_request.requested_slots = 1;
     fixture.capacity_request.created_at = now - 2;
-    fixture.capacity_request.expires_at = quote.expires_at;
+    fixture.capacity_request.expires_at = capacity_ttl > 0 ? now - 2 + capacity_ttl : quote.expires_at;
 
     fixture.capacity_proof.genesis_hash = intent.genesis_hash;
     fixture.capacity_proof.provider_id = intent.provider_id;
@@ -629,7 +630,7 @@ bool BuildProviderQuoteFixture(ProviderSecurityEnvironment& environment,
             environment.ledger, environment.safety, request_key,
             fixture.capacity_request_hash, environment.netgroup_bucket,
             intent.funding_model, /*requires_carrier=*/false,
-            quote.expires_at, now - 2, error)) {
+            fixture.capacity_request.expires_at, now - 2, error)) {
         return false;
     }
     environment.capacity_records.push_back({intent.client_nonce, fixture.capacity_request_hash,
@@ -2415,10 +2416,10 @@ BOOST_AUTO_TEST_CASE(provider_unsigned_close_preserves_bindings_and_is_atomic)
     std::string error;
     BOOST_REQUIRE_MESSAGE(BuildProviderQuoteFixture(environment,
         "550e8400-e29b-41d4-a716-446655441201", uint256S("2201"), now, first, error,
-        nullptr, {}, DGBSatoshis{500}, 5500, Params().GenesisBlock().GetHash()), error);
+        nullptr, {}, DGBSatoshis{500}, 5500, Params().GenesisBlock().GetHash(), 60, 10, 60), error);
     BOOST_REQUIRE_MESSAGE(BuildProviderQuoteFixture(environment,
         "550e8400-e29b-41d4-a716-446655441202", uint256S("2202"), now, protected_quote, error,
-        nullptr, {}, DGBSatoshis{500}, 5500, Params().GenesisBlock().GetHash()), error);
+        nullptr, {}, DGBSatoshis{500}, 5500, Params().GenesisBlock().GetHash(), 60, 10, 60), error);
     BOOST_REQUIRE(PersistProviderQuoteEnvironment(m_wallet, environment, {first.pool_entry, protected_quote.pool_entry}));
     PaymasterStore store{m_wallet};
     BOOST_REQUIRE_MESSAGE(store.CommitProviderQuote(first.attempt, first.request.intent.genesis_hash, now, error), error);
@@ -2459,8 +2460,8 @@ BOOST_AUTO_TEST_CASE(provider_unsigned_close_preserves_bindings_and_is_atomic)
     BOOST_REQUIRE(ReadProviderSecurityState(m_wallet, ledger, pool));
     for (const auto& entry : pool) {
         if (entry.outpoint == first.pool_entry.outpoint) {
-            BOOST_CHECK(entry.state == PoolEntryState::AVAILABLE);
-            BOOST_CHECK(entry.reservation_id.IsNull());
+            BOOST_CHECK(entry.state == PoolEntryState::RESERVED);
+            BOOST_CHECK(entry.reservation_id == first.attempt.commit_key);
         } else {
             BOOST_CHECK(entry.state == PoolEntryState::RESERVED);
             BOOST_CHECK(entry.reservation_id == protected_quote.attempt.commit_key);
@@ -2496,6 +2497,50 @@ BOOST_AUTO_TEST_CASE(provider_unsigned_close_preserves_bindings_and_is_atomic)
     const auto damaged = database.m_records;
     BOOST_CHECK(!store.CancelProviderQuote(protected_quote.attempt.attempt_id, now + 5, closed, error));
     BOOST_CHECK(database.m_records == damaged);
+    BOOST_REQUIRE(database.MakeBatch()->Write(std::make_pair(DBKeys::PAYMASTER_RESULT, rejection.commit_key), rejection));
+    AlignSecurityFixtureCheckpoint(database);
+    const int64_t proof_expiry = first.capacity_proof.expires_at;
+    size_t released{0};
+    BOOST_REQUIRE_MESSAGE(store.ExpireProviderCapacityReservations(proof_expiry - 1, released, error), error);
+    BOOST_CHECK_EQUAL(released, 0U);
+    {
+        wallet::CWallet delayed{m_node.chain.get(), "unsigned-capacity-delayed", DuplicateSecurityFixtureDatabase(database)};
+        ProviderBudgetLedger compacted;
+        std::vector<ProviderPoolEntry> delayed_pool;
+        BOOST_REQUIRE(ReadProviderSecurityState(delayed, compacted, delayed_pool));
+        // Simulate ordinary bounded-ledger pruning while the wallet's capacity
+        // cleanup has not run. The closed owner and signed proof remain.
+        compacted.reservations.clear();
+        compacted.capacity_admissions.clear();
+        BOOST_REQUIRE(WalletBatch{delayed.GetDatabase()}.WritePaymasterProviderBudgetLedger(compacted));
+        const int64_t after_retention = proof_expiry + DEFAULT_RETRY_SECONDS + MAX_QUOTE_TTL_SECONDS + 1;
+        BOOST_REQUIRE_MESSAGE(PaymasterStore{delayed}.ExpireProviderCapacityReservations(after_retention, released, error), error);
+        BOOST_CHECK_EQUAL(released, 2U);
+        BOOST_REQUIRE(ReadProviderSecurityState(delayed, compacted, delayed_pool));
+        for (const auto& entry : delayed_pool) {
+            BOOST_CHECK(entry.state == PoolEntryState::AVAILABLE);
+            BOOST_CHECK(entry.reservation_id.IsNull());
+        }
+    }
+    AlignSecurityFixtureCheckpoint(database);
+    const auto held = database.m_records;
+    database.FailCommit();
+    BOOST_CHECK(!store.ExpireProviderCapacityReservations(proof_expiry, released, error));
+    database.ClearFailureInjection();
+    BOOST_CHECK(database.m_records == held);
+    AlignSecurityFixtureCheckpoint(database);
+    wallet::CWallet restarted{m_node.chain.get(), "unsigned-capacity-restart", DuplicateSecurityFixtureDatabase(database)};
+    PaymasterStore restarted_store{restarted};
+    BOOST_REQUIRE_MESSAGE(restarted_store.ExpireProviderCapacityReservations(proof_expiry, released, error), error);
+    BOOST_CHECK_EQUAL(released, 2U);
+    BOOST_REQUIRE(ReadProviderSecurityState(restarted, ledger, pool));
+    for (const auto& entry : pool) {
+        BOOST_CHECK(entry.state == PoolEntryState::AVAILABLE);
+        BOOST_CHECK(entry.reservation_id.IsNull());
+    }
+    const auto released_rows = GetMockableDatabase(restarted).m_records;
+    BOOST_REQUIRE_MESSAGE(restarted_store.CancelProviderQuote(first.attempt.attempt_id, proof_expiry + 1, closed, error), error);
+    BOOST_CHECK(GetMockableDatabase(restarted).m_records == released_rows);
 }
 
 BOOST_AUTO_TEST_CASE(provider_user_only_deadlines_close_and_prune)
@@ -4123,10 +4168,17 @@ BOOST_AUTO_TEST_CASE(provider_user_only_recovery_expiry_is_atomic_and_cannot_res
     std::vector<ProviderPoolEntry> pool;
     BOOST_REQUIRE(ReadProviderSecurityState(m_wallet, ledger, pool));
     BOOST_REQUIRE_EQUAL(pool.size(), 1U);
-    BOOST_CHECK(pool.front().state == PoolEntryState::AVAILABLE);
-    BOOST_CHECK(pool.front().reservation_id.IsNull());
+    BOOST_CHECK(pool.front().state == PoolEntryState::RESERVED);
+    BOOST_CHECK(pool.front().reservation_id == key);
     BOOST_REQUIRE_EQUAL(ledger.reservations.size(), 1U);
     BOOST_CHECK(ledger.reservations.front().state == BudgetReservationState::RELEASED);
+    size_t capacity_released{0};
+    BOOST_REQUIRE_MESSAGE(store.ExpireProviderCapacityReservations(recovery.capacity_snapshot.expires_at,
+        capacity_released, error), error);
+    BOOST_CHECK_EQUAL(capacity_released, 1U);
+    BOOST_REQUIRE(ReadProviderSecurityState(m_wallet, ledger, pool));
+    BOOST_CHECK(pool.front().state == PoolEntryState::AVAILABLE);
+    BOOST_CHECK(pool.front().reservation_id.IsNull());
     bool drain{true};
     BOOST_REQUIRE(store.HasProviderDrainWork(environment.identity.provider_id, drain, error));
     BOOST_CHECK(!drain);
