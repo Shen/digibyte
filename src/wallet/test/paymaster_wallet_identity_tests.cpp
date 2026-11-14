@@ -4052,6 +4052,22 @@ void CheckCapacityProofReservationLifecycle(WalletTestingSetup& fixture, uint16_
     rebound_request.expires_at = 234;
     PaymasterCapacityProof rebound_proof;
     std::vector<ProviderPoolEntry> rebound_reserved;
+    {
+        // The provider's clock can reach expiry while a client's request
+        // still starts inside the previous signed window. No new proof may
+        // backdate the same resources into that window, even after release.
+        auto delayed_request = rebound_request;
+        delayed_request.created_at = 171;
+        delayed_request.expires_at = 231;
+        const auto before = database.m_records;
+        BOOST_CHECK(!ReserveAndBuildPaymasterCapacityProof(m_wallet, identity, delayed_request,
+            genesis, reference_block, 100, 1, canonical_netgroup, 174,
+            rebound_proof, rebound_reserved, error));
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_OPERATIONAL_SLOT_MISSING");
+        BOOST_CHECK(rebound_proof.identity_signature.empty());
+        BOOST_CHECK(rebound_reserved.empty());
+        BOOST_CHECK(database.m_records == before);
+    }
     BOOST_REQUIRE_MESSAGE(ReserveAndBuildPaymasterCapacityProof(
                               m_wallet, identity, rebound_request, genesis,
                               reference_block, 100, 1, canonical_netgroup, 174,

@@ -2673,8 +2673,11 @@ bool ReserveAndBuildPaymasterCapacityProof(
         const bool confirmed{entry.confirmation_height > 0 &&
                              entry.confirmation_height <= tip_height &&
                              tip_height - entry.confirmation_height + 1 >= minimum_confirmations};
+        // Proofs retain the request's start time. A delayed/backdated request
+        // must not overlap the previous claim's released window.
         if (entry.purpose != PoolPurpose::OPERATIONAL ||
             entry.state != PoolEntryState::AVAILABLE || !confirmed ||
+            entry.updated_at > request.created_at ||
             maintenance_sources.count(entry.outpoint) != 0 ||
             (entry.asset == PoolAsset::DD_CARRIER ? wallet.IsManuallyLockedCoin(entry.outpoint) : wallet.IsOrdinaryLockedCoin(entry.outpoint))) {
             continue;

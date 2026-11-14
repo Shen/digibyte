@@ -1465,6 +1465,7 @@ ProviderProcessingResult ProcessProviderCapacityRequest(
             direct.canonical_netgroup, now,
             proof, reserved, error)) {
         if (error == "PAYMASTER_SAFETY_LIMIT_EXHAUSTED" ||
+            error == "PAYMASTER_OPERATIONAL_SLOT_MISSING" ||
             error == "PAYMASTER_QUOTE_REQUEST_RATE_EXHAUSTED") {
             message_guard.Defer();
             result.disposition = ProviderProcessingDisposition::DEFERRED;
