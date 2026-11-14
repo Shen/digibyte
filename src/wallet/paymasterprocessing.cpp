@@ -2791,29 +2791,11 @@ PaymentResult ProcessPaymasterResult(WalletContext& context, CWallet& target, co
         }
     }
 
-    // Collaborative Paymaster transactions bypass the ordinary
-    // TransferDigiDollarMany() path that records an outgoing DD row.
-    // Once exact final bytes are durable, repair that display-only
-    // history idempotently. A history-write failure must never turn a
-    // valid, possibly already broadcast payment into an RPC failure;
-    // every later result poll will retry the same deterministic row.
-    if (!attempt.final_txid.IsNull()) {
-        if (DigiDollarWallet* dd_wallet = wallet->GetDDWallet()) {
-            std::string history_error;
-            const CAmount user_total =
-                authorized_intent.recipient_amount.value +
-                authorized_quote.service_fee.value;
-            if (!dd_wallet->RecordPaymasterSendHistory(
-                    attempt.final_txid,
-                    authorized_intent.recipient_script,
-                    user_total,
-                    history_error)) {
-                LogPrintf(
-                    "Paymaster: unable to record client DD history: %s\n",
-                    history_error);
-            }
-        }
-    }
+    // A history failure cannot undo accepted payment authority. Every poll
+    // retries the shared repair, which also proves local payment acceptance.
+    std::string history_error;
+    if (!store.ReconcileClientPaymentHistory(request_id, history_error))
+        wallet->WalletLogPrintf("Paymaster client history update deferred: %s\n", history_error);
     PaymentResult result;
     result.processed = observed_payment || accepted_result.has_value();
     result.request_id = request_id;

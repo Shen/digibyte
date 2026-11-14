@@ -9,6 +9,7 @@
 
 #include <logging/timer.h>
 #include <wallet/paymasterstore_internal.h>
+#include <wallet/digidollarwallet.h>
 #include <wallet/paymasteridentity.h>
 #include <wallet/paymasterprovider.h>
 
@@ -220,6 +221,53 @@ bool PaymasterStore::GetSessionObservation(
         return true;
     };
     return observe(payment, observation.payment) && observe(recovery, observation.recovery);
+}
+
+bool PaymasterStore::ReconcileClientPaymentHistory(const std::string& request_id, std::string& error)
+{
+    error.clear();
+    LOCK(m_wallet.cs_wallet);
+    WalletBatch batch{m_wallet.GetDatabase()};
+    PaymentSession session;
+    if (batch.ReadPaymasterSessionWithStatus(request_id, session) != DatabaseReadStatus::FOUND ||
+        session.provider_side) {
+        error = "PAYMASTER_CLIENT_HISTORY_SESSION_UNAVAILABLE";
+        return false;
+    }
+    auto* dd_wallet = m_wallet.GetDDWallet();
+    if (session.final_txid.IsNull() || !dd_wallet) return true;
+
+    // The durable state is necessary, but a local transaction with matching
+    // witness bytes is also required. A lost response before node submission
+    // must not create an outgoing pending payment, even after a later poll.
+    const auto* wallet_tx = m_wallet.GetWalletTx(session.final_txid);
+    if (wallet_tx && (wallet_tx->isAbandoned() || m_wallet.GetTxDepthInMainChain(*wallet_tx) < 0 ||
+        (session.state != SessionState::STEMPOOL && session.state != SessionState::MEMPOOL &&
+         session.state != SessionState::CONFIRMED)))
+        return true;
+    ExactFinalArtifact artifact;
+    std::optional<ProviderAttempt> attempt;
+    CMutableTransaction validated;
+    ExactFinalObservation observation;
+    if (!LoadPaymentFinalArtifact(batch, session, artifact, attempt, error) || !attempt ||
+        attempt->session_id != session.session_id ||
+        attempt->client_manifest.canonical_request_hash != session.canonical_request_hash ||
+        !ValidateClientFinalForExecution(*attempt, artifact.wtxid, validated, error) ||
+        !ObserveExactWalletArtifact(m_wallet, artifact, observation, error)) {
+        if (error.empty()) error = "PAYMASTER_CLIENT_HISTORY_ARTIFACTS_INVALID";
+        return false;
+    }
+    const auto& manifest = attempt->client_manifest;
+    const CAmount outflow = manifest.recipient_amount.value + manifest.service_fee.value;
+    if (!wallet_tx) {
+        // Older result polls wrote a send before node/wallet acceptance. Only
+        // this authenticated exact row may be removed; unrelated/malformed
+        // history and all transaction/reservation/fee authority are retained.
+        return dd_wallet->EraseUnsubmittedPaymasterSendHistory(artifact.txid,
+            manifest.recipient_script, outflow, error);
+    }
+    return dd_wallet->RecordPaymasterSendHistory(artifact.txid, manifest.recipient_script,
+        outflow, error);
 }
 
 bool PaymasterStore::ListClientDurableFinalTransactions(

@@ -125,6 +125,15 @@ Sessions, reservations, exact
 commit evidence, budgets and final observations are persisted with their state
 transitions. Network/UI status alone must not release protected inputs.
 
+`PaymasterStore::ReconcileClientPaymentHistory` is the shared display-history
+operation for startup, result polling, local confirmation and recovery refresh/
+retry. It requires an accepted payment state, a local non-abandoned transaction
+and authenticated exact final bytes including its witness and session binding.
+A stored final or a confirmed self-recovery alone never creates a recipient
+send row. A history-write failure retains payment authority and can be retried.
+`EraseUnsubmittedPaymasterSendHistory` removes only the exact legacy recipient
+row when the corresponding wallet transaction is absent; unrelated history stays.
+
 Authorization-bearing transitions share
 `CommitWithPaymasterAuthorizationProtection`: the mandatory
 `WALLET_FLAG_PAYMASTER_AUTHORIZATION` downgrade fence is written in the same

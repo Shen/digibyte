@@ -207,6 +207,11 @@ public:
         PaymasterSessionObservation& observation,
         std::string& error) const;
 
+    /** Repair display history only for an authenticated exact recipient payment
+     * accepted by this wallet. Stored signatures/final bytes alone do not
+     * establish a send. Does not sign, broadcast or change payment authority. */
+    bool ReconcileClientPaymentHistory(const std::string& request_id, std::string& error);
+
     bool ReserveInputs(const std::string& request_id,
                        const std::vector<std::pair<COutPoint, DigiDollar::Paymaster::ReservationRole>>& inputs,
                        DigiDollar::Paymaster::FeeMode used_mode,

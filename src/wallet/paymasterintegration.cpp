@@ -203,61 +203,7 @@ bool ReconcilePaymasterClientHistory(CWallet& wallet, std::string& error)
     if (!store.ListClientSessions(sessions, error)) return false;
 
     for (const PaymentSession& session : sessions) {
-        // Only a transaction already accepted by the wallet/node is a
-        // completed send. Signed, ambiguous, failed, or safely canceled
-        // sessions must not acquire an outgoing history row merely because
-        // they contain durable final bytes.
-        if (session.state != SessionState::STEMPOOL &&
-            session.state != SessionState::MEMPOOL &&
-            session.state != SessionState::CONFIRMED) {
-            continue;
-        }
-        if (session.final_txid.IsNull()) continue;
-
-        bool found_final_attempt{false};
-        for (auto it = session.attempt_ids.rbegin();
-             it != session.attempt_ids.rend(); ++it) {
-            ProviderAttempt attempt;
-            if (!store.GetAttempt(*it, attempt) ||
-                attempt.final_txid != session.final_txid) {
-                continue;
-            }
-
-            PaymentIntent intent;
-            PaymasterQuote quote;
-            CollaborativePSBTTemplate trusted_template;
-            std::string artifact_error;
-            if (!LoadAttemptAuthorizationArtifacts(
-                    attempt, intent, quote, trusted_template,
-                    artifact_error)) {
-                error = artifact_error.empty()
-                    ? "PAYMASTER_CLIENT_HISTORY_ARTIFACTS_INVALID"
-                    : artifact_error;
-                return false;
-            }
-            if (intent.recipient_amount.value <= 0 ||
-                quote.service_fee.value < 0 ||
-                intent.recipient_amount.value >
-                    std::numeric_limits<CAmount>::max() -
-                        quote.service_fee.value) {
-                error = "PAYMASTER_CLIENT_HISTORY_AMOUNT_INVALID";
-                return false;
-            }
-
-            if (!dd_wallet->RecordPaymasterSendHistory(
-                    session.final_txid, intent.recipient_script,
-                    intent.recipient_amount.value + quote.service_fee.value,
-                    error)) {
-                return false;
-            }
-            found_final_attempt = true;
-            break;
-        }
-
-        if (!found_final_attempt) {
-            error = "PAYMASTER_CLIENT_HISTORY_ATTEMPT_NOT_FOUND";
-            return false;
-        }
+        if (!store.ReconcileClientPaymentHistory(session.request_id, error)) return false;
     }
     return true;
 }

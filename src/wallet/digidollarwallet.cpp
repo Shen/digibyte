@@ -2464,6 +2464,50 @@ bool DigiDollarWallet::RecordPaymasterSendHistory(const uint256& txid,
     return true;
 }
 
+bool DigiDollarWallet::EraseUnsubmittedPaymasterSendHistory(const uint256& txid,
+                                                          const CScript& recipient_script,
+                                                          CAmount total_outflow,
+                                                          std::string& error)
+{
+    auto locks = LockDDWallet();
+    error.clear();
+    CTxDestination recipient;
+    if (!m_wallet || txid.IsNull() || total_outflow <= 0 ||
+        !ExtractDestination(recipient_script, recipient) || m_wallet->GetWalletTx(txid)) {
+        error = "Invalid unsubmitted Paymaster history removal";
+        return false;
+    }
+    const std::string txid_text = txid.GetHex();
+    const std::string address = DigiDollar::EncodeDigiDollarAddress(recipient, Params());
+    const auto matches = [&](const DDTransaction& row) {
+        return row.txid == txid_text && row.category == "send" && !row.incoming &&
+            row.amount == total_outflow && row.address == address;
+    };
+    const auto in_memory = std::find_if(transaction_history.begin(), transaction_history.end(),
+        [&](const DDTransaction& row) { return row.txid == txid_text; });
+    DDTransaction persisted;
+    const auto status = m_wallet->GetDatabase().MakeBatch()->ReadWithStatus(
+        std::make_pair(wallet::DBKeys::DD_TRANSACTION, txid), persisted);
+    if (status == wallet::DatabaseReadStatus::NOT_FOUND && in_memory == transaction_history.end()) return true;
+    if (status != wallet::DatabaseReadStatus::FOUND) {
+        error = "Unsubmitted Paymaster history record unavailable";
+        return false;
+    }
+    if (!matches(persisted) || std::any_of(transaction_history.begin(), transaction_history.end(),
+            [&](const DDTransaction& row) { return row.txid == txid_text && !matches(row); })) {
+        error = "Unsubmitted Paymaster history record does not match the authorized payment";
+        return false;
+    }
+    wallet::WalletBatch batch{m_wallet->GetDatabase()};
+    if (!batch.EraseDDTransaction(txid)) {
+        error = "Failed to erase unsubmitted Paymaster transaction history";
+        return false;
+    }
+    transaction_history.erase(std::remove_if(transaction_history.begin(), transaction_history.end(),
+        [&](const DDTransaction& row) { return row.txid == txid_text; }), transaction_history.end());
+    return true;
+}
+
 bool DigiDollarWallet::ValidateDDAddress(const std::string& address) const {
     return CDigiDollarAddress::IsValidDigiDollarAddressForCurrentNetwork(address);
 }

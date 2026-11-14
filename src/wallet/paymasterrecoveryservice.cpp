@@ -1141,6 +1141,9 @@ ClientRecoveryResult ResolvePaymasterSession(WalletContext& context, CWallet& ta
             throw ApplicationError(ErrorKind::WALLET, completion_error);
         if (locally_completed && !store.GetSessionByRequestId(session.request_id, session))
             throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SESSION_DATABASE_READ");
+        std::string history_error;
+        if (!store.ReconcileClientPaymentHistory(session.request_id, history_error))
+            wallet->WalletLogPrintf("Paymaster refreshed payment history update deferred: %s\n", history_error);
         return CaptureClientSession(store, session, action);
     }
     if (action == "abandon_unsigned") {
@@ -1284,6 +1287,9 @@ ClientRecoveryResult ResolvePaymasterSession(WalletContext& context, CWallet& ta
         }
         ClientRecoveryResult result = CaptureClientSession(
             store, session, action);
+        std::string history_error;
+        if (!store.ReconcileClientPaymentHistory(session.request_id, history_error))
+            wallet->WalletLogPrintf("Paymaster retried payment history update deferred: %s\n", history_error);
         result.raw_transaction = attempt.final_transaction;
         result.txid = attempt.final_txid;
         result.broadcast = broadcast;

@@ -887,6 +887,13 @@ public:
                                     std::string& error,
                                     const std::string& comment,
                                     bool multiple_recipients);
+    /** Remove only an exact obsolete Paymaster send row for a transaction
+     * absent from CWallet. The caller authenticates the original final and
+     * supplies its bound recipient/outflow; no payment authority is changed. */
+    bool EraseUnsubmittedPaymasterSendHistory(const uint256& txid,
+                                             const CScript& recipient_script,
+                                             CAmount total_outflow,
+                                             std::string& error);
 
     /**
      * Validate DD address format

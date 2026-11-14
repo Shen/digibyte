@@ -257,14 +257,9 @@ bool ReconcileConfirmedClientPayment(
             if (!store.GetSessionByRequestId(session.request_id, session) ||
                 !store.GetAttempt(attempt.attempt_id, attempt))
                 throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SESSION_DATABASE_READ");
-            if (auto* dd_wallet = wallet.GetDDWallet()) {
-                std::string history_error;
-                if (!dd_wallet->RecordPaymasterSendHistory(session.final_txid,
-                        attempt.client_manifest.recipient_script,
-                        attempt.client_manifest.recipient_amount.value + attempt.client_manifest.service_fee.value,
-                        history_error))
-                    wallet.WalletLogPrintf("Paymaster observed payment history update deferred\n");
-            }
+            std::string history_error;
+            if (!store.ReconcileClientPaymentHistory(session.request_id, history_error))
+                wallet.WalletLogPrintf("Paymaster observed payment history update deferred: %s\n", history_error);
             if (const auto* node = wallet.chain().context(); node && node->connman)
                 node->connman->ReleasePaymasterConnection(PaymentChannelKey(wallet, session, attempt.provider_id));
             return true;
