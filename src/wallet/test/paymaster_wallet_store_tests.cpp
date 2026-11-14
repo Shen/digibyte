@@ -598,6 +598,24 @@ void SeedResultlessClientPayment(wallet::CWallet& wallet, const std::string& req
     BOOST_REQUIRE(batch.WritePaymasterClientFeeLedger(ledger));
 }
 
+// Historical fixture only: production creates self-return records through
+// CommitClientAlternativeRecoveryFinal after full Recovery authorization.
+// Keep old-record reader/reorg regressions without a weaker production writer.
+void SeedHistoricalSelfRecovery(wallet::CWallet& wallet, const SelfRecoveryRecord& recovery)
+{
+    LOCK(wallet.cs_wallet);
+    WalletBatch batch{wallet.GetDatabase()};
+    PaymentSession session;
+    BOOST_REQUIRE(batch.ReadPaymasterSession(recovery.request_id, session));
+    BOOST_REQUIRE(batch.TxnBegin());
+    BOOST_REQUIRE(batch.WritePaymasterRecovery(recovery, false));
+    session.recovery_txid = recovery.recovery_txid;
+    session.pending_phase = PendingPhase::PENDING_NETWORK;
+    session.updated_at = std::max(session.updated_at, recovery.created_at);
+    BOOST_REQUIRE(batch.WritePaymasterSession(session));
+    BOOST_REQUIRE(batch.TxnCommit());
+}
+
 // Simulate a pre-fix wallet that released the original fee at one confirmation.
 CMutableTransaction SeedLegacyClientRecovery(wallet::CWallet& wallet,
                                              PaymentSession& session,
@@ -626,7 +644,7 @@ CMutableTransaction SeedLegacyClientRecovery(wallet::CWallet& wallet,
     recovery.created_at = 103;
     PaymasterStore store{wallet};
     std::string error;
-    BOOST_REQUIRE_MESSAGE(store.CommitSelfRecovery(session.request_id, recovery, error), error);
+    SeedHistoricalSelfRecovery(wallet, recovery);
     BOOST_REQUIRE(store.GetSessionByRequestId(session.request_id, session));
     session.state = SessionState::CANCELED_SAFE;
     session.pending_phase = PendingPhase::NONE;
@@ -2279,7 +2297,7 @@ BOOST_AUTO_TEST_CASE(final_transaction_observations_handle_mempool_reorg_and_ret
     BOOST_CHECK_EQUAL(tombstone.final_txid, txid);
 }
 
-BOOST_AUTO_TEST_CASE(self_recovery_is_same_input_idempotent_and_reorg_safe)
+BOOST_AUTO_TEST_CASE(historical_self_recovery_reconciliation_is_idempotent_and_reorg_safe)
 {
     ScopedRecoveryMockTime mock_time{100};
     PaymasterStore store{m_wallet};
@@ -2358,54 +2376,9 @@ BOOST_AUTO_TEST_CASE(self_recovery_is_same_input_idempotent_and_reorg_safe)
     recovery.final_transaction.assign(encoded_span.begin(), encoded_span.end());
     recovery.raw_transaction_hash = Hash(recovery.final_transaction);
     recovery.created_at = 104;
-    // A return must never become half-persisted: neither its journal nor its
-    // session reference can survive alone, and the signed inputs stay reserved.
-    CheckPaymasterWriteFailures(m_wallet, 2,
-        [&](std::string& failure) { return store.CommitSelfRecovery(request_id, recovery, failure); },
-        [&] {
-            SelfRecoveryRecord absent;
-            BOOST_CHECK(!store.GetSelfRecovery(request_id, absent));
-            PaymentSession pending;
-            BOOST_REQUIRE(store.GetSessionByRequestId(request_id, pending));
-            BOOST_CHECK(pending.recovery_txid.IsNull());
-            BOOST_CHECK(pending.state == SessionState::PENDING_PROVIDER);
-            BOOST_CHECK(pending.pending_phase == PendingPhase::USER_SIGNATURE_SENT);
-            LOCK(m_wallet.cs_wallet);
-            InputReservation reservation;
-            BOOST_REQUIRE(WalletBatch{m_wallet.GetDatabase()}.ReadPaymasterReservation(input, reservation));
-            BOOST_CHECK(reservation.authorization_may_exist);
-            BOOST_CHECK(m_wallet.IsLockedCoin(input));
-        });
-    BOOST_REQUIRE_MESSAGE(store.CommitSelfRecovery(request_id, recovery, error), error);
-    BOOST_CHECK(store.CommitSelfRecovery(request_id, recovery, error));
-
-    // A lost success reply is an exact retry after reopening, even when the
-    // database refuses all further writes. A different return is not a retry.
-    {
-        wallet::CWallet reopened{m_node.chain.get(), "self-recovery-lost-reply",
-                         DuplicateMockDatabase(m_wallet.GetDatabase())};
-        PaymasterStore reopened_store{reopened};
-        auto& reopened_database = GetMockableDatabase(reopened);
-        const MockableData persisted_rows{reopened_database.m_records};
-        reopened_database.FailWriteAt(0);
-        const bool repeated = reopened_store.CommitSelfRecovery(request_id, recovery, error);
-        const size_t repeated_writes = reopened_database.m_write_count;
-        reopened_database.ClearFailureInjection();
-        BOOST_REQUIRE_MESSAGE(repeated, error);
-        BOOST_CHECK_EQUAL(repeated_writes, 0U);
-        BOOST_CHECK(reopened_database.m_records == persisted_rows);
-        BOOST_CHECK(IsPaymasterInputReserved(reopened, input));
-
-        CMutableTransaction different_transaction{transaction};
-        ++different_transaction.nLockTime;
-        SelfRecoveryRecord different{recovery};
-        different.final_transaction = SerializePaymasterTestObject(different_transaction);
-        different.recovery_txid = CTransaction{different_transaction}.GetHash();
-        different.raw_transaction_hash = Hash(different.final_transaction);
-        BOOST_CHECK(!reopened_store.CommitSelfRecovery(request_id, different, error));
-        BOOST_CHECK_EQUAL(error, "PAYMASTER_SELF_RECOVERY_CONFLICT");
-        BOOST_CHECK(reopened_database.m_records == persisted_rows);
-    }
+    // Seed historical bytes; reconciliation below still exercises the live
+    // atomic release, confirmation, replay and reorg contract.
+    SeedHistoricalSelfRecovery(m_wallet, recovery);
 
     SelfRecoveryRecord persisted;
     BOOST_REQUIRE(store.GetSelfRecovery(request_id, persisted));
@@ -2414,13 +2387,6 @@ BOOST_AUTO_TEST_CASE(self_recovery_is_same_input_idempotent_and_reorg_safe)
     BOOST_REQUIRE(store.GetSessionByRequestId(request_id, session));
     BOOST_CHECK_EQUAL(session.recovery_txid, recovery.recovery_txid);
     BOOST_CHECK(session.pending_phase == PendingPhase::PENDING_NETWORK);
-
-    SelfRecoveryRecord conflict = recovery;
-    conflict.created_at = 105;
-    conflict.final_transaction.push_back(0);
-    conflict.raw_transaction_hash = Hash(conflict.final_transaction);
-    BOOST_CHECK(!store.CommitSelfRecovery(request_id, conflict, error));
-    BOOST_CHECK_EQUAL(error, "PAYMASTER_INVALID_SELF_RECOVERY");
 
     BOOST_REQUIRE(store.ReconcileFinalTransaction(CTransaction{transaction}, 0, true,
                                                   106, error));

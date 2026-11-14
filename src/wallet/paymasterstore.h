@@ -609,10 +609,6 @@ public:
         const uint256& commit_key,
         DigiDollar::Paymaster::PaymasterResult& result) const;
 
-    bool CommitSelfRecovery(
-        const std::string& request_id,
-        const DigiDollar::Paymaster::SelfRecoveryRecord& recovery,
-        std::string& error);
     bool GetSelfRecovery(
         const std::string& request_id,
         DigiDollar::Paymaster::SelfRecoveryRecord& recovery) const;

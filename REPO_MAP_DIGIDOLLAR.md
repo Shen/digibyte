@@ -858,7 +858,8 @@ their full evidence by the recovery ID bound in the commit.
 `ReadPaymasterPoolHistoryInputs` uses the wallet-lifetime session-index registry
 for historical candidate keys and rechecks live dispositions through `WalletBatch`.
 `PaymasterInputReservations` shares one wallet-bound observation between balance
-and coin-selection callers.
+and coin-selection callers. Historical `SelfRecoveryRecord` reads remain available;
+new recovery authorization uses the alternative-recovery operations.
 
 ### src/wallet/paymasterapplication*, paymasterservice*, paymasterclient*, paymasterprocessing*, paymasterfinance*
 
