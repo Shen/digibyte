@@ -24,6 +24,8 @@
 #include <script/signingprovider.h>
 #include <script/standard.h>
 #include <streams.h>
+#include <test/util/mining.h>
+#include <test/util/txmempool.h>
 #include <txmempool.h>
 #include <util/time.h>
 #include <validation.h>
@@ -49,8 +51,10 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdlib>
 #include <limits>
 #include <set>
+#include <thread>
 
 namespace wallet::paymaster_app {
 bool GetOrCreateFinalProviderResult(CWallet& wallet, PaymasterStore& store,
@@ -137,6 +141,10 @@ public:
     {
         return std::make_unique<Batch>(*this);
     }
+};
+
+struct PruneRegtestWalletTestingSetup : WalletTestingSetup {
+    PruneRegtestWalletTestingSetup() : WalletTestingSetup{ChainType::REGTEST} {}
 };
 
 class ScopedRecoveryMockTime
@@ -615,6 +623,96 @@ void SeedHistoricalSelfRecovery(wallet::CWallet& wallet, const SelfRecoveryRecor
     session.updated_at = std::max(session.updated_at, recovery.created_at);
     BOOST_REQUIRE(batch.WritePaymasterSession(session));
     BOOST_REQUIRE(batch.TxnCommit());
+}
+
+// Mine real active block anchors for the otherwise isolated wallet-artifact
+// fixtures. Their injected transactions still test persistence, not consensus.
+void EnsurePruneChain(const node::NodeContext& node, const CScript& coinbase_script = CScript{} << OP_TRUE)
+{
+    BOOST_REQUIRE(Params().GetChainType() == ChainType::REGTEST);
+    ScopedRecoveryMockTime mining_time{std::max(GetTime(), int64_t{Params().GenesisBlock().nTime} + 10000)};
+    while (WITH_LOCK(cs_main, return node.chainman->ActiveChain().Height()) < DEFAULT_REORG_SAFETY_DEPTH - 1) {
+        BOOST_REQUIRE(!MineBlock(node, coinbase_script).IsNull());
+    }
+}
+
+void SetFinalWalletObservation(wallet::CWallet& wallet, const CMutableTransaction& transaction,
+                               int depth, bool in_mempool = false);
+
+template <typename CheckRetained>
+void CheckLaggingPruneObservation(WalletTestingSetup& fixture, PaymasterStore& store,
+                                  const std::string& request_id, const CMutableTransaction& transaction,
+                                  CheckRetained check_retained)
+{
+    auto& wallet = fixture.m_wallet;
+    auto& node = fixture.m_node;
+    std::string error;
+    SetFinalWalletObservation(wallet, transaction, DEFAULT_REORG_SAFETY_DEPTH);
+    {
+        // Delay the actual disconnect callback with the wallet lock, while
+        // permitting the active chain to change under its existing mutexes.
+        LOCK(wallet.cs_wallet);
+        auto* tip = WITH_LOCK(cs_main, return node.chainman->ActiveChain().Tip());
+        BOOST_REQUIRE(tip);
+        auto& wallet_tx = wallet.mapWallet.at(CTransaction{transaction}.GetHash());
+        const TxState confirmed_state = wallet_tx.m_state;
+        const auto before_wrong_anchor = GetMockableDatabase(wallet).m_records;
+        // The height alone is insufficient: this hash is active at the tip,
+        // but is not the confirmed block at height zero.
+        wallet_tx.m_state = TxStateConfirmed{tip->GetBlockHash(), 0, 0};
+        const bool retained_wrong_anchor = store.PruneFinalSession(request_id, error);
+        wallet_tx.m_state = confirmed_state;
+        BOOST_REQUIRE_MESSAGE(retained_wrong_anchor, error);
+        BOOST_CHECK(GetMockableDatabase(wallet).m_records == before_wrong_anchor);
+        check_retained();
+        const int cached_height = wallet.GetLastBlockHeight();
+        BlockValidationState disconnected;
+        BOOST_REQUIRE_MESSAGE(node.chainman->ActiveChainstate().InvalidateBlock(disconnected, tip), disconnected.ToString());
+        BOOST_CHECK_EQUAL(wallet.GetLastBlockHeight(), cached_height);
+        BOOST_CHECK_EQUAL(WITH_LOCK(cs_main, return node.chainman->ActiveChain().Height()), cached_height - 1);
+        const auto before = GetMockableDatabase(wallet).m_records;
+        BOOST_REQUIRE_MESSAGE(store.ReconcileFinalTransaction(CTransaction{transaction},
+            DEFAULT_REORG_SAFETY_DEPTH, false, 106, error), error);
+        BOOST_REQUIRE_MESSAGE(store.PruneFinalSession(request_id, error), error);
+        BOOST_CHECK(GetMockableDatabase(wallet).m_records == before);
+        check_retained();
+    }
+    SyncWithValidationInterfaceQueue();
+    // Isolate the later commit-failure checks from updatedBlockTip's real
+    // reconciliation: the replacement block must not observe a terminal final.
+    SetFinalWalletObservation(wallet, transaction, 0);
+    // A distinct replacement block returns the active chain to safety depth.
+    EnsurePruneChain(node, CScript{} << OP_2);
+    SetFinalWalletObservation(wallet, transaction, DEFAULT_REORG_SAFETY_DEPTH);
+    BOOST_REQUIRE_MESSAGE(store.ReconcileFinalTransaction(CTransaction{transaction}, 1, false, 106, error), error);
+    check_retained();
+}
+
+// Update the canonical wallet observation separately from notification hints,
+// binding every simulated confirmation to an existing active block anchor.
+void SetFinalWalletObservation(wallet::CWallet& wallet, const CMutableTransaction& transaction,
+                               int depth, bool in_mempool)
+{
+    LOCK2(wallet.cs_wallet, cs_main);
+    const auto& active_chain = wallet.chain().context()->chainman->ActiveChain();
+    const auto* tip = active_chain.Tip();
+    BOOST_REQUIRE(tip);
+    BOOST_REQUIRE_GE(tip->nHeight + 1, std::abs(depth));
+    const auto* block = active_chain[tip->nHeight - std::max(1, std::abs(depth)) + 1];
+    BOOST_REQUIRE(block);
+    wallet.SetLastBlockProcessed(tip->nHeight, tip->GetBlockHash());
+    const auto tx = MakeTransactionRef(transaction);
+    BOOST_REQUIRE(wallet.AddToWallet(tx, TxStateInactive{}));
+    auto& state = wallet.mapWallet.at(tx->GetHash()).m_state;
+    if (depth > 0) {
+        state = TxStateConfirmed{block->GetBlockHash(), block->nHeight, 0};
+    } else if (depth < 0) {
+        state = TxStateConflicted{block->GetBlockHash(), block->nHeight};
+    } else if (in_mempool) {
+        state = TxStateInMempool{};
+    } else {
+        state = TxStateInactive{};
+    }
 }
 
 // Simulate a pre-fix wallet that released the original fee at one confirmation.
@@ -2158,8 +2256,9 @@ BOOST_AUTO_TEST_CASE(unsigned_intent_survives_wallet_unlock_boundary_without_res
     BOOST_CHECK(stored_session.user_inputs == std::vector<COutPoint>{user_input});
 }
 
-BOOST_AUTO_TEST_CASE(ambiguous_authorization_is_protected_and_prunes_to_tombstone)
+BOOST_FIXTURE_TEST_CASE(ambiguous_authorization_is_protected_and_prunes_to_tombstone, PruneRegtestWalletTestingSetup)
 {
+    EnsurePruneChain(m_node);
     PaymasterStore store{m_wallet};
     PaymentSession session;
     std::string error;
@@ -2186,7 +2285,24 @@ BOOST_AUTO_TEST_CASE(ambiguous_authorization_is_protected_and_prunes_to_tombston
     BOOST_CHECK(!store.PruneFinalSession(request_id, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_SESSION_NOT_FINAL");
 
-    const uint256 txid = uint256S("03");
+    CMutableTransaction transaction;
+    transaction.vin.emplace_back(input);
+    transaction.vout.emplace_back(0, CScript{} << OP_TRUE);
+    const uint256 txid{CTransaction{transaction}.GetHash()};
+    BOOST_REQUIRE(store.GetSessionByRequestId(request_id, session));
+    ProviderAttempt attempt;
+    attempt.session_id = session.session_id;
+    attempt.attempt_id = uint256S("0301");
+    attempt.final_txid = txid;
+    attempt.final_transaction = SerializePaymasterTestObject(transaction);
+    session.attempt_ids = {attempt.attempt_id};
+    {
+        LOCK(m_wallet.cs_wallet);
+        WalletBatch batch{m_wallet.GetDatabase()};
+        BOOST_REQUIRE(batch.WritePaymasterAttempt(attempt));
+        BOOST_REQUIRE(batch.WritePaymasterSession(session));
+    }
+    SetFinalWalletObservation(m_wallet, transaction, DEFAULT_REORG_SAFETY_DEPTH);
     BOOST_REQUIRE(store.TransitionSession(request_id, SessionState::CONFIRMED,
                                           PendingPhase::NONE, txid, 104, error));
     CheckPaymasterWriteFailures(m_wallet, 1,
@@ -2217,8 +2333,9 @@ BOOST_AUTO_TEST_CASE(ambiguous_authorization_is_protected_and_prunes_to_tombston
     BOOST_CHECK_EQUAL(tombstoned_by_session_id.request_id, request_id);
 }
 
-BOOST_AUTO_TEST_CASE(final_transaction_observations_handle_mempool_reorg_and_retention)
+BOOST_FIXTURE_TEST_CASE(final_transaction_observations_handle_mempool_reorg_and_retention, PruneRegtestWalletTestingSetup)
 {
+    EnsurePruneChain(m_node);
     PaymasterStore store{m_wallet};
     PaymentSession session;
     std::string error;
@@ -2267,20 +2384,24 @@ BOOST_AUTO_TEST_CASE(final_transaction_observations_handle_mempool_reorg_and_ret
     BOOST_REQUIRE(store.GetSessionByRequestId(request_id, session));
     BOOST_CHECK(session.state == SessionState::PENDING_PROVIDER);
 
+    SetFinalWalletObservation(m_wallet, transaction, 0, true);
     BOOST_REQUIRE(store.ReconcileFinalTransaction(CTransaction{transaction}, 0, true, 104, error));
     BOOST_REQUIRE(store.GetSessionByRequestId(request_id, session));
     BOOST_CHECK(session.state == SessionState::MEMPOOL);
 
+    SetFinalWalletObservation(m_wallet, transaction, 1);
     BOOST_REQUIRE(store.ReconcileFinalTransaction(CTransaction{transaction}, 1, false, 105, error));
     BOOST_REQUIRE(store.GetSessionByRequestId(request_id, session));
     BOOST_CHECK(session.state == SessionState::CONFIRMED);
 
+    SetFinalWalletObservation(m_wallet, transaction, 0);
     BOOST_REQUIRE(store.ReconcileFinalTransaction(CTransaction{transaction}, 0, false, 106, error));
     BOOST_REQUIRE(store.GetSessionByRequestId(request_id, session));
     BOOST_CHECK(session.state == SessionState::PENDING_PROVIDER);
     BOOST_CHECK(session.pending_phase == PendingPhase::PENDING_NETWORK);
     BOOST_CHECK(IsPaymasterInputReserved(m_wallet, input));
 
+    SetFinalWalletObservation(m_wallet, transaction, DEFAULT_REORG_SAFETY_DEPTH);
     BOOST_REQUIRE(store.ReconcileFinalTransaction(
         CTransaction{transaction}, DEFAULT_REORG_SAFETY_DEPTH, false, 107, error));
     BOOST_REQUIRE(store.GetSessionByRequestId(request_id, session));
@@ -2298,8 +2419,182 @@ BOOST_AUTO_TEST_CASE(final_transaction_observations_handle_mempool_reorg_and_ret
     BOOST_CHECK_EQUAL(tombstone.final_txid, txid);
 }
 
-BOOST_AUTO_TEST_CASE(historical_self_recovery_reconciliation_is_idempotent_and_reorg_safe)
+BOOST_FIXTURE_TEST_CASE(current_wallet_observation_vetoes_stale_payment_pruning, PruneRegtestWalletTestingSetup)
 {
+    EnsurePruneChain(m_node);
+    ScopedRecoveryMockTime time{100};
+    PaymasterStore store{m_wallet};
+    PaymentSession session;
+    ValidClientResultArtifacts artifacts;
+    SeedClientViewPayment(*this, session, artifacts);
+    std::string error;
+    PaymasterResult result{MakeClientViewResult(artifacts)};
+    result.status = PaymasterResultStatus::FINAL_COMMITTED;
+    result.txid = CTransaction{artifacts.final_transaction}.GetHash();
+    result.raw_transaction_hash = CTransaction{artifacts.final_transaction}.GetWitnessHash();
+    result.final_transaction = artifacts.final_transaction;
+    result.updated_at = 103;
+    BOOST_REQUIRE(artifacts.provider_identity_key.SignSchnorr(GetPaymasterResultSignatureHash(result),
+        result.identity_signature, nullptr, uint256{}));
+    BOOST_REQUIRE_MESSAGE(store.StoreClientResult(result, artifacts.genesis_hash,
+        artifacts.attempt.attempt_id, 103, error), error);
+    ProviderAttempt accepted;
+    CMutableTransaction validated;
+    BOOST_REQUIRE(store.GetAttempt(artifacts.attempt.attempt_id, accepted));
+    BOOST_REQUIRE_MESSAGE(ValidateClientFinalForExecution(accepted,
+        CTransaction{artifacts.final_transaction}.GetWitnessHash(), validated, error), error);
+
+    // Isolate pool observation from admission: these exact signed bytes have
+    // already passed the client firewall. Populate the test pool explicitly
+    // to exercise a stem entry before wallet mempool callbacks have run.
+    SetFinalWalletObservation(m_wallet, validated, 0);
+    TestMemPoolEntryHelper entry;
+    const auto exact_final = MakeTransactionRef(validated);
+    {
+        LOCK(m_node.stempool->cs);
+        m_node.stempool->addUnchecked(entry.FromTx(exact_final));
+    }
+    BOOST_REQUIRE_MESSAGE(store.ReconcileFinalTransaction(*exact_final, 0, false, 104, error), error);
+    BOOST_REQUIRE(store.GetSessionByRequestId(session.request_id, session));
+    BOOST_CHECK(session.state == SessionState::MEMPOOL);
+    BOOST_CHECK(IsPaymasterInputReserved(m_wallet, artifacts.user_input));
+    CMutableTransaction altered_witness{validated};
+    altered_witness.vin.front().scriptWitness.stack.front().back() ^= 1;
+    {
+        LOCK(m_node.stempool->cs);
+        m_node.stempool->removeRecursive(*exact_final, MemPoolRemovalReason::EXPIRY);
+    }
+    // Removal notifications update the wallet's accepted-pool cache. Finish
+    // that real callback before inserting a different witness for the txid.
+    SyncWithValidationInterfaceQueue();
+    {
+        LOCK(m_node.stempool->cs);
+        m_node.stempool->addUnchecked(entry.FromTx(MakeTransactionRef(altered_witness)));
+    }
+    const auto before_witness_conflict = GetMockableDatabase(m_wallet).m_records;
+    BOOST_CHECK(!store.ReconcileFinalTransaction(*exact_final, 0, false, 104, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_OBSERVED_FINAL_WITNESS_MISMATCH");
+    BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == before_witness_conflict);
+    {
+        LOCK(m_node.stempool->cs);
+        m_node.stempool->removeRecursive(*exact_final, MemPoolRemovalReason::EXPIRY);
+    }
+    SyncWithValidationInterfaceQueue();
+    BOOST_CHECK(!WITH_LOCK(m_wallet.cs_wallet, return m_wallet.GetWalletTx(exact_final->GetHash())->InMempool()));
+    BOOST_REQUIRE_MESSAGE(store.ReconcileFinalTransaction(*exact_final, 0, true, 104, error), error);
+    BOOST_REQUIRE(store.GetSessionByRequestId(session.request_id, session));
+    BOOST_CHECK(session.state == SessionState::PENDING_PROVIDER);
+
+    SetFinalWalletObservation(m_wallet, validated, DEFAULT_REORG_SAFETY_DEPTH);
+    const int captured_depth = WITH_LOCK(m_wallet.cs_wallet,
+        return m_wallet.GetTxDepthInMainChain(*m_wallet.GetWalletTx(*result.txid)));
+    BOOST_REQUIRE_EQUAL(captured_depth, DEFAULT_REORG_SAFETY_DEPTH);
+    for (const int current_depth : {DEFAULT_REORG_SAFETY_DEPTH - 1, 0, -1}) {
+        BOOST_TEST_CONTEXT("current depth " << current_depth << ", stale depth " << captured_depth) {
+            SetFinalWalletObservation(m_wallet, validated, current_depth);
+            BOOST_REQUIRE_MESSAGE(store.ReconcileFinalTransaction(CTransaction{validated}, captured_depth,
+                false, 104, error), error);
+            BOOST_REQUIRE(store.GetSessionByRequestId(session.request_id, session));
+            const auto expected = current_depth > 0 ? SessionState::CONFIRMED :
+                current_depth < 0 ? SessionState::CONFLICTED : SessionState::PENDING_PROVIDER;
+            BOOST_CHECK(session.state == expected);
+            BOOST_CHECK(!session.user_inputs.empty());
+            BOOST_CHECK(IsPaymasterInputReserved(m_wallet, artifacts.user_input));
+            BOOST_CHECK(store.GetAttempt(artifacts.attempt.attempt_id, accepted));
+        }
+    }
+    // Direct durable replay deliberately supplies depth one even when the
+    // wallet has reached the threshold; it must not erase authority.
+    SetFinalWalletObservation(m_wallet, validated, DEFAULT_REORG_SAFETY_DEPTH);
+    BOOST_REQUIRE_MESSAGE(store.ReconcileFinalTransaction(CTransaction{validated}, 1, false, 105, error), error);
+    BOOST_REQUIRE(store.GetSessionByRequestId(session.request_id, session));
+    BOOST_CHECK(!session.user_inputs.empty());
+    // Simulate a disconnect between the state mutation and the later prune.
+    SetFinalWalletObservation(m_wallet, validated, DEFAULT_REORG_SAFETY_DEPTH - 1);
+    const auto before = GetMockableDatabase(m_wallet).m_records;
+    BOOST_REQUIRE_MESSAGE(store.PruneFinalSession(session.request_id, error), error);
+    BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == before);
+    BOOST_CHECK(IsPaymasterInputReserved(m_wallet, artifacts.user_input));
+    CheckLaggingPruneObservation(*this, store, session.request_id, validated, [&] {
+        BOOST_CHECK(IsPaymasterInputReserved(m_wallet, artifacts.user_input));
+        BOOST_CHECK(store.GetAttempt(artifacts.attempt.attempt_id, accepted));
+    });
+    SetFinalWalletObservation(m_wallet, validated, DEFAULT_REORG_SAFETY_DEPTH);
+    BOOST_REQUIRE_MESSAGE(store.ReconcileFinalSessionsAtTip(106, error), error);
+    BOOST_REQUIRE(store.GetSessionByRequestId(session.request_id, session));
+    BOOST_CHECK(session.user_inputs.empty());
+    BOOST_CHECK(!IsPaymasterInputReserved(m_wallet, artifacts.user_input));
+    BOOST_CHECK(!store.GetAttempt(artifacts.attempt.attempt_id, accepted));
+    BOOST_REQUIRE_MESSAGE(store.ReconcileFinalSessionsAtTip(107, error), error);
+}
+
+BOOST_FIXTURE_TEST_CASE(current_recovery_observation_keeps_fee_and_authority_atomic, PruneRegtestWalletTestingSetup)
+{
+    EnsurePruneChain(m_node);
+    ScopedRecoveryMockTime time{100};
+    PaymasterStore store{m_wallet};
+    PaymentSession session;
+    ValidClientResultArtifacts artifacts;
+    const CMutableTransaction recovery_tx{SeedLegacyClientRecovery(m_wallet, session, artifacts)};
+    std::string error;
+    const auto check_retained = [&] {
+        BOOST_REQUIRE(store.GetSessionByRequestId(session.request_id, session));
+        BOOST_CHECK(!session.user_inputs.empty());
+        BOOST_CHECK(IsPaymasterInputReserved(m_wallet, artifacts.user_input));
+        ProviderAttempt attempt;
+        SelfRecoveryRecord recovery;
+        BOOST_CHECK(store.GetAttempt(artifacts.attempt.attempt_id, attempt));
+        BOOST_CHECK(store.GetSelfRecovery(session.request_id, recovery));
+        ClientFeeLedger ledger;
+        BOOST_REQUIRE(GetPaymasterClientFeeLedger(m_wallet, ledger));
+        BOOST_REQUIRE_EQUAL(ledger.reservations.size(), 1U);
+        BOOST_CHECK(ledger.reservations.front().state == BudgetReservationState::RESERVED);
+    };
+    for (const int current_depth : {DEFAULT_REORG_SAFETY_DEPTH - 1, 0, -1}) {
+        SetFinalWalletObservation(m_wallet, recovery_tx, current_depth);
+        BOOST_REQUIRE_MESSAGE(store.ReconcileFinalTransaction(CTransaction{recovery_tx},
+            DEFAULT_REORG_SAFETY_DEPTH, false, 105, error), error);
+        check_retained();
+    }
+    SetFinalWalletObservation(m_wallet, recovery_tx, DEFAULT_REORG_SAFETY_DEPTH);
+    BOOST_REQUIRE_MESSAGE(store.ReconcileFinalTransaction(CTransaction{recovery_tx}, 1, false, 106, error), error);
+    check_retained();
+    SetFinalWalletObservation(m_wallet, recovery_tx, DEFAULT_REORG_SAFETY_DEPTH - 1);
+    const auto before = GetMockableDatabase(m_wallet).m_records;
+    BOOST_REQUIRE_MESSAGE(store.PruneFinalSession(session.request_id, error), error);
+    BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == before);
+    check_retained();
+    CheckLaggingPruneObservation(*this, store, session.request_id, recovery_tx, check_retained);
+    SetFinalWalletObservation(m_wallet, recovery_tx, DEFAULT_REORG_SAFETY_DEPTH);
+    CheckPaymasterWriteFailures(m_wallet, 2,
+        [&](std::string& failure) { return store.PruneFinalSession(session.request_id, failure); }, check_retained);
+    auto& database = GetMockableDatabase(m_wallet);
+    size_t chain_locked_writes{0};
+    const auto previous_write_hook = std::move(database.m_on_write);
+    database.m_on_write = [&](Span<const std::byte> key) {
+        bool acquired{true};
+        std::thread observer{[&] { TRY_LOCK(cs_main, chain_lock); acquired = bool(chain_lock); }};
+        observer.join();
+        BOOST_CHECK(!acquired);
+        ++chain_locked_writes;
+        if (previous_write_hook) previous_write_hook(key);
+    };
+    const bool pruned = store.PruneFinalSession(session.request_id, error);
+    database.m_on_write = previous_write_hook;
+    BOOST_REQUIRE_MESSAGE(pruned, error);
+    BOOST_CHECK_EQUAL(chain_locked_writes, 2U);
+    ClientFeeLedger ledger;
+    BOOST_REQUIRE(GetPaymasterClientFeeLedger(m_wallet, ledger));
+    BOOST_CHECK(ledger.reservations.front().state == BudgetReservationState::RELEASED);
+    BOOST_REQUIRE(store.GetSessionByRequestId(session.request_id, session));
+    BOOST_CHECK(session.state == SessionState::CANCELED_SAFE);
+    BOOST_CHECK(session.user_inputs.empty());
+    BOOST_CHECK(!IsPaymasterInputReserved(m_wallet, artifacts.user_input));
+}
+
+BOOST_FIXTURE_TEST_CASE(historical_self_recovery_reconciliation_is_idempotent_and_reorg_safe, PruneRegtestWalletTestingSetup)
+{
+    EnsurePruneChain(m_node);
     ScopedRecoveryMockTime mock_time{100};
     PaymasterStore store{m_wallet};
     PaymentSession session;
@@ -2389,6 +2684,7 @@ BOOST_AUTO_TEST_CASE(historical_self_recovery_reconciliation_is_idempotent_and_r
     BOOST_CHECK_EQUAL(session.recovery_txid, recovery.recovery_txid);
     BOOST_CHECK(session.pending_phase == PendingPhase::PENDING_NETWORK);
 
+    SetFinalWalletObservation(m_wallet, transaction, 0, true);
     BOOST_REQUIRE(store.ReconcileFinalTransaction(CTransaction{transaction}, 0, true,
                                                   106, error));
     BOOST_REQUIRE(store.GetSessionByRequestId(request_id, session));
@@ -2396,6 +2692,7 @@ BOOST_AUTO_TEST_CASE(historical_self_recovery_reconciliation_is_idempotent_and_r
     BOOST_CHECK(session.pending_phase == PendingPhase::CANCEL_MEMPOOL);
 
     auto& database = GetMockableDatabase(m_wallet);
+    SetFinalWalletObservation(m_wallet, transaction, 1);
     const MockableData before_confirmed_recovery = database.m_records;
     for (size_t failing_write = 0; failing_write < 1; ++failing_write) {
         database.FailWriteAt(failing_write);
@@ -2449,6 +2746,7 @@ BOOST_AUTO_TEST_CASE(historical_self_recovery_reconciliation_is_idempotent_and_r
     // Losing a confirmation must not leave a partially updated session when
     // persistence fails. The existing signed-input reservation still protects
     // the wallet while the observation is retried.
+    SetFinalWalletObservation(m_wallet, transaction, 0);
     CheckPaymasterWriteFailures(m_wallet, 1,
         [&](std::string& failure) {
             return store.ReconcileFinalTransaction(CTransaction{transaction}, 0, false, 109, failure);
@@ -2477,6 +2775,7 @@ BOOST_AUTO_TEST_CASE(historical_self_recovery_reconciliation_is_idempotent_and_r
         BOOST_CHECK(!ReserveClientFee(after_reorg, client_policy, uint256S("48"), DDCents{6}, 109, error));
         BOOST_CHECK_EQUAL(error, "PAYMASTER_CLIENT_DAILY_FEE_LIMIT_EXCEEDED");
     }
+    SetFinalWalletObservation(m_wallet, transaction, DEFAULT_REORG_SAFETY_DEPTH - 1);
     BOOST_REQUIRE(store.ReconcileFinalTransaction(
         CTransaction{transaction}, DEFAULT_REORG_SAFETY_DEPTH - 1, false, 109, error));
     {
@@ -2486,7 +2785,8 @@ BOOST_AUTO_TEST_CASE(historical_self_recovery_reconciliation_is_idempotent_and_r
         BOOST_CHECK(before_depth.reservations.front().state == BudgetReservationState::RESERVED);
     }
     // Failure to persist the release at the safety depth keeps the old liability.
-    CheckPaymasterWriteFailures(m_wallet, 1,
+    SetFinalWalletObservation(m_wallet, transaction, DEFAULT_REORG_SAFETY_DEPTH);
+    CheckPaymasterWriteFailures(m_wallet, 2,
         [&](std::string& failure) {
             return store.ReconcileFinalTransaction(CTransaction{transaction}, DEFAULT_REORG_SAFETY_DEPTH,
                                                    false, 110, failure);
@@ -6720,8 +7020,9 @@ BOOST_AUTO_TEST_CASE(client_confirmed_payment_without_provider_result)
     BOOST_CHECK_EQUAL(SummarizeReliability(reliability, 1000).successful_attempts, 1U);
 }
 
-BOOST_AUTO_TEST_CASE(client_tip_reconciles_payment_without_provider_reply)
+BOOST_FIXTURE_TEST_CASE(client_tip_reconciles_payment_without_provider_reply, PruneRegtestWalletTestingSetup)
 {
+    EnsurePruneChain(m_node);
     ScopedRecoveryMockTime time{1000};
     PaymasterStore store{m_wallet};
     PaymentSession session;
@@ -6782,6 +7083,7 @@ BOOST_AUTO_TEST_CASE(client_tip_reconciles_payment_without_provider_reply)
     BOOST_REQUIRE(store.ListClientDurableFinalTransactions(broadcasts, error));
     BOOST_CHECK(broadcasts.empty());
     // Subsequent maintenance retains the normal tombstone/pruning behavior.
+    SetFinalWalletObservation(m_wallet, artifacts.final_transaction, DEFAULT_REORG_SAFETY_DEPTH);
     BOOST_REQUIRE_MESSAGE(store.ReconcileFinalSessionsAtTip(1001, error), error);
     IdempotencyTombstone tombstone;
     BOOST_REQUIRE(WalletBatch{m_wallet.GetDatabase()}.ReadPaymasterTombstone(session.request_id, tombstone));
@@ -7099,6 +7401,7 @@ BOOST_AUTO_TEST_CASE(negative_result_after_user_signature_remains_recoverable)
     BOOST_REQUIRE(store.GetUserAuthorization(attempt.commit_key, authorization));
     BOOST_CHECK_EQUAL(authorization.canonical_psbt_hash,
                       Hash(attempt.user_signed_psbt));
+    SetFinalWalletObservation(m_wallet, transaction, 1);
     BOOST_REQUIRE_MESSAGE(store.ReconcileFinalTransaction(CTransaction{transaction}, 1, false, 104, error), error);
     BOOST_REQUIRE(store.GetProviderReliability(attempt.provider_id, reliability));
     BOOST_CHECK_EQUAL(SummarizeReliability(reliability, 104).provider_failures, 0U);

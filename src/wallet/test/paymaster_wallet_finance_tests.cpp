@@ -14,8 +14,10 @@
 #include <rpc/util.h>
 #include <script/interpreter.h>
 #include <script/standard.h>
+#include <test/util/mining.h>
 #include <univalue.h>
 #include <util/time.h>
+#include <validation.h>
 #include <wallet/context.h>
 #include <wallet/paymasterfinance.h>
 #include <wallet/paymasterfinancecache.h>
@@ -120,7 +122,7 @@ struct FinanceTestingSetup : WalletTestingSetup {
     ProviderIdentityRecord identity;
     std::string error;
 
-    FinanceTestingSetup()
+    explicit FinanceTestingSetup(ChainType chain_type = ChainType::MAIN) : WalletTestingSetup{chain_type}
     {
         auto db = std::make_unique<FinanceDatabase>();
         database = db.get();
@@ -565,10 +567,23 @@ struct FinanceTestingSetup : WalletTestingSetup {
 };
 } // namespace
 
+struct RegtestFinanceTestingSetup : FinanceTestingSetup {
+    RegtestFinanceTestingSetup() : FinanceTestingSetup{ChainType::REGTEST} {}
+};
+
 BOOST_FIXTURE_TEST_SUITE(paymaster_wallet_finance_tests, FinanceTestingSetup)
 
-BOOST_AUTO_TEST_CASE(transfer_finance_authenticates_expired_and_conflicted_history)
+BOOST_FIXTURE_TEST_CASE(transfer_finance_authenticates_expired_and_conflicted_history, RegtestFinanceTestingSetup)
 {
+    BOOST_REQUIRE(Params().GetChainType() == ChainType::REGTEST);
+    // The wallet-artifact fixture uses real active block anchors for pruning.
+    while (WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height()) < DEFAULT_REORG_SAFETY_DEPTH - 1) {
+        BOOST_REQUIRE(!MineBlock(m_node, CScript{} << OP_TRUE).IsNull());
+    }
+    const auto* chain_tip = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Tip());
+    const auto* confirmed_block = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain()[0]);
+    BOOST_REQUIRE(chain_tip);
+    BOOST_REQUIRE(confirmed_block);
     auto [attempt, commit] = Transfer();
     CMutableTransaction final;
     BOOST_REQUIRE_MESSAGE(ValidateProviderCommitForExecution(attempt, commit,
@@ -604,7 +619,7 @@ BOOST_AUTO_TEST_CASE(transfer_finance_authenticates_expired_and_conflicted_histo
     {
         LOCK(provider->cs_wallet);
         BOOST_REQUIRE(provider->AddToWallet(MakeTransactionRef(artifacts.final_transaction),
-            TxStateConfirmed{Params().GenesisBlock().GetHash(), 2, 0}));
+            TxStateConfirmed{confirmed_block->GetBlockHash(), confirmed_block->nHeight, 0}));
     }
     size_t changed_events{0};
     BOOST_REQUIRE_MESSAGE(RebuildProviderFinances(*provider, changed_events, error), error);
@@ -627,7 +642,7 @@ BOOST_AUTO_TEST_CASE(transfer_finance_authenticates_expired_and_conflicted_histo
     session.provider_side = true;
     session.state = SessionState::CONFIRMED;
     session.final_txid = commit.final_txid;
-    WITH_LOCK(provider->cs_wallet, provider->SetLastBlockProcessed(300, Params().GenesisBlock().GetHash()));
+    WITH_LOCK(provider->cs_wallet, provider->SetLastBlockProcessed(chain_tip->nHeight, chain_tip->GetBlockHash()));
     BOOST_REQUIRE(batch.WritePaymasterSession(session));
     BOOST_REQUIRE(batch.WritePaymasterSessionId(session.session_id, session.request_id));
     BOOST_REQUIRE(batch.WritePaymasterTemplate(attempt.template_commitment, attempt.attempt_id));

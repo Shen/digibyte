@@ -804,7 +804,11 @@ public:
 
     /** Reconcile every session bound to an exact wallet transaction
      * observation. The complete witness serialization is compared with the
-     * durable authorized artifact before any state transition. Confirmation
+     * durable authorized artifact before any state transition. Depth and
+     * mempool arguments are notification hints; current wallet observations
+     * under cs_wallet authorize transitions. The supplied depth only permits
+     * safety-depth pruning when it reaches that threshold, so direct replay
+     * callers can deliberately retain evidence by passing depth one. Confirmation
      * is reversible on reorg; unconfirmed disappearance returns the session
      * to its durable pending-network state. */
     bool ReconcileFinalTransaction(const CTransaction& transaction,
@@ -818,16 +822,22 @@ public:
      * reorg handling does not depend on notification order. */
     bool ReconcileFinalSessionsAtTip(int64_t now, std::string& error);
 
+    /** Prune validated terminal history, retaining signed finals and fees if
+     * their current exact wallet observation is below the safety depth. */
     bool PruneFinalSession(const std::string& request_id, std::string& error);
 
 private:
+    bool ReconcileCurrentFinalTransaction(const CTransaction& transaction,
+                                          bool allow_final_prune,
+                                          int64_t now, std::string& error);
     /** With unsigned_expiry_time > 0, erase only expired unsigned provider
      * history after its complete replay window; retain no permanent tombstone. */
     bool PruneSession(const std::string& request_id, std::string& error,
                       int64_t unsigned_expiry_time, bool& pruned,
                       const DigiDollar::Paymaster::AlternativeRecoveryRecord* observed_recovery = nullptr,
                       const DigiDollar::Paymaster::ExactFinalTransactionProof* final_proof = nullptr,
-                      const CTransactionRef& observed_transaction = {});
+                      const CTransactionRef& observed_transaction = {},
+                      int64_t observation_time = 0);
     enum class ProviderClosure { CANCEL, EXPIRED, INPUT_UNAVAILABLE };
     bool CloseProviderAttempt(const uint256& attempt_id, ProviderClosure reason, int64_t now,
         const std::optional<DigiDollar::Paymaster::PaymasterResult>& result,

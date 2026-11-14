@@ -676,6 +676,10 @@ bool ReadProviderSecurityState(
            batch.ReadPaymasterProviderPool(pool);
 }
 
+struct PruneRegtestWalletTestingSetup : WalletTestingSetup {
+    PruneRegtestWalletTestingSetup() : WalletTestingSetup{ChainType::REGTEST} {}
+};
+
 struct PaymasterMempoolTestingSetup : public WalletTestingSetup {
     PaymasterMempoolTestingSetup()
         : WalletTestingSetup{ChainType::REGTEST}
@@ -2180,8 +2184,16 @@ BOOST_AUTO_TEST_CASE(provider_quote_commit_is_atomic_and_restart_durable)
     BOOST_CHECK(still_missing.reservations.empty());
 }
 
-BOOST_AUTO_TEST_CASE(provider_capacity_cache_compaction_outlives_pruned_normal_owner)
+BOOST_FIXTURE_TEST_CASE(provider_capacity_cache_compaction_outlives_pruned_normal_owner, PruneRegtestWalletTestingSetup)
 {
+    BOOST_REQUIRE(Params().GetChainType() == ChainType::REGTEST);
+    while (WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Height()) < DEFAULT_REORG_SAFETY_DEPTH - 1) {
+        BOOST_REQUIRE(!MineBlock(m_node, CScript{} << OP_TRUE).IsNull());
+    }
+    const auto* chain_tip = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Tip());
+    const auto* confirmed_block = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain()[0]);
+    BOOST_REQUIRE(chain_tip);
+    BOOST_REQUIRE(confirmed_block);
     constexpr int64_t now{1000};
     constexpr auto request_id = "550e8400-e29b-41d4-a716-446655441191";
     auto owned_database = std::make_unique<CapacityEraseFailureDatabase>();
@@ -2205,15 +2217,27 @@ BOOST_AUTO_TEST_CASE(provider_capacity_cache_compaction_outlives_pruned_normal_o
     BOOST_REQUIRE_MESSAGE(store.ExpireProviderCapacityReservations(boundary, expired, error), error);
     BOOST_CHECK(database.m_records == quoted);
 
-    // A historical normal owner can already have been pruned at depth 240,
-    // before the retry horizon. Exercise the same storage prune/tombstone path;
-    // this fixture does not claim transaction or chain validation.
+    // A normal owner can be pruned at depth 240 before the retry horizon.
+    // Supply the exact signed final and current wallet depth required by the
+    // production prune; the cache assertions below remain storage-focused.
+    PaymentSession final_session;
+    PaymasterResult final_result;
+    CMutableTransaction final_transaction;
+    BOOST_REQUIRE_MESSAGE(BuildDurableClientFinalFixture(wallet, environment, fixture,
+        now, final_session, final_result, final_transaction, error), error);
+    {
+        LOCK(wallet.cs_wallet);
+        BOOST_REQUIRE(WalletBatch{wallet.GetDatabase()}.WritePaymasterAttempt(fixture.attempt));
+        wallet.SetLastBlockProcessed(chain_tip->nHeight, chain_tip->GetBlockHash());
+        BOOST_REQUIRE(wallet.AddToWallet(MakeTransactionRef(final_transaction),
+            TxStateConfirmed{confirmed_block->GetBlockHash(), confirmed_block->nHeight, 0}));
+    }
     BOOST_REQUIRE(store.TransitionSession(request_id, SessionState::AUTHORIZED,
         PendingPhase::NONE, {}, now + 1, error));
     BOOST_REQUIRE(store.TransitionSession(request_id, SessionState::PENDING_PROVIDER,
         PendingPhase::USER_SIGNATURE_SENT, {}, now + 2, error));
     BOOST_REQUIRE(store.TransitionSession(request_id, SessionState::CONFIRMED,
-        PendingPhase::NONE, uint256S("1192"), now + 3, error));
+        PendingPhase::NONE, CTransaction{final_transaction}.GetHash(), now + 3, error));
     BOOST_REQUIRE_MESSAGE(store.PruneFinalSession(request_id, error), error);
     PaymentSession session;
     ProviderAttempt attempt;
@@ -7639,8 +7663,20 @@ static void ExerciseClientRecoveryResult(ClientRecoveryReadSetup& setup, bool co
         WITH_LOCK(client.cs_wallet, client.mapWallet.at(final_transaction.GetHash()).tx = exact_final);
         // The public refresh entry must finish without any provider result,
         // transport, operating unlock or new authorization.
+        size_t chain_locked_writes{0};
+        const auto previous_write_hook = std::move(failed_database.m_on_write);
+        failed_database.m_on_write = [&](Span<const std::byte> key) {
+            bool acquired{true};
+            std::thread observer{[&] { TRY_LOCK(cs_main, chain_lock); acquired = bool(chain_lock); }};
+            observer.join();
+            BOOST_CHECK(!acquired);
+            ++chain_locked_writes;
+            if (previous_write_hook) previous_write_hook(key);
+        };
         const auto refreshed = paymaster_app::ResolvePaymasterSession(context, client,
             paymaster_app::ClientSessionLookup{session.request_id}, "refresh", {});
+        failed_database.m_on_write = previous_write_hook;
+        BOOST_CHECK_EQUAL(chain_locked_writes, 2U);
         BOOST_REQUIRE(refreshed.session.session);
         BOOST_CHECK(refreshed.session.session->session.state == SessionState::CANCELED_SAFE);
         BOOST_REQUIRE(store.GetSessionByRequestId(session.request_id, session));

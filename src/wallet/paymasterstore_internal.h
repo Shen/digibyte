@@ -219,12 +219,9 @@ bool ObserveExactWalletArtifact(const CWallet& wallet,
                                 const ExactFinalArtifact& artifact,
                                 ExactFinalObservation& observation,
                                 std::string& error);
-bool BindExactObservation(const CTransaction& transaction,
-                          const ExactFinalArtifact& artifact,
-                          int confirmation_depth,
-                          bool in_mempool,
-                          ExactFinalObservation& observation,
-                          std::string& error);
+bool ValidateExactObservedTransaction(const CTransaction& transaction,
+                                      const ExactFinalArtifact& artifact,
+                                      std::string& error);
 
 // Capacity proof validation and equivocation evidence. Functions ending in
 // Locked participate in a caller-owned wallet database transaction.

@@ -25,6 +25,7 @@
 #include <random.h>
 #include <streams.h>
 #include <tinyformat.h>
+#include <txmempool.h>
 #include <util/time.h>
 #include <version.h>
 #include <validation.h>
@@ -50,6 +51,7 @@ bool paymaster_store::internal::ObserveExactWalletArtifact(const CWallet& wallet
                                 ExactFinalObservation& observation,
                                 std::string& error)
 {
+    AssertLockHeld(wallet.cs_wallet);
     observation = {};
     if (artifact.txid.IsNull()) return true;
     const auto wallet_tx = wallet.mapWallet.find(artifact.txid);
@@ -63,16 +65,25 @@ bool paymaster_store::internal::ObserveExactWalletArtifact(const CWallet& wallet
     observation.confirmation_depth =
         wallet.GetTxDepthInMainChain(wallet_tx->second);
     observation.in_mempool = wallet_tx->second.InMempool();
+    if (observation.confirmation_depth == 0 && !observation.in_mempool) {
+        const auto* node = wallet.chain().context();
+        if (node && node->stempool) {
+            const CTransactionRef stem_transaction = node->stempool->get(artifact.txid);
+            if (stem_transaction) {
+                if (!ValidateExactObservedTransaction(*stem_transaction, artifact, error)) return false;
+                // RefreshMempoolStatus uses the same accepted-pool semantics:
+                // a current stem entry is accepted without being confirmed.
+                observation.in_mempool = true;
+            }
+        }
+    }
     error.clear();
     return true;
 }
 
-bool paymaster_store::internal::BindExactObservation(const CTransaction& transaction,
-                          const ExactFinalArtifact& artifact,
-                          int confirmation_depth,
-                          bool in_mempool,
-                          ExactFinalObservation& observation,
-                          std::string& error)
+bool paymaster_store::internal::ValidateExactObservedTransaction(const CTransaction& transaction,
+                                      const ExactFinalArtifact& artifact,
+                                      std::string& error)
 {
     if (artifact.txid.IsNull() || transaction.GetHash() != artifact.txid) {
         return false;
@@ -82,8 +93,6 @@ bool paymaster_store::internal::BindExactObservation(const CTransaction& transac
         error = "PAYMASTER_OBSERVED_FINAL_WITNESS_MISMATCH";
         return false;
     }
-    observation.confirmation_depth = confirmation_depth;
-    observation.in_mempool = in_mempool;
     error.clear();
     return true;
 }
@@ -685,6 +694,16 @@ bool PaymasterStore::ReconcileFinalTransaction(const CTransaction& transaction,
         return false;
     }
 
+    return ReconcileCurrentFinalTransaction(transaction,
+        confirmation_depth >= DEFAULT_REORG_SAFETY_DEPTH, now, error);
+}
+
+bool PaymasterStore::ReconcileCurrentFinalTransaction(const CTransaction& transaction,
+    bool allow_final_prune, int64_t now, std::string& error)
+{
+    error.clear();
+    const uint256 txid{transaction.GetHash()};
+
     std::vector<std::string> prune;
     {
         LOCK(m_wallet.cs_wallet);
@@ -724,18 +743,14 @@ bool PaymasterStore::ReconcileFinalTransaction(const CTransaction& transaction,
                 return false;
             }
             if (observed_payment &&
-                !BindExactObservation(transaction, payment_artifact,
-                                      confirmation_depth, in_mempool,
-                                      payment_observation, error)) {
+                !ValidateExactObservedTransaction(transaction, payment_artifact, error)) {
                 if (error.empty()) {
                     error = "PAYMASTER_FINAL_TRANSACTION_BINDING_MISMATCH";
                 }
                 return false;
             }
             if (observed_recovery &&
-                !BindExactObservation(transaction, recovery_artifact,
-                                      confirmation_depth, in_mempool,
-                                      recovery_observation, error)) {
+                !ValidateExactObservedTransaction(transaction, recovery_artifact, error)) {
                 if (error.empty()) {
                     error = "PAYMASTER_RECOVERY_FINAL_MISMATCH";
                 }
@@ -798,46 +813,8 @@ bool PaymasterStore::ReconcileFinalTransaction(const CTransaction& transaction,
                 if (have_client_ledger) {
                     if (!RestoreClientRecoveryFeeReservations(batch, client_fee_ledger,
                             now, client_fee_changed, error, &session)) return false;
-                    // Keep fee liabilities through the same reorg safety depth
-                    // as signed inputs. A single confirmation is reversible.
-                    for (const uint256& attempt_id : session.attempt_ids) {
-                        if (state != SessionState::CANCELED_SAFE ||
-                            final_depth < DEFAULT_REORG_SAFETY_DEPTH) break;
-                        ProviderAttempt original_attempt;
-                        const DatabaseReadStatus attempt_status =
-                            batch.ReadPaymasterAttemptWithStatus(
-                                attempt_id, original_attempt);
-                        if (attempt_status != DatabaseReadStatus::FOUND) {
-                            error = PersistedReadError(
-                                attempt_status, "ProviderAttempt",
-                                original_attempt,
-                                "PAYMASTER_CLIENT_FEE_ATTEMPT_MISSING",
-                                "PAYMASTER_CLIENT_FEE_ATTEMPT_READ_FAILED");
-                            return false;
-                        }
-                        if (original_attempt.commit_key.IsNull()) {
-                            continue;
-                        }
-                        const auto reservation = std::find_if(
-                            client_fee_ledger.reservations.begin(),
-                            client_fee_ledger.reservations.end(),
-                            [&](const ClientFeeReservation& entry) {
-                                return entry.commit_key ==
-                                       original_attempt.commit_key;
-                            });
-                        if (reservation ==
-                                client_fee_ledger.reservations.end() ||
-                            reservation->state !=
-                                BudgetReservationState::RESERVED) {
-                            continue;
-                        }
-                        if (!ReleaseClientFee(client_fee_ledger,
-                                              original_attempt.commit_key,
-                                              now, error)) {
-                            return false;
-                        }
-                        client_fee_changed = true;
-                    }
+                    // Release only in the pruning transaction after its fresh
+                    // observation check, together with the signed authority.
                 }
             }
             const bool write_session = session.state != state ||
@@ -854,7 +831,7 @@ bool PaymasterStore::ReconcileFinalTransaction(const CTransaction& transaction,
             };
             if (!write_session && !write_attempt && !client_fee_changed) {
                 record_success();
-                if (final_depth >= DEFAULT_REORG_SAFETY_DEPTH) {
+                if (allow_final_prune && final_depth >= DEFAULT_REORG_SAFETY_DEPTH) {
                     prune.push_back(session.request_id);
                 }
                 continue;
@@ -882,13 +859,14 @@ bool PaymasterStore::ReconcileFinalTransaction(const CTransaction& transaction,
                 return false;
             }
             record_success();
-            if (final_depth >= DEFAULT_REORG_SAFETY_DEPTH) {
+            if (allow_final_prune && final_depth >= DEFAULT_REORG_SAFETY_DEPTH) {
                 prune.push_back(session.request_id);
             }
         }
     }
     for (const std::string& request_id : prune) {
-        if (!PruneFinalSession(request_id, error)) return false;
+        bool pruned{false};
+        if (!PruneSession(request_id, error, 0, pruned, nullptr, nullptr, {}, now)) return false;
     }
     return true;
 }
@@ -965,7 +943,7 @@ bool PaymasterStore::CompleteClientConfirmedFinal(const std::string& request_id,
             trusted, parameters, Params(), *node->chainman, authorization_time, observation_time, &*preflight.final_proof, error)) return false;
     // At the existing safety depth complete and prune atomically, retaining the
     // request tombstone/recovery txid. Never publish an intermediate fake FINAL.
-    return PruneSession(request_id, error, 0, completed, &recovery, &*preflight.final_proof, transaction);
+    return PruneSession(request_id, error, 0, completed, &recovery, &*preflight.final_proof, transaction, now);
 }
 
 bool PaymasterStore::ReconcileFinalSessionsAtTip(int64_t now,
@@ -989,12 +967,7 @@ bool PaymasterStore::ReconcileFinalSessionsAtTip(int64_t now,
         return false;
     }
 
-    struct ReconciliationCandidate {
-        CTransactionRef transaction;
-        int confirmation_depth{0};
-        bool in_mempool{false};
-    };
-    std::vector<ReconciliationCandidate> candidates;
+    std::vector<CTransactionRef> candidates;
     std::vector<std::string> pending_observations;
     std::set<uint256> scheduled_wtxids;
     size_t pruned_unsigned{0};
@@ -1047,14 +1020,9 @@ bool PaymasterStore::ReconcileFinalSessionsAtTip(int64_t now,
                 !scheduled_wtxids.insert(selected.wtxid).second) {
                 continue;
             }
-            ExactFinalObservation observation;
-            if (!ObserveExactWalletArtifact(m_wallet, selected, observation,
-                                            error)) {
-                return false;
-            }
-            candidates.push_back({MakeTransactionRef(selected.transaction),
-                                  observation.confirmation_depth,
-                                  observation.in_mempool});
+            // Enumeration schedules exact identities, never financial
+            // authority. Re-read both finals in the mutation's wallet lock.
+            candidates.push_back(MakeTransactionRef(selected.transaction));
         }
     }
 
@@ -1063,10 +1031,8 @@ bool PaymasterStore::ReconcileFinalSessionsAtTip(int64_t now,
         bool completed{false};
         if (!CompleteClientConfirmedFinal(request, now, completed, error)) return false;
     }
-    for (const ReconciliationCandidate& candidate : candidates) {
-        if (!ReconcileFinalTransaction(*candidate.transaction,
-                                       candidate.confirmation_depth,
-                                       candidate.in_mempool, now, error)) {
+    for (const CTransactionRef& candidate : candidates) {
+        if (!ReconcileCurrentFinalTransaction(*candidate, true, now, error)) {
             return false;
         }
     }
@@ -1084,7 +1050,8 @@ bool PaymasterStore::PruneSession(const std::string& request_id, std::string& er
                                  int64_t unsigned_expiry_time, bool& pruned,
                                  const AlternativeRecoveryRecord* observed_recovery,
                                  const ExactFinalTransactionProof* final_proof,
-                                 const CTransactionRef& observed_transaction)
+                                 const CTransactionRef& observed_transaction,
+                                 int64_t observation_time)
 {
     error.clear();
     pruned = false;
@@ -1406,106 +1373,152 @@ bool PaymasterStore::PruneSession(const std::string& request_id, std::string& er
         return false;
     }
 
-    ClientFeeLedger settled_fees;
-    if (observed_recovery) {
-        if (!batch.ReadPaymasterClientFeeLedger(settled_fees) ||
-            !SpendClientFee(settled_fees, observed_recovery->recovery_response.recovery_commit_key, GetTime(), error)) {
-            if (error.empty()) error = "PAYMASTER_CLIENT_FEE_RESERVATION_MISSING";
+    const auto commit_prune = [&]() -> bool {
+        ClientFeeLedger settled_fees;
+        bool write_settled_fees{false};
+        const int64_t settlement_time = observation_time > 0 ? observation_time : GetTime();
+        if (!session.provider_side && session.state == SessionState::CANCELED_SAFE) {
+            const DatabaseReadStatus fee_status = batch.ReadPaymasterClientFeeLedgerWithStatus(settled_fees);
+            if ((observed_recovery && fee_status != DatabaseReadStatus::FOUND) ||
+                (fee_status != DatabaseReadStatus::FOUND && fee_status != DatabaseReadStatus::NOT_FOUND)) {
+                error = "PAYMASTER_INVALID_CLIENT_SAFETY_STATE";
+                return false;
+            }
+            if (fee_status == DatabaseReadStatus::FOUND) {
+                if (observed_recovery) {
+                    if (!SpendClientFee(settled_fees, observed_recovery->recovery_response.recovery_commit_key, settlement_time, error)) return false;
+                    write_settled_fees = true;
+                } else if (!RestoreClientRecoveryFeeReservations(batch, settled_fees, settlement_time, write_settled_fees, error, &session)) {
+                    return false;
+                }
+                for (const auto& records : attempts) {
+                    const auto fee = std::find_if(settled_fees.reservations.begin(), settled_fees.reservations.end(),
+                        [&](const auto& entry) { return entry.commit_key == records.attempt.commit_key; });
+                    if (fee == settled_fees.reservations.end() || fee->state != BudgetReservationState::RESERVED) continue;
+                    if (!ReleaseClientFee(settled_fees, fee->commit_key, settlement_time, error)) return false;
+                    write_settled_fees = true;
+                }
+            }
+        }
+        const uint256 tombstone_txid = session.state == SessionState::CANCELED_SAFE ? session.recovery_txid : session.final_txid;
+        IdempotencyTombstone tombstone{IdempotencyTombstone::CURRENT_VERSION, request_id, session.session_id,
+                                       session.canonical_request_hash, session.fee_mode_requested,
+                                       session.fee_mode_used, session.state, tombstone_txid,
+                                       session.requested_amount,
+                                       session.subtract_paymaster_fee_from_amount,
+                                       session.send_all_spendable_dd};
+        if (!batch.TxnBegin()) return Abort(batch, error, "PAYMASTER_DATABASE_BEGIN");
+        if (write_settled_fees && !batch.WritePaymasterClientFeeLedger(settled_fees)) return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
+        // Expired unsigned provider artifacts no longer authorize any spend or
+        // valid replay. Keeping a permanent tombstone for each public request
+        // would only move the unbounded storage growth to another record type.
+        if (!prune_unsigned && !batch.WritePaymasterTombstone(tombstone, false)) return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
+        for (const COutPoint& outpoint : reservations_to_erase) {
+            if (!batch.ErasePaymasterReservation(outpoint) ||
+                !batch.ErasePaymasterLockedUTXO(outpoint)) {
+                return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
+            }
+        }
+        for (const PrunableAttempt& records : attempts) {
+            const ProviderAttempt& attempt = records.attempt;
+            if (!attempt.template_commitment.IsNull() &&
+                !batch.ErasePaymasterTemplate(attempt.template_commitment)) {
+                return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
+            }
+            if (!attempt.unsigned_txid.IsNull() &&
+                !batch.ErasePaymasterUnsignedTx(attempt.unsigned_txid)) {
+                return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
+            }
+            if (!attempt.commit_key.IsNull()) {
+                if (records.has_commit &&
+                    !batch.ErasePaymasterProviderCommit(attempt.commit_key)) {
+                    return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
+                }
+                if (records.has_authorization &&
+                    !batch.ErasePaymasterUserAuthorization(attempt.commit_key)) {
+                    return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
+                }
+                if (records.has_result &&
+                    !batch.ErasePaymasterResult(attempt.commit_key)) {
+                    return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
+                }
+            }
+            if (records.has_outcome &&
+                !batch.ErasePaymasterOutcomeMarker(attempt.attempt_id)) {
+                return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
+            }
+            if (!batch.ErasePaymasterAttempt(attempt.attempt_id)) {
+                return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
+            }
+        }
+        if (recovery &&
+            !batch.ErasePaymasterRecovery(request_id)) {
+            return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
+        }
+        if (alternative_recovery) {
+            if (!batch.ErasePaymasterAlternativeRecovery(
+                    alternative_recovery_id) ||
+                !batch.ErasePaymasterAlternativeRecoveryRequest(request_id)) {
+                return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
+            }
+        }
+        if (!batch.ErasePaymasterClientOrder(request_id) ||
+            !batch.ErasePaymasterSession(request_id)) {
+            return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
+        }
+        if (prune_unsigned && !batch.ErasePaymasterSessionId(session.session_id)) {
+            return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
+        }
+        if (!batch.TxnCommit()) {
+            error = "PAYMASTER_DATABASE_COMMIT";
             return false;
         }
-        for (const auto& records : attempts) {
-            const auto fee = std::find_if(settled_fees.reservations.begin(), settled_fees.reservations.end(),
-                [&](const auto& entry) { return entry.commit_key == records.attempt.commit_key; });
-            if (fee != settled_fees.reservations.end() && fee->state == BudgetReservationState::RESERVED &&
-                !ReleaseClientFee(settled_fees, fee->commit_key, GetTime(), error)) return false;
-        }
-        const auto* observed = m_wallet.GetWalletTx(observed_transaction->GetHash());
-        auto* node = m_wallet.chain().context();
-        if (!observed || CanonicalBytes(*observed->tx) != CanonicalBytes(*observed_transaction) ||
-            m_wallet.GetTxDepthInMainChain(*observed) < DEFAULT_REORG_SAFETY_DEPTH || !node || !node->chainman) {
-            error = "PAYMASTER_RECOVERY_OBSERVATION_NOT_CONFIRMED";
-            return false;
-        }
+        pruned = true;
+        for (const COutPoint& outpoint : reservations_to_erase)
+            m_wallet.UnlockPaymasterCoin(outpoint);
+        return true;
+    };
+
+    // Wallet callbacks can lag the active chain. Keep both authorities stable
+    // through the fee/tombstone commit; no index, disk or callback wait belongs
+    // in this interval.
+    if (!prune_unsigned &&
+        (session.state == SessionState::CONFIRMED || session.state == SessionState::CANCELED_SAFE)) {
         LOCK(cs_main);
-        if (!final_proof->Matches(*observed_transaction, *node->chainman, error)) return false;
-    }
-    const uint256 tombstone_txid = session.state == SessionState::CANCELED_SAFE ? session.recovery_txid : session.final_txid;
-    IdempotencyTombstone tombstone{IdempotencyTombstone::CURRENT_VERSION, request_id, session.session_id,
-                                   session.canonical_request_hash, session.fee_mode_requested,
-                                   session.fee_mode_used, session.state, tombstone_txid,
-                                   session.requested_amount,
-                                   session.subtract_paymaster_fee_from_amount,
-                                   session.send_all_spendable_dd};
-    if (!batch.TxnBegin()) return Abort(batch, error, "PAYMASTER_DATABASE_BEGIN");
-    if (observed_recovery && !batch.WritePaymasterClientFeeLedger(settled_fees)) return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
-    // Expired unsigned provider artifacts no longer authorize any spend or
-    // valid replay. Keeping a permanent tombstone for each public request
-    // would only move the unbounded storage growth to another record type.
-    if (!prune_unsigned && !batch.WritePaymasterTombstone(tombstone, false)) return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
-    for (const COutPoint& outpoint : reservations_to_erase) {
-        if (!batch.ErasePaymasterReservation(outpoint) ||
-            !batch.ErasePaymasterLockedUTXO(outpoint)) {
-            return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
+        const auto* node = m_wallet.chain().context();
+        if (!node || !node->chainman) return true;
+        const CChain& active_chain = node->chainman->ActiveChain();
+        const CBlockIndex* active_tip = active_chain.Tip();
+        if (!active_tip || m_wallet.GetLastBlockHeight() != active_tip->nHeight ||
+            m_wallet.GetLastBlockHash() != active_tip->GetBlockHash()) return true;
+
+        ExactFinalArtifact payment_artifact;
+        ExactFinalArtifact recovery_artifact;
+        std::optional<ProviderAttempt> observed_attempt;
+        ExactFinalObservation payment_observation;
+        ExactFinalObservation recovery_observation;
+        if (!LoadPaymentFinalArtifact(batch, session, payment_artifact, observed_attempt, error) ||
+            (observed_recovery
+                ? !DecodeExactFinalArtifact(CanonicalBytes(*observed_transaction), session.recovery_txid, recovery_artifact, error)
+                : !LoadRecoveryFinalArtifact(batch, session, recovery_artifact, error)) ||
+            !ObserveExactWalletArtifact(m_wallet, payment_artifact, payment_observation, error) ||
+            !ObserveExactWalletArtifact(m_wallet, recovery_artifact, recovery_observation, error)) return false;
+        if (payment_observation.confirmation_depth > 0 && recovery_observation.confirmation_depth > 0) {
+            error = "PAYMASTER_MUTUALLY_EXCLUSIVE_FINALS_CONFIRMED";
+            return false;
         }
+        const ExactFinalArtifact& selected = session.state == SessionState::CONFIRMED
+            ? payment_artifact : recovery_artifact;
+        const CWalletTx* wallet_tx = m_wallet.GetWalletTx(selected.txid);
+        const auto* confirmed = wallet_tx ? wallet_tx->state<TxStateConfirmed>() : nullptr;
+        const CBlockIndex* confirmed_block = confirmed ? active_chain[confirmed->confirmed_block_height] : nullptr;
+        if (!confirmed_block || confirmed_block->GetBlockHash() != confirmed->confirmed_block_hash ||
+            int64_t{active_tip->nHeight} - confirmed_block->nHeight + 1 < DEFAULT_REORG_SAFETY_DEPTH) return true;
+        if (observed_recovery &&
+            !final_proof->Matches(*observed_transaction, *node->chainman, error)) return false;
+        return commit_prune();
     }
-    for (const PrunableAttempt& records : attempts) {
-        const ProviderAttempt& attempt = records.attempt;
-        if (!attempt.template_commitment.IsNull() &&
-            !batch.ErasePaymasterTemplate(attempt.template_commitment)) {
-            return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
-        }
-        if (!attempt.unsigned_txid.IsNull() &&
-            !batch.ErasePaymasterUnsignedTx(attempt.unsigned_txid)) {
-            return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
-        }
-        if (!attempt.commit_key.IsNull()) {
-            if (records.has_commit &&
-                !batch.ErasePaymasterProviderCommit(attempt.commit_key)) {
-                return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
-            }
-            if (records.has_authorization &&
-                !batch.ErasePaymasterUserAuthorization(attempt.commit_key)) {
-                return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
-            }
-            if (records.has_result &&
-                !batch.ErasePaymasterResult(attempt.commit_key)) {
-                return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
-            }
-        }
-        if (records.has_outcome &&
-            !batch.ErasePaymasterOutcomeMarker(attempt.attempt_id)) {
-            return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
-        }
-        if (!batch.ErasePaymasterAttempt(attempt.attempt_id)) {
-            return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
-        }
-    }
-    if (recovery &&
-        !batch.ErasePaymasterRecovery(request_id)) {
-        return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
-    }
-    if (alternative_recovery) {
-        if (!batch.ErasePaymasterAlternativeRecovery(
-                alternative_recovery_id) ||
-            !batch.ErasePaymasterAlternativeRecoveryRequest(request_id)) {
-            return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
-        }
-    }
-    if (!batch.ErasePaymasterClientOrder(request_id) ||
-        !batch.ErasePaymasterSession(request_id)) {
-        return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
-    }
-    if (prune_unsigned && !batch.ErasePaymasterSessionId(session.session_id)) {
-        return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
-    }
-    if (!batch.TxnCommit()) {
-        error = "PAYMASTER_DATABASE_COMMIT";
-        return false;
-    }
-    pruned = true;
-    for (const COutPoint& outpoint : reservations_to_erase)
-        m_wallet.UnlockPaymasterCoin(outpoint);
-    return true;
+    return commit_prune();
 }
 
 } // namespace wallet
