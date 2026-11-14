@@ -49,6 +49,18 @@ struct ConnmanTestMsg : public CConnman {
         return m_direct_queue.Claim(m_direct_permits, now);
     }
 
+    /** Supply listener admission for socket-free encrypted handler tests.
+     * Promotion still runs the production permit and connection checks. */
+    bool AdmitPaymasterTestListener(CNode& node)
+    {
+        using namespace DigiDollar::Paymaster;
+        m_direct_budget = DirectBudget::Calculate(16, 2, 1, 2, true);
+        m_direct_permits.Configure(m_direct_budget);
+        m_direct_listener_ready = true;
+        node.m_paymaster_admission = m_direct_permits.Acquire(DirectPermits::Kind::HANDSHAKE);
+        return node.m_paymaster_admission != nullptr;
+    }
+
     void Handshake(CNode& node,
                    bool successfully_connected,
                    ServiceFlags remote_services,

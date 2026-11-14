@@ -1898,7 +1898,6 @@ ProviderProcessingResult ProcessProviderRecoveryRequest(
 {
     WalletContext& context = request.context;
     CWallet* const wallet = request.wallet;
-    node::NodeContext* const node = request.node;
     const int64_t now = request.now;
     std::string& error = request.error;
     result.disposition = ProviderProcessingDisposition::PROCESSED;
@@ -1920,17 +1919,11 @@ ProviderProcessingResult ProcessProviderRecoveryRequest(
                            "PAYMASTER_NETGROUP_BUCKET_UNAVAILABLE");
     }
     if (recovery_request->privacy_profile == PrivacyProfile::HIGH) {
-        if (!node->connman) {
+        if (!direct.arrived_via_onion) {
             throw ApplicationError(ErrorKind::WALLET,
-                                   "PAYMASTER_NODE_RUNTIME_UNAVAILABLE");
+                                   "PAYMASTER_RECOVERY_TRANSPORT_OBSERVATION_UNAVAILABLE");
         }
-        bool onion_peer{false};
-        node->connman->ForEachNode([&](CNode* peer) {
-            if (peer->GetId() == direct.peer_id && peer->addr.IsTor()) {
-                onion_peer = true;
-            }
-        });
-        if (!onion_peer) {
+        if (!*direct.arrived_via_onion) {
             return RejectProviderMessage(*context.paymaster, direct,
                 "PAYMASTER_RECOVERY_HIGH_PRIVACY_REQUIRES_ONION", "recovery_request");
         }

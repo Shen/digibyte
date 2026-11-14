@@ -337,6 +337,22 @@ void CheckRequestIdDecodingBound(T sample = {})
 
 BOOST_FIXTURE_TEST_SUITE(paymaster_wire_tests, BasicTestingSetup)
 
+BOOST_AUTO_TEST_CASE(direct_arrival_observation_survives_peer_disconnection)
+{
+    constexpr int64_t now{100000};
+    for (const auto origin : {std::optional<bool>{}, std::optional<bool>{false}, std::optional<bool>{true}}) {
+        Manager manager{true};
+        const auto recovery = RecoveryMessages(uint256S("e1"), now,
+            "550e8400-e29b-41d4-a716-4466554400e1", uint256S("e2"), uint256S("e3"));
+        BOOST_REQUIRE(IsBenignDirectEnqueueResult(manager.EnqueueDirectMessageResult(45, uint256S("e4"),
+            100, DirectPayload{recovery.request}, now, 1, {1}, DirectAdmissionClass::REQUEST, origin)));
+        manager.ForgetDirectPeer(45);
+        const auto messages = manager.TakeDirectMessages(1);
+        BOOST_REQUIRE_EQUAL(messages.size(), 1U);
+        BOOST_CHECK(messages.front().arrived_via_onion == origin);
+    }
+}
+
 BOOST_AUTO_TEST_CASE(request_id_lengths_are_bounded_before_allocation)
 {
     for (const uint16_t version : {LEGACY_DIRECT_PROTOCOL_VERSION, DigiDollar::Paymaster::PROTOCOL_VERSION}) {

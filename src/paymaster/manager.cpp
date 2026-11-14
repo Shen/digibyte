@@ -813,13 +813,23 @@ bool Manager::EnqueueDirectMessage(int64_t peer_id,
 }
 
 DirectEnqueueResult Manager::EnqueueDirectMessageResult(int64_t peer_id,
+    const uint256& message_id, size_t serialized_size, DirectPayload payload, int64_t now,
+    std::optional<uint64_t> keyed_netgroup, std::vector<unsigned char> canonical_netgroup,
+    DirectAdmissionClass admission)
+{
+    return EnqueueDirectMessageResult(peer_id, message_id, serialized_size, std::move(payload),
+        now, keyed_netgroup, std::move(canonical_netgroup), admission, std::nullopt);
+}
+
+DirectEnqueueResult Manager::EnqueueDirectMessageResult(int64_t peer_id,
                                                         const uint256& message_id,
                                                         size_t serialized_size,
                                                         DirectPayload payload,
                                                         int64_t now,
                                                         std::optional<uint64_t> keyed_netgroup,
                                                         std::vector<unsigned char> canonical_netgroup,
-                                                        DirectAdmissionClass admission)
+                                                        DirectAdmissionClass admission,
+                                                        std::optional<bool> arrived_via_onion)
 {
     if (!Enabled() || peer_id < 0 || message_id.IsNull() || serialized_size == 0 ||
         serialized_size > MAX_DIRECT_MESSAGE_BYTES || now <= 0) {
@@ -923,7 +933,8 @@ DirectEnqueueResult Manager::EnqueueDirectMessageResult(int64_t peer_id,
                                               serialized_size, std::move(payload),
                                               keyed_netgroup,
                                               std::move(canonical_netgroup),
-                                              queue_sequence, admission});
+                                              queue_sequence, admission, false,
+                                              arrived_via_onion});
     if (conflicting_replay) return DirectEnqueueResult::CONFLICT;
     return exact_replay ? DirectEnqueueResult::DUPLICATE : DirectEnqueueResult::ACCEPTED;
 }
@@ -1399,9 +1410,20 @@ DirectEnqueueResult Manager::EnqueueNetworkDirectMessage(
     DirectPayload payload, int64_t now, uint64_t keyed_netgroup,
     std::vector<unsigned char> canonical_netgroup, DirectAdmissionClass admission)
 {
+    return EnqueueNetworkDirectMessage(peer_id, message_id, serialized_size, std::move(payload),
+        now, keyed_netgroup, std::move(canonical_netgroup), admission, std::nullopt);
+}
+
+DirectEnqueueResult Manager::EnqueueNetworkDirectMessage(
+    int64_t peer_id, const uint256& message_id, size_t serialized_size,
+    DirectPayload payload, int64_t now, uint64_t keyed_netgroup,
+    std::vector<unsigned char> canonical_netgroup, DirectAdmissionClass admission,
+    std::optional<bool> arrived_via_onion)
+{
     if (!CanReceiveDirectMessage(peer_id, payload, admission, now)) return DirectEnqueueResult::INVALID;
     return EnqueueDirectMessageResult(peer_id, message_id, serialized_size,
-        std::move(payload), now, keyed_netgroup, std::move(canonical_netgroup), admission);
+        std::move(payload), now, keyed_netgroup, std::move(canonical_netgroup), admission,
+        arrived_via_onion);
 }
 
 void Manager::ForgetDirectPeer(int64_t peer_id)

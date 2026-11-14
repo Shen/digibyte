@@ -7383,6 +7383,50 @@ BOOST_FIXTURE_TEST_CASE(provider_confirmed_recovery_archives_only_after_reorg_sa
         /*exercise_provider_history=*/true);
 }
 
+BOOST_FIXTURE_TEST_CASE(provider_high_privacy_recovery_uses_saved_arrival_observation,
+                        QuoteRequestProcessingSetup)
+{
+    auto request = MakeRecoveryReadRequest(environment, seed, now);
+    request.privacy_profile = PrivacyProfile::HIGH;
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(ValidateAlternativeRecoveryRequestEnvelope(request,
+        Params().GenesisBlock().GetHash(), now, error), error);
+    const auto encoded = SerializePaymasterSecurityObject(request);
+    const auto before = GetMockableDatabase(wallet).m_records;
+    const auto checkpoint_before = CheckpointBytes();
+    for (const auto observed : {std::optional<bool>{}, std::optional<bool>{false}, std::optional<bool>{true}}) {
+        BOOST_TEST_CONTEXT("known arrival " << observed.has_value() << ", onion " << observed.value_or(false)) {
+            Manager transport{true};
+            context.paymaster = &transport;
+            BOOST_REQUIRE(transport.StartProvider(wallet.GetName(), environment.identity.provider_id));
+            BOOST_REQUIRE(transport.EnqueueNetworkDirectMessage(44, Hash(encoded), encoded.size(),
+                DirectPayload{request}, now, 44, {1, 8, 8}, DirectAdmissionClass::REQUEST,
+                observed) == DirectEnqueueResult::ACCEPTED);
+            transport.ForgetDirectPeer(44);
+            if (!observed) {
+                BOOST_CHECK_EXCEPTION(paymaster_app::ProcessPaymasterRequests(context, wallet, paymaster_app::ExecutionMode::MANUAL),
+                    ApplicationError, [](const ApplicationError& failure) {
+                        return failure.kind == ErrorKind::WALLET &&
+                            failure.code == "PAYMASTER_RECOVERY_TRANSPORT_OBSERVATION_UNAVAILABLE";
+                    });
+                BOOST_CHECK_EQUAL(transport.DirectMessageCount(), 1U);
+            } else {
+                const auto result = paymaster_app::ProcessPaymasterRequests(context, wallet, paymaster_app::ExecutionMode::MANUAL);
+                BOOST_CHECK(result.IsRejected());
+                // Onion passes the transport gate and reaches the ordinary
+                // policy check; this fixture deliberately has another policy.
+                BOOST_CHECK_EQUAL(result.rejection_reason.value_or(""), *observed
+                    ? "PAYMASTER_RECOVERY_POLICY_MISMATCH"
+                    : "PAYMASTER_RECOVERY_HIGH_PRIVACY_REQUIRES_ONION");
+                BOOST_CHECK_EQUAL(transport.DirectMessageCount(), 0U);
+            }
+            BOOST_CHECK(GetMockableDatabase(wallet).m_records == before);
+            BOOST_CHECK(CheckpointBytes() == checkpoint_before);
+            context.paymaster = &manager;
+        }
+    }
+}
+
 BOOST_FIXTURE_TEST_CASE(provider_recovery_read_failure_retains_request_and_replay,
                         QuoteRequestProcessingSetup)
 {

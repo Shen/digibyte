@@ -4561,7 +4561,8 @@ void PeerManagerImpl::ProcessMessage(CNode& pfrom, const std::string& msg_type, 
         }
         const auto enqueue_result = m_opts.paymaster->EnqueueNetworkDirectMessage(
             pfrom.GetId(), message_id, serialized_size, std::move(*direct_payload), now,
-            direct_group, canonical_netgroup, admission);
+            direct_group, canonical_netgroup, admission,
+            pfrom.ConnectedThroughNetwork() == NET_ONION);
         if (enqueue_result == DigiDollar::Paymaster::DirectEnqueueResult::ACCEPTED) {
             pfrom.m_direct_progress = DigiDollar::Paymaster::DirectNow();
         }

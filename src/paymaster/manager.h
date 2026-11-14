@@ -161,6 +161,9 @@ struct DirectMessage {
     /** A wallet authenticated this result against its own durable request.
      * Keep it within the existing inbox quotas until explicit consumption. */
     bool retained_result{false};
+    /** Trusted local transport observation at authenticated enqueue. Unknown
+     * is not proof of clearnet; this survives removal of the live CNode. */
+    std::optional<bool> arrived_via_onion;
 };
 
 struct OutboundDirectMessage {
@@ -275,6 +278,11 @@ public:
         int64_t peer_id, const uint256& message_id, size_t serialized_size,
         DirectPayload payload, int64_t now, uint64_t keyed_netgroup,
         std::vector<unsigned char> canonical_netgroup, DirectAdmissionClass admission);
+    DirectEnqueueResult EnqueueNetworkDirectMessage(
+        int64_t peer_id, const uint256& message_id, size_t serialized_size,
+        DirectPayload payload, int64_t now, uint64_t keyed_netgroup,
+        std::vector<unsigned char> canonical_netgroup, DirectAdmissionClass admission,
+        std::optional<bool> arrived_via_onion);
     /** Apply discovery flood limits before announcement signature and UTXO
      * validation. Provider admission is split out because its identity is only
      * available after the bounded message has been decoded.
@@ -317,6 +325,10 @@ public:
                                                    std::optional<uint64_t> keyed_netgroup = std::nullopt,
                                                    std::vector<unsigned char> canonical_netgroup = {},
                                                    DirectAdmissionClass admission = DirectAdmissionClass::REQUEST);
+    DirectEnqueueResult EnqueueDirectMessageResult(int64_t peer_id, const uint256& message_id,
+        size_t serialized_size, DirectPayload payload, int64_t now,
+        std::optional<uint64_t> keyed_netgroup, std::vector<unsigned char> canonical_netgroup,
+        DirectAdmissionClass admission, std::optional<bool> arrived_via_onion);
     std::vector<DirectMessage> TakeDirectMessages(size_t maximum);
     /** Remove only capacity requests addressed to one provider identity. */
     std::vector<DirectMessage> TakeCapacityRequests(const PaymasterId& provider_id,

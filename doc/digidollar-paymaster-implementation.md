@@ -40,6 +40,11 @@ total. Sweep uses spendable, unreserved inputs and the same authorization rules.
 
 ## Protocol sequence
 
+Authenticated Direct enqueue retains the local Core onion-transport
+classification. High-privacy recovery uses that observation, including for
+loopback onion forwarding and processing after disconnect. Unknown arrival
+classification defers locally; it is not evidence of a non-onion connection.
+
 1. Signed announcements enter a bounded directory. Clients filter amount,
    privacy, fee policy and local reliability information.
 2. A dedicated Direct connection authenticates the expected provider against

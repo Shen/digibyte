@@ -73,16 +73,17 @@ struct PaymasterChannelSetup : TestingSetup {
         return messages;
     }
 
-    std::unique_ptr<CNode> MakePeer(NodeId id, bool inbound, V2Transport& remote, const PaymasterId& provider)
+    std::unique_ptr<CNode> MakePeer(NodeId id, bool inbound, V2Transport& remote, const PaymasterId& provider,
+                                   std::optional<bool> onion_forward = std::nullopt)
     {
         in_addr address;
-        address.s_addr = htonl(0x01020304);
+        address.s_addr = htonl(onion_forward ? 0x7f000001 : 0x01020304);
         CNodeOptions options;
         options.use_v2transport = true;
         options.paymaster_listener = inbound;
         auto node = std::make_unique<CNode>(id, nullptr,
             CAddress{CService{address, 12024}, NODE_NETWORK}, id, 0, CAddress{}, "",
-            inbound ? ConnectionType::INBOUND : ConnectionType::PAYMASTER, false,
+            inbound ? ConnectionType::INBOUND : ConnectionType::PAYMASTER, onion_forward.value_or(false),
             std::move(options));
         for (int round = 0; round < 8; ++round) {
             BOOST_REQUIRE(Transfer(*node->m_transport, remote).empty());
@@ -852,6 +853,53 @@ BOOST_FIXTURE_TEST_CASE(channel_handler_provider_proof_precedes_all_responses, P
     BOOST_REQUIRE_EQUAL(response_messages.size(), 1);
     BOOST_CHECK_EQUAL(response_messages.front().m_type, NetMsgType::PMRESULT);
     m_node.peerman->FinalizeNode(*node);
+}
+
+BOOST_FIXTURE_TEST_CASE(channel_handler_retains_onion_forwarding_origin_after_disconnect, PaymasterChannelSetup)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    CKey identity;
+    identity.MakeNewKey(true);
+    const auto provider = GetPaymasterId(XOnlyPubKey{identity.GetPubKey()});
+    BOOST_REQUIRE(manager.TryBeginProviderWork("onion-arrival", provider, false));
+    BOOST_REQUIRE(manager.CompleteProviderStart("onion-arrival", provider));
+    manager.EndProviderWork("onion-arrival");
+    const CNetMsgMaker maker{::PROTOCOL_VERSION};
+    for (const bool onion : {false, true}) {
+        const NodeId id = onion ? 702 : 701;
+        V2Transport remote{id, true, SER_NETWORK, INIT_PROTO_VERSION};
+        auto node = MakePeer(id, true, remote, provider, onion);
+        BOOST_REQUIRE(static_cast<ConnmanTestMsg&>(*m_node.connman).AdmitPaymasterTestListener(*node));
+        BOOST_REQUIRE(node->addr.IsLocal());
+        BOOST_REQUIRE(!node->addr.IsTor());
+        BOOST_CHECK_EQUAL(node->ConnectedThroughNetwork() == NET_ONION, onion);
+        ChannelChallenge challenge;
+        challenge.genesis_hash = Params().GenesisBlock().GetHash();
+        challenge.provider_id = provider;
+        challenge.transport_session_id = *remote.GetInfo().session_id;
+        challenge.nonce = GetRandHash();
+        Receive(*node, remote, maker.Make(NetMsgType::PMAUTHREQ, challenge));
+        BOOST_REQUIRE_EQUAL(manager.TakeChannelChallenges(provider, 1, DirectNow()).size(), 1U);
+        BOOST_REQUIRE(manager.QueueChannelProof(id, Sign(challenge, identity), DirectNow()));
+        m_node.peerman->SendMessages(node.get());
+        Drain(*node, remote);
+        BOOST_REQUIRE(node->m_paymaster_negotiated);
+        PaymasterCapacityRequest request;
+        request.genesis_hash = Params().GenesisBlock().GetHash();
+        request.provider_id = provider;
+        request.request_id = "550e8400-e29b-41d4-a716-4466554400e1";
+        request.session_id = GetRandHash();
+        request.client_nonce = GetRandHash();
+        request.created_at = GetTime();
+        request.expires_at = request.created_at + 30;
+        Receive(*node, remote, maker.Make(NetMsgType::PMCAPREQ, request));
+        BOOST_REQUIRE(!node->fDisconnect);
+        m_node.peerman->FinalizeNode(*node);
+        const auto messages = manager.TakeDirectMessages(1);
+        BOOST_REQUIRE_EQUAL(messages.size(), 1U);
+        BOOST_REQUIRE(messages.front().arrived_via_onion.has_value());
+        BOOST_CHECK_EQUAL(*messages.front().arrived_via_onion, onion);
+    }
 }
 
 BOOST_FIXTURE_TEST_CASE(channel_handler_rejects_invalid_challenges_and_frames, PaymasterChannelSetup)
