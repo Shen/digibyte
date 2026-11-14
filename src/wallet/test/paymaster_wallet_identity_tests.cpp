@@ -3597,6 +3597,10 @@ void CheckCapacityProofReservationLifecycle(WalletTestingSetup& fixture, uint16_
     creating.vin.emplace_back(COutPoint{uint256::ONE, 9});
     creating.vout.emplace_back(20000000, identity.identity_script);
     creating.vout.emplace_back(0, identity.identity_script);
+    for (int slot = 0; slot < 3; ++slot) {
+        creating.vout.emplace_back(20000000, identity.identity_script);
+        creating.vout.emplace_back(0, identity.identity_script);
+    }
     const CTransactionRef creating_tx{MakeTransactionRef(std::move(creating))};
     {
         LOCK(m_wallet.cs_wallet);
@@ -3623,7 +3627,7 @@ void CheckCapacityProofReservationLifecycle(WalletTestingSetup& fixture, uint16_
     carrier.updated_at = 101;
 
     constexpr int64_t now{110};
-    const uint256 genesis{uint256S("a1")};
+    const uint256 genesis{Params().GenesisBlock().GetHash()};
     const uint256 reference_block{uint256S("a2")};
     PaymasterCapacityRequest request;
     request.version = version;
@@ -3696,7 +3700,8 @@ void CheckCapacityProofReservationLifecycle(WalletTestingSetup& fixture, uint16_
     BOOST_CHECK_EQUAL(error, "PAYMASTER_CAPACITY_DGB_PREVOUT_MISMATCH");
 
     ProviderPolicy policy;
-    policy.funding_models = FUNDING_MODEL_ALL;
+    // This request needs a carrier; sponsored-only fallback is a separate model.
+    policy.funding_models = FUNDING_MODEL_USER_PAID;
     policy.sponsorship_scope = SponsorshipScope::PUBLIC;
     policy.fee_rate_bps = 50;
     policy.min_payment = DDCents{100};
@@ -3720,6 +3725,20 @@ void CheckCapacityProofReservationLifecycle(WalletTestingSetup& fixture, uint16_
     BOOST_REQUIRE(SetPaymasterProviderSafetyPolicy(
         m_wallet, safety, 111, error));
     BOOST_REQUIRE(SetPaymasterProviderPoolEntries(m_wallet, {carrier, dgb}, error));
+
+    // Full readiness also requires admission inventory. Keep the operational
+    // reservation/expiry fixture below limited to its exact two resources.
+    std::vector<ProviderPoolEntry> readiness_pool{carrier, dgb};
+    for (uint32_t slot = 0; slot < 3; ++slot) {
+        auto admission_dgb = dgb;
+        admission_dgb.purpose = PoolPurpose::ADMISSION;
+        admission_dgb.outpoint.n = 2 + 2 * slot;
+        auto admission_carrier = carrier;
+        admission_carrier.purpose = PoolPurpose::ADMISSION;
+        admission_carrier.outpoint.n = 3 + 2 * slot;
+        readiness_pool.push_back(admission_dgb);
+        readiness_pool.push_back(admission_carrier);
+    }
 
     const std::vector<unsigned char> canonical_netgroup{
         5, 0x13, 0x37, 0x42, 0x56, 0x68, 0x79, 0x8a, 0x9b, 0xac, 0xbd};
@@ -3777,7 +3796,7 @@ void CheckCapacityProofReservationLifecycle(WalletTestingSetup& fixture, uint16_
             BOOST_REQUIRE(m_wallet.LockCoin(outpoint));
         }
         const auto before = GetMockableDatabase(m_wallet).m_records;
-        BOOST_CHECK_EQUAL(GetPaymasterProviderPoolReadiness(m_wallet, {carrier, dgb}, policy, 100, 1).complete_operational_slots, 0U);
+        BOOST_CHECK_EQUAL(GetPaymasterProviderPoolReadiness(m_wallet, readiness_pool, policy, 100, 1).complete_operational_slots, 0U);
         BOOST_CHECK(!ReservePaymasterOperationalSlot(m_wallet, reserved_request.client_nonce,
             true, 100, 1, 112, reserved, error));
         BOOST_CHECK_EQUAL(error, "PAYMASTER_OPERATIONAL_SLOT_MISSING");
@@ -3791,7 +3810,7 @@ void CheckCapacityProofReservationLifecycle(WalletTestingSetup& fixture, uint16_
             BOOST_REQUIRE(m_wallet.UnlockCoin(outpoint));
         }
     }
-    BOOST_CHECK_EQUAL(GetPaymasterProviderPoolReadiness(m_wallet, {carrier, dgb}, policy, 100, 1).complete_operational_slots, 1U);
+    BOOST_CHECK_EQUAL(GetPaymasterProviderPoolReadiness(m_wallet, readiness_pool, policy, 100, 1).complete_operational_slots, 1U);
     BOOST_REQUIRE_MESSAGE(ReserveAndBuildPaymasterCapacityProof(
                               m_wallet, identity, reserved_request, genesis,
                               reference_block, 100, 1, canonical_netgroup, 112,

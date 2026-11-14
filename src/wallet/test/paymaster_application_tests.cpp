@@ -1552,6 +1552,12 @@ BOOST_FIXTURE_TEST_CASE(concurrent_replenishment_retains_one_current_budget_plan
     policy.maximum_maintenance_fee_per_hour = DGBSatoshis{20000000};
     policy.maximum_maintenance_fee_per_day = DGBSatoshis{30000000};
     policy.updated_at = 1000;
+    // This operation consumes a previously approved policy/ledger pair; it
+    // must never initialize missing financial authority from a planning call.
+    ProviderMaintenanceLedger initial;
+    initial.accounting_time_high_water = GetTime();
+    BOOST_REQUIRE(WalletBatch{m_wallet.GetDatabase()}.WritePaymasterLiquidityPolicy(policy));
+    BOOST_REQUIRE(WalletBatch{m_wallet.GetDatabase()}.WritePaymasterMaintenanceLedger(initial));
     std::array<bool, 2> results{};
     std::array<std::string, 2> errors;
     std::array<std::thread, 2> workers;

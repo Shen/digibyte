@@ -6611,16 +6611,25 @@ BOOST_FIXTURE_TEST_CASE(identical_quote_retry_reuses_signed_response,
     }
 }
 
+struct QuoteServiceProcessingSetup : QuoteRequestProcessingSetup {
+    QuoteServiceProcessingSetup() : QuoteRequestProcessingSetup{0, DGBSatoshis{500}, true, COIN} {}
+};
+
 BOOST_FIXTURE_TEST_CASE(automatic_quote_rejection_allows_following_work,
-                        QuoteRequestProcessingSetup)
+                        QuoteServiceProcessingSetup)
 {
+    std::string setup_error;
+    const auto liquidity = paymaster_app::SuggestedLiquidityPolicy(
+        paymaster_app::GetProviderReadiness(wallet, context), GetTime());
+    BOOST_REQUIRE_MESSAGE(SetPaymasterProviderLiquidityPolicy(wallet, liquidity, GetTime(), setup_error), setup_error);
     environment.settings.operation_mode = ProviderOperationMode::AUTOMATIC;
     BOOST_REQUIRE(WalletBatch{wallet.GetDatabase()}.WritePaymasterSettings(environment.settings));
     // The reserved slot is a pending continuation, so the actual service loop
     // must process existing requests/submits while maintenance waits for it.
     RunPaymasterProviderServiceCycle(context, wallet);
     const auto initial_status = manager.GetProviderServiceStatus(wallet.GetName());
-    BOOST_REQUIRE(initial_status.state == ProviderServiceState::WAITING_FOR_LIQUIDITY_CONFIRMATION);
+    BOOST_REQUIRE_MESSAGE(initial_status.state == ProviderServiceState::WAITING_FOR_LIQUIDITY_CONFIRMATION,
+        "state=" << static_cast<int>(initial_status.state) << " error=" << initial_status.last_error);
 
     EnqueueQuote(manager, ConflictingRequest());
     PaymasterSubmit stale;
