@@ -4,6 +4,21 @@ There is **no complete current-revision release certification** in this record.
 The candidate below and historical checkpoints identify actual verification;
 implemented behavior alone does not establish release acceptance.
 
+## Independent review follow-up (2026-11-15)
+
+Baseline: `027ece20ef158d8034c604b633fb4ad69f4d0fed`. Exact-final preflight now
+defers incomplete index/tip observations before recording a permanent conflict.
+The real-index delayed-notification regression failed against retained baseline
+product objects and passes after freshly compiling `paymasterprovider.cpp`,
+`paymasterapplication.cpp` and the wallet-security test unit: **1 case, 347
+assertions, exit 0**, including same-height reorganization and unchanged wallet
+rows/reservations while waiting. Native partial-link SHA256:
+`8ef97598a0f47d4ba8d9f53fcd17816eaac1eee054cba44e4876ba0650ea1489`.
+Commands, source/object hashes and complete failed/passing logs are retained in
+local ignored `.ai/implement-review-027/`. Retained dependencies lack complete
+transitive rebuild provenance. Full product/platform builds, full suites,
+sanitizers and Tidy remain operator/release checks.
+
 ## Exact-final relay, checkpoint recovery and shared setup (2026-11-15)
 
 Review baseline: `3b9e5c5d6b2c657996be8926e9c2ea794d34b040`; implementation

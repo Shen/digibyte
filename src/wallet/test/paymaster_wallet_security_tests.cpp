@@ -36,6 +36,7 @@
 #include <streams.h>
 #include <test/util/index.h>
 #include <test/util/net.h>
+#include <test/util/validation.h>
 #include <wallet/paymasterintegration.h>
 #include <test/util/mining.h>
 #include <txmempool.h>
@@ -7455,7 +7456,8 @@ static void ExerciseFirstProviderRecoveryCommit(node::NodeContext& node,
     }
 }
 
-static void ExerciseDurablePaymentExecutor(wallet::CWallet& client, ProviderQuoteFixture& original,
+static void ExerciseDurablePaymentExecutor(TestChain100Setup& chain_setup,
+    wallet::CWallet& client, ProviderQuoteFixture& original,
     PaymentSession session, const PaymasterResult& result, const CMutableTransaction& final_transaction,
     int64_t now, WalletContext& context)
 {
@@ -7939,6 +7941,60 @@ static void ExerciseDurablePaymentExecutor(wallet::CWallet& client, ProviderQuot
     BOOST_CHECK(retained_attempt.final_transaction == bytes);
     BOOST_REQUIRE(WalletBatch{reopened.GetDatabase()}.ReadPaymasterClientFeeLedger(fees));
     BOOST_CHECK(SerializePaymasterSecurityObject(fees) == spent_fees);
+
+    // A synced index can still have pending BlockConnected callbacks. Mine
+    // the real final while withholding only its index notification: its inputs
+    // are spent, but neither pool nor the stale index can locate it yet.
+    IndexWaitSynced(*g_txindex);
+    struct PausedIndex {
+        TxIndex& index;
+        explicit PausedIndex(TxIndex& value) : index{value}
+        {
+            UnregisterValidationInterface(&index);
+            SyncWithValidationInterfaceQueue();
+        }
+        ~PausedIndex() { RegisterValidationInterface(&index); }
+    } paused{*g_txindex};
+    const auto index_before = g_txindex->GetSummary();
+    const auto confirmed = std::make_shared<CBlock>(
+        chain_setup.CreateAndProcessBlock({final_transaction}, CScript() << OP_TRUE));
+    const auto* confirmed_index = WITH_LOCK(cs_main,
+        return client.chain().context()->chainman->ActiveChain().Tip());
+    BOOST_REQUIRE(g_txindex->GetSummary().synced);
+    BOOST_CHECK(g_txindex->GetSummary().best_block_hash == index_before.best_block_hash);
+    BOOST_CHECK(!paymaster_app::ProviderTxIndexIsReady(client, false));
+    const auto before_observation = database.m_records;
+    BOOST_CHECK_EXCEPTION(paymaster_app::ExecuteDurableClientFinal(client, final.GetHash(), now + 5,
+        nullptr, ExactFinalTxIndexMode::NONBLOCKING), ApplicationError,
+        [](const ApplicationError& failure) {
+            return failure.kind == ErrorKind::WALLET && failure.code == "PAYMASTER_TXINDEX_NOT_READY";
+        });
+    BOOST_CHECK(database.m_records == before_observation);
+    BOOST_CHECK(IsPaymasterInputReserved(client, session.user_inputs.front()));
+    ValidationInterfaceTest::BlockConnected(ChainstateRole::NORMAL, *g_txindex, confirmed, confirmed_index);
+    BOOST_REQUIRE(paymaster_app::ProviderTxIndexIsReady(client, false));
+    const auto confirmed_execution = paymaster_app::ExecuteDurableClientFinal(client,
+        final.GetHash(), now + 6, nullptr, ExactFinalTxIndexMode::NONBLOCKING);
+    BOOST_CHECK(confirmed_execution.already_confirmed);
+    BOOST_REQUIRE(WalletBatch{client.GetDatabase()}.ReadPaymasterClientFeeLedger(fees));
+    BOOST_CHECK(SerializePaymasterSecurityObject(fees) == spent_fees);
+
+    // Equal heights do not make an index on the former branch current.
+    auto& chainstate = client.chain().context()->chainman->ActiveChainstate();
+    BlockValidationState invalidated;
+    BOOST_REQUIRE(chainstate.InvalidateBlock(invalidated, const_cast<CBlockIndex*>(confirmed_index)));
+    const auto replacement = std::make_shared<CBlock>(
+        chain_setup.CreateAndProcessBlock({final_transaction}, CScript() << OP_2));
+    const auto* replacement_index = WITH_LOCK(cs_main,
+        return client.chain().context()->chainman->ActiveChain().Tip());
+    BOOST_REQUIRE_EQUAL(replacement_index->nHeight, g_txindex->GetSummary().best_block_height);
+    BOOST_CHECK(replacement_index->GetBlockHash() != g_txindex->GetSummary().best_block_hash);
+    ExactFinalTransactionPreflight observation;
+    BOOST_CHECK(!PreflightExactPaymasterFinalTransaction(client, MakeTransactionRef(final_transaction),
+        ExactFinalTxIndexMode::NONBLOCKING, observation, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_TXINDEX_NOT_READY");
+    ValidationInterfaceTest::BlockConnected(ChainstateRole::NORMAL, *g_txindex, replacement, replacement_index);
+    BOOST_REQUIRE(paymaster_app::ProviderTxIndexIsReady(client, false));
 }
 
 static void ExerciseClientRecoveryResult(ClientRecoveryReadSetup& setup, bool confirmed_before_result,
@@ -8123,7 +8179,7 @@ static void ExerciseClientRecoveryResult(ClientRecoveryReadSetup& setup, bool co
                 BOOST_REQUIRE(client.AddToWallet(minted.vtx.at(1),
                     TxStateConfirmed{minted.GetHash(), mint_height, 1}));
             }
-            ExerciseDurablePaymentExecutor(client, original, session, unused_result, unused_final, now, context);
+            ExerciseDurablePaymentExecutor(setup, client, original, session, unused_result, unused_final, now, context);
             return;
         }
         attempt.state = AttemptState::USER_SIGNED;

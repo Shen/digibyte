@@ -760,6 +760,11 @@ not replace the full chainstate validation or the checks immediately before sign
 Automatic provider execution and durable-commit broadcast preflights never wait
 for transaction-index notifications on the shared validation scheduler. A tip
 change after the pre-commit check must not make the scheduler wait on itself.
+`paymaster_app::ProviderTxIndexIsReady` compares the index height and hash with
+the active tip, including same-height reorganizations. Exact-final preflight
+checks readiness again after mempool validation and checks the observed tip on
+both success and failure. Incomplete observations wait without recording a
+permanent client conflict or changing reservations.
 
 The generic `qt/walletasync.*` queue admits two concurrent pure reads. A mutation
 waits for earlier reads and blocks subsequent work until completion. Callers

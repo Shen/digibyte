@@ -1008,6 +1008,8 @@ and loaded-wallet lifetime handling.
 - Canonical exact-final preflight alone issues `ExactFinalTransactionProof`
   (`src/paymaster/validation.h`), bound to full transaction/witness, chainstate
   and observed tip. Historical spent-prevout reconstruction requires that proof.
+  `paymaster_app::ProviderTxIndexIsReady` in `wallet/paymasterprovider.*` is the
+  common active-tip hash/height check for blocking and nonblocking callers.
 - Wallet-specific provider proof construction, announcement generation,
   operational slot reservation, and policy/pool readiness integration.
 - Persists and validates wallet-local liquidity policy and maintenance-ledger

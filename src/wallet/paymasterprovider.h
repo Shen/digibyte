@@ -102,6 +102,10 @@ bool PreflightExactPaymasterFinalTransaction(
     std::string& error);
 
 namespace paymaster_app {
+/** Require the index to match the current active tip, including its hash.
+ * Nonblocking callers never drain validation callbacks on the scheduler. */
+bool ProviderTxIndexIsReady(CWallet& wallet, bool wait_for_sync);
+
 struct ClientFinalExecutionResult {
     CTransactionRef transaction;
     bool already_confirmed{false};

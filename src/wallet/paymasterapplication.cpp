@@ -241,29 +241,7 @@ bool AutomaticProviderStateIsSynchronized(CWallet& wallet)
     }
     if (wallet_height != chain_tip->height || wallet_tip != chain_tip->hash) return false;
 
-    if (!g_txindex) return false;
-    const IndexSummary txindex = g_txindex->GetSummary();
-    if (!txindex.synced || txindex.best_block_height != chain_tip->height ||
-        txindex.best_block_hash != chain_tip->hash) {
-        return false;
-    }
-
-    const CBlockLocator current_tip = wallet.chain().getTipLocator();
-    return !current_tip.vHave.empty() && current_tip.vHave.front() == chain_tip->hash;
-}
-
-bool ProviderTxIndexIsReady(CWallet& wallet, bool wait_for_sync)
-{
-    if (!g_txindex) return false;
-    if (wait_for_sync) return g_txindex->BlockUntilSyncedToCurrentChain();
-
-    const auto chain_tip = ResolvePaymasterActiveTip(wallet.chain(), wallet.chain().getTipLocator());
-    if (!chain_tip) return false;
-    const IndexSummary txindex = g_txindex->GetSummary();
-    if (!txindex.synced || txindex.best_block_height != chain_tip->height ||
-        txindex.best_block_hash != chain_tip->hash) {
-        return false;
-    }
+    if (!ProviderTxIndexIsReady(wallet, /*wait_for_sync=*/false)) return false;
 
     const CBlockLocator current_tip = wallet.chain().getTipLocator();
     return !current_tip.vHave.empty() && current_tip.vHave.front() == chain_tip->hash;

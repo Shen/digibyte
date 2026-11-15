@@ -342,10 +342,7 @@ bool PreflightExactPaymasterFinalTransactionImpl(
     // Wallet loading must never wait for the transaction index. The periodic
     // wallet task retries durable commits after the background index has
     // caught up.
-    const bool txindex_ready =
-        g_txindex &&
-        (txindex_mode == ExactFinalTxIndexMode::WAIT_FOR_SYNC ? g_txindex->BlockUntilSyncedToCurrentChain() : g_txindex->GetSummary().synced);
-    if (!txindex_ready) {
+    if (!paymaster_app::ProviderTxIndexIsReady(wallet, txindex_mode == ExactFinalTxIndexMode::WAIT_FOR_SYNC)) {
         error = "PAYMASTER_TXINDEX_NOT_READY";
         return false;
     }
@@ -403,6 +400,12 @@ bool PreflightExactPaymasterFinalTransactionImpl(
     const MempoolAcceptResult preflight = WITH_LOCK(
         ::cs_main,
         return node->chainman->ProcessTransaction(transaction, /*test_accept=*/true));
+    // An index notification may lag a block that spent these inputs. Recheck
+    // before interpreting absence or rejection as a stable transaction result.
+    if (!paymaster_app::ProviderTxIndexIsReady(wallet, /*wait_for_sync=*/false)) {
+        error = "PAYMASTER_TXINDEX_NOT_READY";
+        return false;
+    }
     if (preflight.m_result_type == MempoolAcceptResult::ResultType::VALID) {
         return true;
     }
@@ -617,17 +620,18 @@ public:
             return tip ? tip->GetBlockHash() : uint256{};
         };
         const uint256 before = tip_hash();
-        if (!wallet::PreflightExactPaymasterFinalTransactionImpl(
-                wallet, transaction, txindex_mode, result, error)) return false;
+        const bool valid = wallet::PreflightExactPaymasterFinalTransactionImpl(
+            wallet, transaction, txindex_mode, result, error);
+        // A changed tip invalidates negative observations too. Never hold
+        // cs_main across the preflight's optional index wait.
+        const uint256 after = tip_hash();
+        if (before.IsNull() || before != after) {
+            result = {};
+            error = "PAYMASTER_EXACT_FINAL_PROOF_STALE";
+            return false;
+        }
+        if (!valid) return false;
         if (result.presence != wallet::ExactFinalTransactionPresence::NONE) {
-            // Do not hold cs_main across the preflight's possible index wait.
-            // A changed chain observation requires a fresh canonical preflight.
-            const uint256 after = tip_hash();
-            if (before.IsNull() || before != after) {
-                result = {};
-                error = "PAYMASTER_EXACT_FINAL_PROOF_STALE";
-                return false;
-            }
             result.final_proof = ExactFinalTransactionProof{transaction, *node->chainman, after};
         }
         return true;
@@ -636,6 +640,19 @@ public:
 } // namespace DigiDollar::Paymaster
 
 namespace wallet {
+
+bool paymaster_app::ProviderTxIndexIsReady(CWallet& wallet, bool wait_for_sync)
+{
+    if (!g_txindex || (wait_for_sync && !g_txindex->BlockUntilSyncedToCurrentChain())) return false;
+    const auto* node = wallet.chain().context();
+    if (!node || !node->chainman) return false;
+    LOCK(cs_main);
+    const auto* tip = node->chainman->ActiveChain().Tip();
+    if (!tip) return false;
+    const IndexSummary index = g_txindex->GetSummary();
+    return index.synced && index.best_block_height == tip->nHeight &&
+           index.best_block_hash == tip->GetBlockHash();
+}
 
 bool PreflightExactPaymasterFinalTransaction(
     CWallet& wallet,
