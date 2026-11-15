@@ -20,6 +20,7 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include <QObject>
@@ -248,8 +249,11 @@ public:
     // Get locked collateral amount
     CAmount getLockedCollateral() const;
 
-    // Get available DGB balance for collateral
+    //! Legacy ownership display; spending checks use getSpendableDGBBalance.
     CAmount getAvailableDGBBalance() const;
+
+    //! Cached ordinary DGB availability; unknown is distinct from zero.
+    std::optional<CAmount> getSpendableDGBBalance() const;
 
     //! Ordinary DGB ownership breakdown, using the shared display snapshot.
     QString getDGBBalanceSummary(bool include_available = true) const;

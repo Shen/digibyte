@@ -607,6 +607,8 @@ void WalletTests::dgbBalanceBreakdown()
     model.updateTransaction();
     model.pollBalanceChanged();
     QTRY_COMPARE(model.getCachedBalance().spendable.paymaster_reserved, COIN);
+    QVERIFY(model.getSpendableDGBBalance().has_value());
+    QCOMPARE(*model.getSpendableDGBBalance(), owned.balance - 3 * COIN);
     auto balances = model.getCachedBalance();
     QCOMPARE(balances.balance, owned.balance);
     QCOMPARE(balances.spendable.other_unavailable, 2 * COIN);
@@ -688,13 +690,18 @@ void WalletTests::dgbBalanceBreakdown()
 
     // Corrupt safety data keeps ownership readable, but availability is unknown
     // on all three surfaces. It must not be displayed as an empty/free pool.
+    std::vector<ProviderPoolEntry> intact_pool;
+    QVERIFY(wallet::WalletBatch{wallet->GetDatabase()}.ReadPaymasterProviderPool(intact_pool));
     QVERIFY(wallet->GetDatabase().MakeBatch()->Write(std::string{wallet::DBKeys::PAYMASTER_PROVIDER_POOL}, std::string{"corrupt"}));
     model.updateTransaction();
     QTRY_VERIFY(!model.getCachedBalance().spendable.valid);
+    QVERIFY(!model.getSpendableDGBBalance().has_value());
     QCOMPARE(model.getCachedBalance().balance, owned.balance);
     QCOMPARE(overview.findChild<QLabel*>("labelBalance")->text(), QStringLiteral("Unavailable"));
     QCOMPARE(gui.sendCoinsDialog.findChild<QLabel*>("labelBalance")->text(), QStringLiteral("Unavailable"));
     QVERIFY(coins.findChild<QLabel*>("labelWalletBalances")->text().contains("Availability is unknown"));
+    QVERIFY(!wallet::WalletBatch{wallet->GetDatabase()}.WritePaymasterProviderPool({}));
+    QVERIFY(wallet->GetDatabase().MakeBatch()->Write(std::string{wallet::DBKeys::PAYMASTER_PROVIDER_POOL}, intact_pool));
     QVERIFY(wallet::WalletBatch{wallet->GetDatabase()}.WritePaymasterProviderPool({}));
     model.updateTransaction();
     QTRY_VERIFY(model.getCachedBalance().spendable.valid);

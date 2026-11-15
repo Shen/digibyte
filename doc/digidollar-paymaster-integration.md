@@ -289,6 +289,13 @@ entered amount. Unknown is not zero. Actual fee affordability is separate:
 the entire maximum fee ceiling need not be held for a cheaper offer. Excluded
 cards show their reason; counts, warnings and send eligibility must agree.
 Own-DGB and automatic fallback retain their respective funding semantics.
+For DGB fee funding the form uses Core's cached available balance, excluding
+protected Paymaster reserves and manual locks. Unknown DGB availability pauses
+new Own-DGB/AUTO preparation without discarding the selected offer; a known zero
+keeps the exact Paymaster provider/offer binding. Availability-only changes update
+the fee summary and Send eligibility. Existing signed orders retain their terms.
+A positive cached DGB balance does not prove fee sufficiency: AUTO also retains
+the chosen fallback pair while Core checks the exact fee inputs.
 
 Recommendation identifies the cheapest eligible offer within selection policy,
 subject to local reliability handling. The countdown is announcement expiry,

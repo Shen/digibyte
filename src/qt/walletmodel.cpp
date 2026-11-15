@@ -912,7 +912,12 @@ WalletModel::DigiDollarMintResult WalletModel::mintDigiDollar(CAmount ddAmount, 
 
     // Calculate required collateral
     CAmount requiredCollateral = calculateRequiredCollateral(ddAmount, lockTier);
-    CAmount availableDGBBalance = getAvailableDGBBalance();
+    const auto available = getSpendableDGBBalance();
+    if (!available) {
+        return DigiDollarMintResult(TransactionCreationFailed, "", "",
+            "Available DGB balance could not be read. Wait for a valid wallet balance before minting.");
+    }
+    const CAmount availableDGBBalance = *available;
 
     LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Qt: Required collateral: %d sats (%.8f DGB)\n",
               requiredCollateral, requiredCollateral / 100000000.0);
@@ -1523,9 +1528,16 @@ CAmount WalletModel::getLockedCollateral() const
 
 CAmount WalletModel::getAvailableDGBBalance() const
 {
-    // Get the regular DGB balance from the wallet
+    // Retain the legacy ownership projection for existing display callers.
     const interfaces::WalletBalances& balances = getCachedBalance();
     return balances.balance;
+}
+
+std::optional<CAmount> WalletModel::getSpendableDGBBalance() const
+{
+    const auto& balances = getCachedBalance();
+    if (!balances.spendable.valid) return std::nullopt;
+    return balances.spendable.available;
 }
 
 bool WalletModel::validateDigiDollarAddress(const QString& address) const

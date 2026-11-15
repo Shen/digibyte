@@ -1212,6 +1212,10 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
 
 ### src/qt/walletmodel.cpp/h
 - `WalletModel::getDigiDollarMintWalletError()` → exposes the shared read-only mint capability check to Qt; the mint widget calls it before confirmation and construction checks it again.
+- `WalletModel::getSpendableDGBBalance()` → optional projection of the cached
+  Core DGB availability snapshot for fee composition and mint collateral
+  preflight; protected/manual locks are excluded and unknown stays distinct
+  from zero. `dgbBalanceChanged` refreshes fee controls on availability changes.
 
 ### src/qt/digidollartab.cpp/h
 - `DigiDollarTab` → main DD tab widget containing the activation overlay and 7

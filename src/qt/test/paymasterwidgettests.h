@@ -160,6 +160,7 @@ private Q_SLOTS:
     void paymasterClientPreparationRequiresCurrentOffer_data();
     void paymasterClientPreparationRequiresCurrentOffer();
     void paymasterClientFundingBalanceChanges();
+    void paymasterClientAvailableDgbControlsAutomaticBinding();
     void paymasterFeeAmountsAndPercentages();
     void paymasterOfferPolicyTypedValues_data();
     void paymasterOfferPolicyTypedValues();

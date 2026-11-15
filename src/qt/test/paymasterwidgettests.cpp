@@ -51,6 +51,7 @@
 #include <wallet/paymasterclientview.h>
 #include <wallet/rpc/paymaster_internal.h>
 #include <wallet/scriptpubkeyman.h>
+#include <wallet/spend.h>
 #include <wallet/test/paymaster_chain.h>
 #include <wallet/test/util.h>
 #include <wallet/wallet.h>
@@ -9716,6 +9717,124 @@ void PaymasterWidgetTests::paymasterClientPreparationRequiresCurrentOffer()
     QCOMPARE(unexpected, 0);
 }
 
+void PaymasterWidgetTests::paymasterClientAvailableDgbControlsAutomaticBinding()
+{
+    using namespace DigiDollar::Paymaster;
+    TestChain100Setup test;
+    auto loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = loader.get();
+    m_node.setContext(&test.m_node);
+    auto wallet = SetupDescriptorsWallet(m_node, test, "qt-available-dgb");
+    {
+        // Display fixture: one owned taproot output, suitable for both a real
+        // provider pool record and an independent manual lock. No signing.
+        LOCK(wallet->cs_wallet);
+        wallet->mapWallet.clear();
+        wallet->MarkDirty();
+        const auto address = wallet->GetNewDestination(OutputType::BECH32M, "available DGB");
+        QVERIFY(address);
+        CMutableTransaction funding;
+        funding.vin.emplace_back(COutPoint{uint256::ONE, 0});
+        funding.vout.emplace_back(COIN, GetScriptForDestination(*address));
+        QVERIFY(wallet->AddToWallet(MakeTransactionRef(funding),
+            wallet::TxStateConfirmed{wallet->GetLastBlockHash(), wallet->GetLastBlockHeight(), 0}));
+    }
+    DigiDollarMiniGUI gui(m_node);
+    gui.initModelForWallet(m_node, wallet);
+    auto& model = *gui.walletModel;
+    DigiDollarSendWidget form(gui.platformStyle.get());
+    auto* client = form.findChild<PaymasterSendWidget*>();
+    int mutations{0};
+    client->setPaymasterRpcExecutorForTesting([&](const std::string& command, const UniValue&) {
+        if (command == "getpaymasterclientsafetystatus") return PaymasterClientSafetyStatus();
+        if (command == "listdigidollarsendsessions") return EmptyPaymasterSessionList();
+        if (command == "getpaymasteroffers") return PaymasterPublicOffers();
+        ++mutations;
+        return UniValue{};
+    });
+    form.setWalletModel(&model);
+    model.pollBalanceChanged();
+    QTRY_VERIFY(client->hasOwnDgbForFees());
+    const CAmount ownership = model.getCachedBalance().balance;
+    QVERIFY(ownership > 0);
+    const QString recipient = QStringLiteral("RD3HXjF4ibdKEAHNwmv4AnwHWKsb2PgXsiMN5mtm5ao3XJmKLATx");
+    form.findChild<QLineEdit*>("addressEdit")->setText(recipient);
+    form.findChild<QLineEdit*>("amountEdit")->setText("3.25");
+    form.setAvailableDigiDollarBalanceForTesting(1000);
+    auto* mode = form.findChild<QComboBox*>("paymasterFeeMode");
+    mode->setCurrentIndex(mode->findData(QStringLiteral("auto")));
+    std::vector<ProviderPoolEntry> pool;
+    {
+        LOCK(wallet->cs_wallet);
+        for (const auto& coin : wallet::AvailableCoins(*wallet).All()) {
+            ProviderPoolEntry entry;
+            entry.outpoint = coin.outpoint;
+            entry.script_pub_key = coin.txout.scriptPubKey;
+            entry.dgb_value = DGBSatoshis{coin.txout.nValue};
+            entry.updated_at = GetTime();
+            pool.push_back(entry);
+        }
+    }
+    QVERIFY(!pool.empty());
+    for (bool manual : {false, true}) {
+        if (manual) {
+            for (const auto& entry : pool) QVERIFY(model.wallet().lockCoin(entry.outpoint, false));
+        } else {
+            QVERIFY(wallet::WalletBatch{wallet->GetDatabase()}.WritePaymasterProviderPool(pool));
+        }
+        model.updateTransaction();
+        model.pollBalanceChanged();
+        QTRY_VERIFY(model.getSpendableDGBBalance() && *model.getSpendableDGBBalance() == 0);
+        QCOMPARE(model.getCachedBalance().balance, ownership);
+        QVERIFY(!client->hasOwnDgbForFees());
+        QVERIFY(client->preparesPaymasterPayment());
+        QVERIFY(QMetaObject::invokeMethod(client, "refreshPaymasterOffers", Qt::DirectConnection));
+        QTRY_VERIFY(client->hasFeeFundingCandidate());
+        const QString provider = client->m_selectedOfferProvider;
+        const QString offer = client->m_selectedOfferId;
+        QVERIFY(!provider.isEmpty() && !offer.isEmpty());
+        const auto params = client->buildPaymasterSendParams(recipient, 325);
+        QCOMPARE(QString::fromStdString(params[6].find_value("fee_mode").get_str()), QStringLiteral("paymaster"));
+        QCOMPARE(QString::fromStdString(params[6].find_value("preferred_provider_id").get_str()), provider);
+        QCOMPARE(QString::fromStdString(params[6].find_value("preferred_offer_id").get_str()), offer);
+        QVERIFY(form.findChild<QLabel*>("feeFundingSummary")->toolTip().contains("0.00000000"));
+        client->setPrivacy(true);
+        QVERIFY(form.findChild<QLabel*>("feeFundingSummary")->toolTip().isEmpty());
+        client->setPrivacy(false);
+
+        std::vector<ProviderPoolEntry> intact_pool;
+        QVERIFY(wallet::WalletBatch{wallet->GetDatabase()}.ReadPaymasterProviderPool(intact_pool));
+        QVERIFY(wallet->GetDatabase().MakeBatch()->Write(std::string{wallet::DBKeys::PAYMASTER_PROVIDER_POOL}, std::string{"corrupt"}));
+        model.updateTransaction();
+        model.pollBalanceChanged();
+        QTRY_VERIFY(!model.getSpendableDGBBalance());
+        QVERIFY(!client->hasOwnDgbForFees());
+        QVERIFY(!client->preparesPaymasterPayment());
+        QVERIFY(!client->hasFeeFundingCandidate());
+        QVERIFY(!form.findChild<QPushButton*>("sendButton")->isEnabled());
+        QVERIFY(client->feeFundingProblem().contains("unknown"));
+        QCOMPARE(client->m_selectedOfferProvider, provider);
+        QCOMPARE(client->m_selectedOfferId, offer);
+        client->send(recipient, 325);
+        QCOMPARE(mutations, 0);
+        QVERIFY(client->m_send.view().requestId.isEmpty());
+        QVERIFY(!wallet::WalletBatch{wallet->GetDatabase()}.WritePaymasterProviderPool({}));
+        // Undo the injected corruption exactly; normal APIs must not overwrite
+        // unreadable financial state to make a display test recover.
+        QVERIFY(wallet->GetDatabase().MakeBatch()->Write(std::string{wallet::DBKeys::PAYMASTER_PROVIDER_POOL}, intact_pool));
+        QVERIFY(wallet::WalletBatch{wallet->GetDatabase()}.WritePaymasterProviderPool({}));
+        if (manual) for (const auto& entry : pool) QVERIFY(model.wallet().unlockCoin(entry.outpoint));
+        model.updateTransaction();
+        model.pollBalanceChanged();
+        QTRY_VERIFY(client->hasOwnDgbForFees());
+        const auto automatic = client->buildPaymasterSendParams(recipient, 325);
+        QCOMPARE(QString::fromStdString(automatic[6].find_value("fee_mode").get_str()), QStringLiteral("auto"));
+        QCOMPARE(QString::fromStdString(automatic[6].find_value("preferred_provider_id").get_str()), provider);
+        QCOMPARE(QString::fromStdString(automatic[6].find_value("preferred_offer_id").get_str()), offer);
+    }
+    QCOMPARE(mutations, 0);
+}
+
 void PaymasterWidgetTests::paymasterClientFundingBalanceChanges()
 {
     TestChain100Setup test;
@@ -9751,7 +9870,7 @@ void PaymasterWidgetTests::paymasterClientFundingBalanceChanges()
     QVERIFY(!client->hasOwnDgbForFees()); // Balance not loaded yet: fail closed.
     select("dgb");
     QVERIFY(!send->isEnabled());
-    QVERIFY(send->toolTip().contains("No spendable DGB"));
+    QVERIFY(send->toolTip().contains("Available DGB balance is unknown"));
     QVERIFY(QMetaObject::invokeMethod(&form, "onSendClicked", Qt::DirectConnection));
     QCOMPARE(dialogs, 0); // A direct call cannot bypass the zero-DGB guard.
     select("auto");

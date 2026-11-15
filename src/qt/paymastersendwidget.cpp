@@ -2012,16 +2012,19 @@ bool PaymasterSendWidget::hasOwnDgbForFees() const
 {
     // This cheap compose check uses the wallet's cached spendable balance.
     // Core still decides whether suitable inputs cover the actual network fee.
-    return m_walletModel && m_walletModel->getAvailableDGBBalance() > 0;
+    const auto available = m_walletModel ? m_walletModel->getSpendableDGBBalance() : std::nullopt;
+    return available && *available > 0;
 }
 
 bool PaymasterSendWidget::preparesPaymasterPayment() const
 {
-    return paymasterModeSelected() && (paymasterOnlySelected() || !hasOwnDgbForFees());
+    const auto available = m_walletModel ? m_walletModel->getSpendableDGBBalance() : std::nullopt;
+    return paymasterModeSelected() && (paymasterOnlySelected() || (available && *available == 0));
 }
 
 bool PaymasterSendWidget::hasFeeFundingCandidate() const
 {
+    if (!paymasterOnlySelected() && (!m_walletModel || !m_walletModel->getSpendableDGBBalance())) return false;
     return m_walletModel && ((!paymasterOnlySelected() && hasOwnDgbForFees()) ||
                             (paymasterModeSelected() && hasMatchingPaymasterOffer() && paymentAmountProblem().isEmpty()));
 }
@@ -2090,6 +2093,9 @@ QString PaymasterSendWidget::offerFundingProblem(qint64 total_cents) const
 
 QString PaymasterSendWidget::feeFundingProblem() const
 {
+    if (!paymasterOnlySelected() && m_walletModel && !m_walletModel->getSpendableDGBBalance()) {
+        return DigiDollarSendWidget::tr("Available DGB balance is unknown. Wait for a valid wallet balance before preparing this payment.");
+    }
     const QString problem = paymentAmountProblem();
     if (!problem.isEmpty()) return problem;
     if (paymasterModeSelected() && m_offerCheckState == OfferCheckState::UNAVAILABLE) {
@@ -2956,7 +2962,9 @@ UniValue PaymasterSendWidget::buildPaymasterSendParams(const QString& address, C
     options.pushKV("maximum_provider_attempts", m_maxAttemptsSpin->value());
     options.pushKV("privacy", m_privacyCombo->currentData().toString().toStdString());
     options.pushKV("selection", m_selectionCombo->currentData().toString().toStdString());
-    if (hasMatchingPaymasterOffer() && preparesPaymasterPayment() && !m_selectedOfferProvider.isEmpty()) {
+    // A positive cached balance is only a fee-input candidate. Preserve the
+    // chosen fallback pair while Core checks exact AUTO funding sufficiency.
+    if (hasMatchingPaymasterOffer() && paymasterModeSelected() && !m_selectedOfferProvider.isEmpty()) {
         options.pushKV("preferred_provider_id", m_selectedOfferProvider.toStdString());
         options.pushKV("preferred_offer_id", m_selectedOfferId.toStdString());
     }
@@ -4807,15 +4815,23 @@ void PaymasterSendWidget::updateFeeDisplay()
         : DigiDollarSendWidget::tr("Exact offer required; never more than %1").arg(maximum_fee);
     QString dgb_status;
     if (m_walletModel) {
-        const CAmount dgb_balance = m_walletModel->getAvailableDGBBalance();
-        const QString readable_balance = PaymasterFormatDGB(dgb_balance);
-        dgb_status = DigiDollarSendWidget::tr("Available DGB: %1 DGB").arg(readable_balance);
-        if (dgb_balance < COIN / 10) {
-            dgb_status += DigiDollarSendWidget::tr(" — currently below the estimated network fee");
+        const auto available = m_walletModel->getSpendableDGBBalance();
+        if (available) {
+            dgb_status = DigiDollarSendWidget::tr("Available DGB: %1 DGB").arg(PaymasterFormatDGB(*available));
+            if (*available < COIN / 10) {
+                dgb_status += DigiDollarSendWidget::tr(" — currently below the estimated network fee");
+            }
+        } else {
+            dgb_status = DigiDollarSendWidget::tr("Available DGB balance is unknown.");
         }
     }
 
-    if (mode == QStringLiteral("dgb")) {
+    if (!paymasterOnlySelected() && m_walletModel && !m_walletModel->getSpendableDGBBalance()) {
+        m_feeValue->setText(DigiDollarSendWidget::tr("Unavailable"));
+        m_feeLabel->setText(DigiDollarSendWidget::tr("Fee funding:"));
+        m_feeModeExplanation->setText(feeFundingProblem());
+        m_feeSummary->setText(dgb_status);
+    } else if (mode == QStringLiteral("dgb")) {
         m_feeValue->setText(QStringLiteral("~0.1 DGB"));
         m_feeLabel->setText(DigiDollarSendWidget::tr("Transaction fee:"));
         m_feeModeExplanation->setText(DigiDollarSendWidget::tr(
@@ -4827,7 +4843,6 @@ void PaymasterSendWidget::updateFeeDisplay()
             "<tr><td><b>Additional $DD fee</b></td><td>None</td></tr>"
             "<tr><td><b>Maximum wallet outflow</b></td><td>%1</td></tr>"
             "</table>").arg(recipient_amount));
-        m_feeSummary->setToolTip(dgb_status);
     } else if (mode == QStringLiteral("auto") && hasOwnDgbForFees()) {
         m_feeValue->setText(DigiDollarSendWidget::tr("~0.1 DGB, or at most %1").arg(maximum_fee));
         m_feeLabel->setText(DigiDollarSendWidget::tr("Fee funding:"));
@@ -4858,7 +4873,6 @@ void PaymasterSendWidget::updateFeeDisplay()
                 "<tr><td><b>Maximum wallet outflow</b></td><td>%3</td></tr>"
                 "</table>").arg(recipient_amount, maximum_fee, maximum_outflow));
         }
-        m_feeSummary->setToolTip(dgb_status);
     } else {
         m_feeValue->setText(exact_preview ? formatCents(m_paymasterPreviewServiceFeeCents)
                                         : DigiDollarSendWidget::tr("Exact provider quote; at most %1").arg(maximum_fee));
@@ -4919,6 +4933,7 @@ void PaymasterSendWidget::updateFeeDisplay()
     }
     DigiDollarStatus::SetBanner(m_feeSummary, DigiDollarStatus::Kind::INFO);
     updateOfferCheckControls();
+    m_feeSummary->setToolTip(m_privacy || !input.amount_valid ? QString{} : dgb_status);
     QString amountText = input.amount_text;
     if (!amountText.isEmpty()) {
         double amount = amountText.toDouble();

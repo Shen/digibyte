@@ -1614,7 +1614,7 @@ void DigiDollarSendWidget::setWalletModel(WalletModel* model)
         m_balanceError.clear();
         m_availableBalance = 0.0;
         if (model) {
-            connect(model, &WalletModel::balanceChanged, this, [this] {
+            connect(model, &WalletModel::dgbBalanceChanged, this, [this] {
                 m_paymaster->updateFeeDisplay();
                 updateSendButton();
             });
