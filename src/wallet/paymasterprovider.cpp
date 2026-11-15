@@ -666,8 +666,8 @@ bool PersistExactPaymasterWalletTransaction(CWallet& wallet,
         return false;
     }
     if (auto* dd_wallet = wallet.GetDDWallet(); dd_wallet && IsDigiDollarTransaction(*transaction)) {
-        if (!dd_wallet->ProcessIncomingTransaction(transaction, transaction->GetHash(), error)) return false;
-        if (!dd_wallet->ProcessIncomingDDTransaction(transaction)) {
+        if (!dd_wallet->ProcessIncomingTransaction(transaction, transaction->GetHash(), error) ||
+            !dd_wallet->ProcessIncomingDDTransaction(transaction)) {
             error = "PAYMASTER_WALLET_DD_STATE_UPDATE_FAILED";
             return false;
         }

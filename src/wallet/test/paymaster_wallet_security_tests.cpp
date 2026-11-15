@@ -9228,6 +9228,7 @@ BOOST_AUTO_TEST_CASE(exact_wallet_persistence_requires_durable_receive_history)
     std::string error;
     BOOST_CHECK(!PersistExactPaymasterWalletTransaction(m_wallet, transaction, error));
     BOOST_CHECK(!error.empty());
+    BOOST_CHECK(IsTransientPaymasterFinalizationError(error));
     BOOST_CHECK(!WalletBatch{database}.ReadDDTransaction(txid, stored));
     BOOST_CHECK_EQUAL(refused, 2U);
 
