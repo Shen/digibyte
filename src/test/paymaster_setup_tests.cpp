@@ -467,6 +467,58 @@ BOOST_AUTO_TEST_CASE(cli_rejects_ambiguous_input_and_does_not_retry_failed_statu
     BOOST_CHECK_EQUAL(calls, 1);
 }
 
+BOOST_AUTO_TEST_CASE(cli_setup_opens_existing_wallets_without_creation_or_blind_retry)
+{
+    for (int scenario{0}; scenario < 9; ++scenario) {
+        BOOST_TEST_CONTEXT("wallet opening " << scenario) {
+            bool loaded = scenario == 0;
+            int observations{0}, loads{0}, directories{0};
+            std::istringstream input{scenario == 3 ? "\n" : "yes\n"};
+            std::ostringstream output;
+            const CliRpc rpc = [&](const std::string& method, const UniValue& params,
+                                   const std::optional<std::string>& wallet) -> UniValue {
+                BOOST_CHECK(!wallet.has_value()); // Inventory/load use the node endpoint.
+                if (method == "listwallets") {
+                    BOOST_CHECK(params.isArray() && params.empty());
+                    if (++observations == 2 && scenario == 6) loaded = true; // concurrent operator load
+                    UniValue result{UniValue::VARR};
+                    if (loaded) result.push_back("provider");
+                    return result;
+                }
+                if (method == "listwalletdir") {
+                    ++directories;
+                    BOOST_CHECK(params.isArray() && params.empty());
+                    if (scenario == 7) throw std::runtime_error("directory unavailable");
+                    UniValue result{UniValue::VOBJ}, entries{UniValue::VARR}, entry{UniValue::VOBJ};
+                    if (scenario != 1) {
+                        entry.pushKV("name", "provider");
+                        entries.push_back(entry);
+                    }
+                    if (scenario != 8) result.pushKV("wallets", entries);
+                    return result;
+                }
+                BOOST_CHECK_EQUAL(method, "loadwallet");
+                BOOST_REQUIRE(params.isArray() && params.size() == 1);
+                BOOST_CHECK_EQUAL(params[0].get_str(), "provider");
+                ++loads;
+                loaded = scenario != 5;
+                if (scenario == 4 || scenario == 5) throw std::runtime_error("load reply lost");
+                return UniValue{UniValue::VOBJ};
+            };
+            if (scenario == 5 || scenario == 7 || scenario == 8) {
+                BOOST_CHECK_THROW(OpenSetupWallet(input, output, "provider", rpc), std::runtime_error);
+            } else {
+                const auto expected = scenario == 1 ? SetupWalletOpenResult::MISSING :
+                    scenario == 3 ? SetupWalletOpenResult::CANCELLED : SetupWalletOpenResult::LOADED;
+                BOOST_CHECK(OpenSetupWallet(input, output, "provider", rpc) == expected);
+            }
+            BOOST_CHECK_EQUAL(loads, scenario == 2 || scenario == 4 || scenario == 5 ? 1 : 0);
+            BOOST_CHECK_EQUAL(directories, scenario == 0 ? 0 : 1);
+            if (loads) BOOST_CHECK(output.str().find("autostart") != std::string::npos);
+        }
+    }
+}
+
 BOOST_AUTO_TEST_CASE(finite_profiles_do_not_authorize_maintenance)
 {
     const auto ordinary = SetupSafetyProfile(false, 20000000);

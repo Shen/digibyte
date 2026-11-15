@@ -15,6 +15,11 @@ namespace DigiDollar::Paymaster {
 /** Reuse the CLI's existing transport, authentication and argument conversion. */
 using CliRpc = std::function<UniValue(const std::string&, const UniValue&, const std::optional<std::string>&)>;
 int RunCli(bool setup, const ArgsManager& args, const std::string& rpc_host, const CliRpc& rpc);
+enum class SetupWalletOpenResult { LOADED, MISSING, CANCELLED };
+/** Setup-only wallet opening. Loading requires confirmation; uncertain replies
+ * are observed once, never retried or replaced by wallet creation. */
+SetupWalletOpenResult OpenSetupWallet(std::istream& input, std::ostream& output,
+    const std::string& wallet, const CliRpc& rpc);
 /** Explicit, wallet-bound recovery review; never starts a provider or retries execution. */
 bool RunBackupAdoption(std::istream& input, std::ostream& output, const std::string& wallet, const UniValue& snapshot, const CliRpc& rpc);
 } // namespace DigiDollar::Paymaster

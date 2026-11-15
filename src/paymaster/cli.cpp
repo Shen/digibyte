@@ -21,6 +21,48 @@
 #include <vector>
 
 namespace DigiDollar::Paymaster {
+SetupWalletOpenResult OpenSetupWallet(std::istream& input, std::ostream& output,
+    const std::string& wallet, const CliRpc& rpc)
+{
+    const UniValue empty{UniValue::VARR};
+    const auto loaded = [&] {
+        const auto wallets = rpc("listwallets", empty, std::nullopt);
+        if (!wallets.isArray()) throw std::runtime_error("Invalid loaded-wallet inventory; wallet was not opened");
+        bool found{false};
+        for (const auto& item : wallets.getValues()) {
+            if (!item.isStr()) throw std::runtime_error("Invalid loaded-wallet name; wallet was not opened");
+            found |= item.get_str() == wallet;
+        }
+        return found;
+    };
+    if (loaded()) return SetupWalletOpenResult::LOADED;
+    const auto directory = rpc("listwalletdir", empty, std::nullopt);
+    const auto& wallets = directory.find_value("wallets");
+    if (!directory.isObject() || !wallets.isArray()) throw std::runtime_error("Wallet directory unavailable; creation was not authorized");
+    bool exists{false};
+    for (const auto& item : wallets.getValues()) {
+        if (!item.isObject() || !item.find_value("name").isStr()) throw std::runtime_error("Invalid wallet directory entry; creation was not authorized");
+        exists |= item.find_value("name").get_str() == wallet;
+    }
+    if (!exists) return SetupWalletOpenResult::MISSING;
+    output << "Existing unloaded wallet: " << wallet << '\n'
+           << "Loading restores its saved wallet state and may activate previously enabled provider autostart.\n";
+    if (!SetupConfirm(input, output, "Load exactly this existing wallet before reviewing provider status?")) return SetupWalletOpenResult::CANCELLED;
+    if (loaded()) return SetupWalletOpenResult::LOADED;
+    UniValue params{UniValue::VARR};
+    params.push_back(wallet);
+    std::string failure;
+    try {
+        rpc("loadwallet", params, std::nullopt);
+    } catch (const std::exception& error) {
+        failure = error.what();
+    }
+    // A lost reply does not authorize another load or a new wallet. The same
+    // selected name must be observed through the node's loaded-wallet API.
+    if (!loaded()) throw std::runtime_error("Wallet load was not confirmed; inspect node wallet status before retrying. " + failure);
+    return SetupWalletOpenResult::LOADED;
+}
+
 bool RunBackupAdoption(std::istream& input, std::ostream& output, const std::string& wallet, const UniValue& snapshot, const CliRpc& rpc)
 {
     const UniValue empty{UniValue::VARR};
@@ -340,12 +382,13 @@ public:
             const auto wallets = OperatorCall("listwallets", empty, {});
             std::cout << "Loaded wallets:\n";
             for (const auto& loaded : wallets.getValues()) std::cout << "  - " << loaded.get_str() << '\n';
-            wallet = OperatorPrompt("Provider wallet name (enter a new name to create one)");
+            wallet = OperatorPrompt("Provider wallet name (existing wallets can be loaded; a new name proposes creation)");
             if (wallet.empty()) throw std::runtime_error("An explicit non-empty wallet name is required");
-            bool exists{false};
-            for (const auto& item : wallets.getValues())
-                exists |= item.get_str() == wallet;
-            if (!exists) {
+        }
+        if (setup) {
+            const auto opened = OpenSetupWallet(std::cin, std::cout, wallet, m_rpc);
+            if (opened == SetupWalletOpenResult::CANCELLED) return EXIT_FAILURE;
+            if (opened == SetupWalletOpenResult::MISSING) {
                 if (!OperatorConfirm("Create a new encrypted descriptor wallet named " + wallet + "?")) return EXIT_FAILURE;
                 auto pass = OperatorSecret("New wallet passphrase");
                 auto repeat = OperatorSecret("Repeat new wallet passphrase");

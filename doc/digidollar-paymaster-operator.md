@@ -214,7 +214,11 @@ These are alternative entry points, not a sequence that must stay running.
 The assistant covers wallet, connection, offer, costs/reserves, startup,
 review/apply and funding completion. Existing-provider entry defaults to status
 with explicit pause/resume, unlock, backup and settings actions. An explicitly
-selected unloaded wallet is loaded first. Enter declines the final mutation/
+selected unloaded wallet is identified through `listwalletdir` and loaded only
+after explicit confirmation. Loading may activate its previously saved provider
+autostart. A lost load reply is checked through `listwallets`, never retried as
+creation. Status mode requires an already loaded wallet and remains read-only.
+Enter declines the final mutation/
 funding review; type the requested confirmation to approve it.
 In the capacity menu, Enter keeps the current targets and refill limits;
 select a preset explicitly to replace that proposal. The funding monitor and

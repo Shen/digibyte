@@ -34,6 +34,12 @@ recovery-signature corruption/retained request (**83 assertions**) and closure
 after accepted user authorization (**62 assertions**). These rerun existing
 cases and are not additional independent cases. Functional Python syntax passes.
 
+CLI wallet opening: freshly compiled CLI/setup-test units and all **38 setup
+cases, 784 assertions, exit 0**. Includes loaded/existing/new selection, declined
+load, concurrent load, lost successful/failed reply, broken inventory and the
+unchanged read-only status contract. Partial-link SHA256:
+`d78e9921197c3269fc8248abeb70b99ec80b35e514c238b807716de189b520a7`.
+
 ## Exact-final relay, checkpoint recovery and shared setup (2026-11-15)
 
 Review baseline: `3b9e5c5d6b2c657996be8926e9c2ea794d34b040`; implementation
