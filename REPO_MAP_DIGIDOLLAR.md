@@ -1213,9 +1213,9 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
 ### src/qt/walletmodel.cpp/h
 - `WalletModel::getDigiDollarMintWalletError()` → exposes the shared read-only mint capability check to Qt; the mint widget calls it before confirmation and construction checks it again.
 - `WalletModel::getSpendableDGBBalance()` → optional projection of the cached
-  Core DGB availability snapshot for fee composition and mint collateral
+  Core DGB availability snapshot for fee composition, Mint display and collateral
   preflight; protected/manual locks are excluded and unknown stays distinct
-  from zero. `dgbBalanceChanged` refreshes fee controls on availability changes.
+  from zero. `dgbBalanceChanged` refreshes fee and Mint controls on availability changes.
 
 ### src/qt/digidollartab.cpp/h
 - `DigiDollarTab` → main DD tab widget containing the activation overlay and 7
@@ -1306,6 +1306,10 @@ See the [operator guide](doc/digidollar-paymaster-operator.md).
 
 ### src/qt/digidollarmintwidget.cpp/h
 - `DigiDollarMintWidget` → mint DD interface with tier selection and collateral calculator
+- Holds the shared optional DGB availability snapshot in satoshis. Pool/manual
+  locks update the display and Mint eligibility through `dgbBalanceChanged`;
+  unknown availability pauses Mint before and after confirmations/unlock.
+  Wallet switches disconnect prior signals; model destruction clears availability.
 
 ### src/qt/digidollarpositionswidget.cpp/h
 - `DigiDollarPositionsWidget` → displays DDTimeLock positions with lock status and health

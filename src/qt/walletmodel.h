@@ -249,9 +249,6 @@ public:
     // Get locked collateral amount
     CAmount getLockedCollateral() const;
 
-    //! Legacy ownership display; spending checks use getSpendableDGBBalance.
-    CAmount getAvailableDGBBalance() const;
-
     //! Cached ordinary DGB availability; unknown is distinct from zero.
     std::optional<CAmount> getSpendableDGBBalance() const;
 

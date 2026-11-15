@@ -4227,9 +4227,21 @@ void PaymasterWidgetTests::paymasterClientLiveSendProgressesAcrossAsyncPhases()
     auto* mode = send_widget.findChild<QComboBox*>(QStringLiteral("paymasterFeeMode"));
     QVERIFY(mode);
     const bool automatic = outcome == QStringLiteral("auto_cancel");
+    std::vector<COutPoint> delayed_fee_coins;
+    if (outcome == QStringLiteral("auto_prepare")) {
+        {
+            LOCK(wallet->cs_wallet);
+            for (const auto& coin : wallet::AvailableCoins(*wallet).All()) delayed_fee_coins.push_back(coin.outpoint);
+        }
+        for (const auto& outpoint : delayed_fee_coins) QVERIFY(mini_gui.walletModel->wallet().lockCoin(outpoint, false));
+        mini_gui.walletModel->updateTransaction();
+        DigiDollarTest::SyncDGBBalance(*mini_gui.walletModel);
+        QVERIFY(mini_gui.walletModel->getSpendableDGBBalance().has_value());
+        QCOMPARE(*mini_gui.walletModel->getSpendableDGBBalance(), CAmount{0});
+    }
     if (automatic) {
         mini_gui.walletModel->pollBalanceChanged();
-        QTRY_VERIFY(mini_gui.walletModel->getAvailableDGBBalance() > 0);
+        QTRY_VERIFY(mini_gui.walletModel->getSpendableDGBBalance() && *mini_gui.walletModel->getSpendableDGBBalance() > 0);
     }
     mode->setCurrentIndex(mode->findData(automatic || outcome == QStringLiteral("auto_prepare") ? QStringLiteral("auto") : QStringLiteral("paymaster")));
     QCOMPARE(send_widget.findChild<QPushButton*>(QStringLiteral("sendButton"))->text(),
@@ -4281,9 +4293,11 @@ void PaymasterWidgetTests::paymasterClientLiveSendProgressesAcrossAsyncPhases()
     QCOMPARE(sends.size(), size_t{1});
     if (outcome == QStringLiteral("auto_prepare")) {
         QCOMPARE(sends[0][6].find_value("fee_mode").get_str(), std::string{"paymaster"});
-        // DGB arriving during preparation cannot switch this request to direct spending.
-        mini_gui.walletModel->pollBalanceChanged();
-        QTRY_VERIFY(mini_gui.walletModel->getAvailableDGBBalance() > 0);
+        // Newly available DGB cannot switch this request to direct spending.
+        for (const auto& outpoint : delayed_fee_coins) QVERIFY(mini_gui.walletModel->wallet().unlockCoin(outpoint));
+        mini_gui.walletModel->updateTransaction();
+        DigiDollarTest::SyncDGBBalance(*mini_gui.walletModel);
+        QTRY_VERIFY(mini_gui.walletModel->getSpendableDGBBalance() && *mini_gui.walletModel->getSpendableDGBBalance() > 0);
     }
     auto* next_step = send_widget.findChild<QLabel*>(QStringLiteral("paymasterSessionNextStep"));
     QVERIFY(next_step);
@@ -9065,7 +9079,7 @@ void PaymasterWidgetTests::paymasterClientAutomaticDgbRequiresExplicitSelection(
     });
     form.setWalletModel(gui.walletModel.get());
     gui.walletModel->pollBalanceChanged();
-    QTRY_VERIFY(gui.walletModel->getAvailableDGBBalance() > 0);
+    QTRY_VERIFY(gui.walletModel->getSpendableDGBBalance() && *gui.walletModel->getSpendableDGBBalance() > 0);
     auto* mode = form.findChild<QComboBox*>("paymasterFeeMode");
     auto* address = form.findChild<QLineEdit*>("addressEdit");
     auto* amount = form.findChild<QLineEdit*>("amountEdit");
@@ -10313,7 +10327,18 @@ void PaymasterWidgetTests::paymasterClientOfferSearchRequiresBalance()
     gui.initModelForWallet(m_node, wallet);
     if (own_dgb) {
         gui.walletModel->pollBalanceChanged();
-        QTRY_VERIFY(gui.walletModel->getAvailableDGBBalance() > 0);
+        QTRY_VERIFY(gui.walletModel->getSpendableDGBBalance() && *gui.walletModel->getSpendableDGBBalance() > 0);
+    } else {
+        std::vector<COutPoint> locked;
+        {
+            LOCK(wallet->cs_wallet);
+            for (const auto& coin : wallet::AvailableCoins(*wallet).All()) locked.push_back(coin.outpoint);
+        }
+        for (const auto& outpoint : locked) QVERIFY(gui.walletModel->wallet().lockCoin(outpoint, false));
+        gui.walletModel->updateTransaction();
+        DigiDollarTest::SyncDGBBalance(*gui.walletModel);
+        QVERIFY(gui.walletModel->getSpendableDGBBalance().has_value());
+        QCOMPARE(*gui.walletModel->getSpendableDGBBalance(), CAmount{0});
     }
     DigiDollarSendWidget form(gui.platformStyle.get());
     auto* client = form.findChild<PaymasterSendWidget*>();

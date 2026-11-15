@@ -23,6 +23,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <string>
 
 #include <QLabel>
 #include <QLineEdit>
@@ -75,7 +76,6 @@ DigiDollarMintWidget::DigiDollarMintWidget(QWidget *parent) :
     m_amountValidator(nullptr),
     m_walletModel(nullptr),
     m_clientModel(nullptr),
-    m_availableDGBBalance(0.0),
     m_oraclePrice(0.01), // Default DGB price in USD
     m_mintAmount(0.0),
     m_selectedTier(0),
@@ -358,7 +358,7 @@ void DigiDollarMintWidget::setupCollateralSection()
     m_availableDGBLabel = new QLabel(tr("Available DGB:"), this);
     m_availableDGBLabel->setObjectName("availableDGBLabel");
     m_availableDGBLabel->setToolTip(tr("Your current available DGB balance"));
-    m_availableDGBValue = new QLabel("0.00000000 DGB", this);
+    m_availableDGBValue = new QLabel(availableDGBText(), this);
     m_availableDGBValue->setObjectName("availableDGBValue");
     m_availableDGBValue->setFont(monospaceFont);
     // Theme styling applied in applyTheme()
@@ -435,13 +435,15 @@ void DigiDollarMintWidget::connectSignals()
 
 void DigiDollarMintWidget::setWalletModel(WalletModel* model)
 {
-    m_walletModel = model;
-
-    if (m_walletModel) {
-        // Connect wallet model signals
-        updateBalance();
-        // REMOVED: applyTheme() - Let CSS handle all theming
+    if (m_walletModel != model) {
+        if (m_walletModel) disconnect(m_walletModel, nullptr, this, nullptr);
+        m_walletModel = model;
+        if (model) {
+            connect(model, &WalletModel::dgbBalanceChanged, this, &DigiDollarMintWidget::updateBalance);
+            connect(model, &QObject::destroyed, this, [this] { setWalletModel(nullptr); });
+        }
     }
+    updateBalance();
 }
 
 void DigiDollarMintWidget::setClientModel(ClientModel* model)
@@ -466,18 +468,12 @@ void DigiDollarMintWidget::updateView()
 
 void DigiDollarMintWidget::updateBalance()
 {
-    if (m_walletModel) {
-        // Get actual DGB balance from wallet (in satoshis)
-        CAmount balanceSatoshis = m_walletModel->getAvailableDGBBalance();
-        m_availableDGBBalance = balanceSatoshis / 100000000.0; // Convert satoshis to DGB
-    } else {
-        m_availableDGBBalance = 0.0;
-    }
+    m_availableDGBBalance = m_walletModel ? m_walletModel->getSpendableDGBBalance() : std::nullopt;
 
-    if (m_privacy) {
+    if (m_privacy && m_availableDGBBalance) {
         m_availableDGBValue->setText(maskValue(formatDGBAmount(0)));
     } else {
-        m_availableDGBValue->setText(formatDGBAmount(m_availableDGBBalance));
+        m_availableDGBValue->setText(availableDGBText());
     }
 
     // Re-validate amount field when balance changes (fixes stale yellow/green state
@@ -682,7 +678,15 @@ void DigiDollarMintWidget::onMintClicked()
         return;
     }
 
-    if (!validateAmount() || !validateCollateral()) {
+    const auto refreshBalance = [this] {
+        updateBalance();
+        if (m_availableDGBBalance) return true;
+        Q_EMIT message(tr("Cannot Mint DigiDollar"),
+                       tr("Available DGB balance is unknown. Minting is paused."),
+                       CClientUIInterface::MSG_WARNING);
+        return false;
+    };
+    if (!refreshBalance() || !validateAmount() || !validateCollateral()) {
         return;
     }
 
@@ -695,6 +699,7 @@ void DigiDollarMintWidget::onMintClicked()
 
     // Refresh oracle price (updates m_oraclePrice)
     updateOraclePrice(); // also calls updateCollateralCalculation()
+    if (!refreshBalance()) return;
 
     // Re-validate after refresh — balance may no longer cover new collateral.
     // The style below decides how the wallet window shows this. Only a style
@@ -708,7 +713,7 @@ void DigiDollarMintWidget::onMintClicked()
                           "enough DGB to cover the required collateral.\n\n"
                           "Required: %1\nAvailable: %2")
                        .arg(formatDGBAmount(m_requiredCollateral))
-                       .arg(formatDGBAmount(m_availableDGBBalance)),
+                       .arg(availableDGBText()),
                        CClientUIInterface::MSG_WARNING);
         return;
     }
@@ -740,13 +745,12 @@ void DigiDollarMintWidget::onMintClicked()
     }
     // --- End oracle price drift check ---
 
-    auto refreshAndRevalidateMintInputs = [this](const QString& title) -> bool {
+    auto refreshAndRevalidateMintInputs = [this, refreshBalance](const QString& title) -> bool {
         const double previousCollateral = m_requiredCollateral;
         const double previousOraclePrice = m_oraclePrice;
 
         updateOraclePrice(); // also recalculates collateral from current oracle data
-        updateAmountValidation();
-        updateMintButton();
+        if (!refreshBalance()) return false;
 
         if (!validateAmount()) {
             Q_EMIT message(tr("Invalid Amount"),
@@ -761,7 +765,7 @@ void DigiDollarMintWidget::onMintClicked()
                               "enough DGB to cover the required collateral.\n\n"
                               "Required: %1\nAvailable: %2")
                            .arg(formatDGBAmount(m_requiredCollateral))
-                           .arg(formatDGBAmount(m_availableDGBBalance)),
+                           .arg(availableDGBText()),
                            CClientUIInterface::MSG_WARNING);
             return false;
         }
@@ -898,6 +902,7 @@ void DigiDollarMintWidget::onMintClicked()
             // User cancelled the unlock dialog
             return;
         }
+        if (!refreshBalance()) return;
 
         // Convert amount from double to CAmount (cents) — use llround to avoid truncation
         CAmount ddAmountCents = static_cast<CAmount>(std::llround(m_mintAmount * 100));
@@ -983,8 +988,9 @@ void DigiDollarMintWidget::updateMintButton()
     bool amountValid = validateAmount();
     bool collateralValid = validateCollateral();
 
-    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Mint: updateMintButton - amountValid=%d, collateralValid=%d, m_requiredCollateral=%f, m_availableDGBBalance=%f, m_oraclePrice=%f\n",
-              amountValid, collateralValid, m_requiredCollateral, m_availableDGBBalance, m_oraclePrice);
+    LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Mint: updateMintButton - amountValid=%d, collateralValid=%d, m_requiredCollateral=%f, availableDGBSatoshis=%s, m_oraclePrice=%f\n",
+              amountValid, collateralValid, m_requiredCollateral,
+              m_availableDGBBalance ? std::to_string(*m_availableDGBBalance) : "unknown", m_oraclePrice);
 
     m_mintButton->setEnabled(amountValid && collateralValid && m_mintVolatilityAllowed);
 }
@@ -1066,7 +1072,8 @@ bool DigiDollarMintWidget::validateAmount() const
 
 bool DigiDollarMintWidget::validateCollateral() const
 {
-    return m_requiredCollateral > 0 && m_requiredCollateral <= m_availableDGBBalance;
+    return m_availableDGBBalance && m_requiredCollateral > 0 &&
+        m_requiredCollateral <= *m_availableDGBBalance / static_cast<double>(COIN);
 }
 
 QString DigiDollarMintWidget::formatDDAmount(double amount) const
@@ -1077,6 +1084,14 @@ QString DigiDollarMintWidget::formatDDAmount(double amount) const
 QString DigiDollarMintWidget::formatDGBAmount(double amount) const
 {
     return QString::number(amount, 'f', 8) + " DGB";
+}
+
+QString DigiDollarMintWidget::availableDGBText() const
+{
+    return m_availableDGBBalance
+        ? DigiByteUnits::formatWithUnit(DigiByteUnits::Unit::DGB, *m_availableDGBBalance,
+              false, DigiByteUnits::SeparatorStyle::NEVER)
+        : tr("Unavailable");
 }
 
 QString DigiDollarMintWidget::formatUSDAmount(double amount) const
@@ -1183,6 +1198,11 @@ void DigiDollarMintWidget::updateAmountValidation()
             m_amountEdit->setStyleSheet(QString("QLineEdit { border: 2px solid %1; }").arg(errorColor));
             m_amountWarningLabel->setText(tr("⚠️ Maximum mint amount is $%1").arg(QString::number(maxAmount, 'f', 0)));
             m_amountWarningLabel->setStyleSheet(QString("QLabel { color: %1; font-weight: bold; }").arg(errorColor));
+            m_amountWarningLabel->setVisible(true);
+        } else if (!m_availableDGBBalance) {
+            m_amountEdit->setStyleSheet(QString("QLineEdit { border: 2px solid %1; }").arg(warningColor));
+            m_amountWarningLabel->setText(tr("Available DGB balance is unknown. Minting is paused."));
+            m_amountWarningLabel->setStyleSheet(QString("QLabel { color: %1; font-weight: bold; }").arg(warningColor));
             m_amountWarningLabel->setVisible(true);
         } else if (m_oraclePrice <= 0) {
             // Oracle price is unavailable; minting must remain fail-closed.

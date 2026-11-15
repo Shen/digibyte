@@ -1248,7 +1248,7 @@ void DigiDollarWidgetTests::sendWidgetCoinControlDialogSelectionFeedsSend()
     QVERIFY(direct_mode >= 0);
     fee_mode->setCurrentIndex(direct_mode);
     DigiDollarTest::SyncDGBBalance(*mini_gui.walletModel);
-    QVERIFY(mini_gui.walletModel->getAvailableDGBBalance() > 0);
+    QVERIFY(mini_gui.walletModel->getSpendableDGBBalance() && *mini_gui.walletModel->getSpendableDGBBalance() > 0);
     sendWidget.setAvailableDigiDollarBalanceForTesting(12500);
 
     // Reject unusable selected inputs before offering confirmation or unlock.
@@ -2748,7 +2748,8 @@ void DigiDollarWidgetTests::mintWidgetPreservesEncryptedWalletUnlockFlow()
     DigiDollarTest::SyncDGBBalance(*mini_gui.walletModel);
     const CAmount funded_balance = mini_gui.walletModel->wallet().getBalances().balance;
     QVERIFY(funded_balance > 0);
-    QCOMPARE(mini_gui.walletModel->getAvailableDGBBalance(), funded_balance);
+    QVERIFY(mini_gui.walletModel->getSpendableDGBBalance().has_value());
+    QCOMPARE(*mini_gui.walletModel->getSpendableDGBBalance(), funded_balance);
     const CAmount required_collateral = mini_gui.walletModel->calculateRequiredCollateral(10000, 0);
     QVERIFY(required_collateral > 0);
     QVERIFY(funded_balance >= required_collateral);
@@ -2803,6 +2804,54 @@ void DigiDollarWidgetTests::mintWidgetPreservesEncryptedWalletUnlockFlow()
     QVERIFY(wallet->IsLocked());
     QCOMPARE(unlocks.count(), 2);
     QVERIFY(MintDescriptorNextIndexes(*wallet) == before);
+    // Availability can become unknown during an accepted unlock, after both
+    // confirmations. Revalidate before asking WalletModel to construct a mint.
+    auto& database = wallet::GetMockableDatabase(*wallet);
+    const std::string pool_key{wallet::DBKeys::PAYMASTER_PROVIDER_POOL};
+    const bool pool_existed = database.MakeBatch()->Exists(pool_key);
+    std::vector<DigiDollar::Paymaster::ProviderPoolEntry> intact_pool;
+    if (pool_existed) QVERIFY(wallet::WalletBatch{database}.ReadPaymasterProviderPool(intact_pool));
+    const auto before_corruption = database.m_records;
+    wallet::MockableData after_corruption;
+    bool injected{false};
+    const auto lose_availability = connect(mini_gui.walletModel.get(), &WalletModel::requireUnlock, [&] {
+        injected = database.MakeBatch()->Write(pool_key, std::string{"corrupt"});
+        if (!injected) {
+            widget.setWalletModel(nullptr);
+            QFAIL("Could not inject unknown availability during unlock");
+        }
+        mini_gui.walletModel->updateTransaction();
+        DigiDollarTest::SyncDGBBalance(*mini_gui.walletModel);
+        if (mini_gui.walletModel->getSpendableDGBBalance()) {
+            widget.setWalletModel(nullptr);
+            QFAIL("Availability snapshot did not become unknown during unlock");
+        }
+        after_corruption = database.m_records;
+    });
+    confirmation_titles.clear();
+    confirm.start(0);
+    QVERIFY(QMetaObject::invokeMethod(&widget, "onMintClicked", Qt::DirectConnection));
+    confirm.stop();
+    disconnect(lose_availability);
+    QVERIFY(injected);
+    QCOMPARE(confirmation_titles.size(), 2);
+    QCOMPARE(unlocks.count(), 3);
+    QCOMPARE(messages.count(), 1);
+    QVERIFY(messages.at(0).at(1).toString().contains("unknown"));
+    QVERIFY(wallet->IsLocked());
+    QVERIFY(database.m_records == after_corruption);
+    QVERIFY(MintDescriptorNextIndexes(*wallet) == before);
+    QCOMPARE(wallet->mapWallet.size(), transaction_count);
+    QVERIFY(!wallet::WalletBatch{database}.WritePaymasterProviderPool({}));
+    if (pool_existed) {
+        QVERIFY(database.MakeBatch()->Write(pool_key, intact_pool));
+    } else {
+        QVERIFY(database.MakeBatch()->Erase(pool_key));
+    }
+    QVERIFY(database.m_records == before_corruption);
+    mini_gui.walletModel->updateTransaction();
+    DigiDollarTest::SyncDGBBalance(*mini_gui.walletModel);
+    QVERIFY(mint_button->isEnabled());
 }
 
 void DigiDollarWidgetTests::transactionsWidgetTests()
@@ -3160,64 +3209,137 @@ void DigiDollarWidgetTests::mintValidationUpdatesOnBalanceChange()
         return;
     }
 #endif
+    using namespace DigiDollar::Paymaster;
     TestChain100Setup test;
-    for (int i = 0; i < 5; ++i) {
-        test.CreateAndProcessBlock({}, GetScriptForRawPubKey(test.coinbaseKey.GetPubKey()));
-    }
-    auto wallet_loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
-    test.m_node.wallet_loader = wallet_loader.get();
+    for (int i = 0; i < 5; ++i) test.CreateAndProcessBlock({}, GetScriptForRawPubKey(test.coinbaseKey.GetPubKey()));
+    auto loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = loader.get();
     m_node.setContext(&test.m_node);
-
-    const std::shared_ptr<wallet::CWallet>& wallet = SetupDescriptorsWallet(m_node, test);
-
-    DigiDollarMiniGUI mini_gui(m_node);
-    mini_gui.initModelForWallet(m_node, wallet);
-
-    DigiDollarMintWidget mintWidget;
-    mintWidget.setWalletModel(mini_gui.walletModel.get());
-    mintWidget.setClientModel(mini_gui.clientModel.get());
-    mintWidget.show();
-
-    // Set an amount in the mint field to trigger validation
-    QLineEdit* amountEdit = mintWidget.findChild<QLineEdit*>("amountEdit");
-    QVERIFY(amountEdit != nullptr);
-    amountEdit->setText("1.00");
-
-    // Get the warning label
-    QLabel* warningLabel = mintWidget.findChild<QLabel*>("amountWarningLabel");
-    QVERIFY(warningLabel != nullptr);
-
-    // Force a collateral calculation and validation cycle
-    mintWidget.updateView();
-
-    // Capture the current validation state (stylesheet) before balance update
-    QString styleBefore = amountEdit->styleSheet();
-
-    // Now simulate a balance change (as if DGB arrived) by calling updateBalance()
-    // This is the exact path that fires when the wallet receives new DGB
-    mintWidget.updateBalance();
-
-    // After updateBalance(), the validation state should have been re-evaluated.
-    // The key assertion: updateBalance() must trigger updateAmountValidation().
-    // We verify this by checking that the warning label visibility or amount edit
-    // stylesheet was re-evaluated (not stale).
-    //
-    // Since updateBalance() now calls updateAmountValidation() + updateMintButton(),
-    // the validation state should reflect the current balance, not a cached state.
-    QString styleAfter = amountEdit->styleSheet();
-
-    // In a test environment with no oracle price, both states may show the same
-    // warning. The critical test is that updateBalance() doesn't crash and does
-    // call through to updateAmountValidation(). We verify the label exists and
-    // the stylesheet was set (non-empty means validation ran).
-    QVERIFY2(!styleAfter.isEmpty() || amountEdit->text().isEmpty(),
-             "Amount validation should run after updateBalance() — stylesheet should be set when amount is entered");
-
-    // Verify the warning label is in a consistent state (visible with text, or hidden)
-    if (warningLabel->isVisible()) {
-        QVERIFY2(!warningLabel->text().isEmpty(),
-                 "If warning label is visible after balance update, it should have text");
+    const auto wallet = SetupDescriptorsWallet(m_node, test, "mint-availability");
+    CMutableTransaction funding;
+    {
+        // Isolated display fixture: a protected-capable taproot output and a
+        // small free output. No transaction is funded or signed by this test.
+        LOCK(wallet->cs_wallet);
+        wallet->mapWallet.clear();
+        wallet->MarkDirty();
+        const auto address = wallet->GetNewDestination(OutputType::BECH32M, "mint availability");
+        QVERIFY(address);
+        funding.vin.emplace_back(COutPoint{uint256::ONE, 0});
+        funding.vout.emplace_back(10000 * COIN, GetScriptForDestination(*address));
+        funding.vout.emplace_back(10 * COIN, GetScriptForDestination(*address));
+        QVERIFY(wallet->AddToWallet(MakeTransactionRef(funding),
+            wallet::TxStateConfirmed{wallet->GetLastBlockHash(), wallet->GetLastBlockHeight(), 0}));
     }
+    struct MockPriceGuard {
+        MockOracleManager& mock{MockOracleManager::GetInstance()};
+        CAmount price{mock.GetCurrentPrice()};
+        bool enabled{mock.IsEnabled()};
+        ~MockPriceGuard() { mock.SetMockPrice(price); mock.SetEnabled(enabled); }
+    } price_guard;
+    price_guard.mock.SetEnabled(true);
+    price_guard.mock.SetMockPrice(500000);
+    DigiDollarMiniGUI gui(m_node);
+    gui.initModelForWallet(m_node, wallet);
+    auto& model = *gui.walletModel;
+    DigiDollarMintWidget mint;
+    auto* available = mint.findChild<QLabel*>("availableDGBValue");
+    QVERIFY(available);
+    QCOMPARE(available->text(), QStringLiteral("Unavailable"));
+    mint.setWalletModel(&model);
+    mint.setClientModel(gui.clientModel.get());
+    mint.show();
+    mint.updateView();
+    auto* amount = mint.findChild<QLineEdit*>("amountEdit");
+    auto* warning = mint.findChild<QLabel*>("amountWarningLabel");
+    auto* button = mint.findChild<QPushButton*>("mintButton");
+    QVERIFY(amount && available && warning && button);
+    amount->setText("100.00");
+    QVERIFY(!model.getSpendableDGBBalance());
+    QCOMPARE(available->text(), QStringLiteral("Unavailable"));
+    QVERIFY(!button->isEnabled());
+    QVERIFY(warning->text().contains("unknown"));
+    const auto poll = [&] {
+        model.updateTransaction();
+        DigiDollarTest::SyncDGBBalance(model);
+    };
+    poll();
+    const CAmount ownership = model.getCachedBalance().balance;
+    QCOMPARE(ownership, 10010 * COIN);
+    QCOMPARE(available->text(), QStringLiteral("10010.00000000 DGB"));
+    QVERIFY(button->isEnabled());
+    QVERIFY(warning->isHidden());
+    ProviderPoolEntry entry;
+    entry.outpoint = COutPoint{funding.GetHash(), 0};
+    entry.purpose = PoolPurpose::OPERATIONAL;
+    entry.script_pub_key = funding.vout[0].scriptPubKey;
+    entry.dgb_value = DGBSatoshis{funding.vout[0].nValue};
+    entry.updated_at = 1;
+    const COutPoint other{funding.GetHash(), 1};
+    for (bool manual : {false, true}) {
+        if (manual) QVERIFY(model.wallet().lockCoin(entry.outpoint, false));
+        else QVERIFY(wallet::WalletBatch{wallet->GetDatabase()}.WritePaymasterProviderPool({entry}));
+        poll();
+        QCOMPARE(model.getCachedBalance().balance, ownership);
+        QCOMPARE(available->text(), QStringLiteral("10.00000000 DGB"));
+        QVERIFY(!button->isEnabled());
+        QVERIFY(warning->text().contains("Insufficient DGB"));
+        QVERIFY(!amount->styleSheet().isEmpty());
+        QVERIFY(model.wallet().lockCoin(other, false));
+        poll();
+        QVERIFY(model.getSpendableDGBBalance().has_value());
+        QCOMPARE(*model.getSpendableDGBBalance(), CAmount{0});
+        QCOMPARE(available->text(), QStringLiteral("0.00000000 DGB"));
+        QVERIFY(!button->isEnabled());
+        QVERIFY(model.wallet().unlockCoin(other));
+        if (manual) QVERIFY(model.wallet().unlockCoin(entry.outpoint));
+        else QVERIFY(wallet::WalletBatch{wallet->GetDatabase()}.WritePaymasterProviderPool({}));
+        poll();
+        QVERIFY(button->isEnabled());
+    }
+    QSignalSpy messages(&mint, &DigiDollarMintWidget::message);
+    auto& database = dynamic_cast<wallet::MockableDatabase&>(wallet->GetDatabase());
+    std::vector<ProviderPoolEntry> intact_pool;
+    QVERIFY(wallet::WalletBatch{database}.ReadPaymasterProviderPool(intact_pool));
+    QVERIFY(database.MakeBatch()->Write(std::string{wallet::DBKeys::PAYMASTER_PROVIDER_POOL}, std::string{"corrupt"}));
+    poll();
+    QCOMPARE(model.getCachedBalance().balance, ownership);
+    QCOMPARE(available->text(), QStringLiteral("Unavailable"));
+    QVERIFY(warning->text().contains("unknown"));
+    QVERIFY(!button->isEnabled());
+    mint.setPrivacy(true);
+    QCOMPARE(available->text(), QStringLiteral("Unavailable"));
+    mint.setPrivacy(false);
+    const auto before = database.m_records;
+    const auto descriptors = MintDescriptorNextIndexes(*wallet);
+    QVERIFY(QMetaObject::invokeMethod(&mint, "onMintClicked", Qt::DirectConnection));
+    QCOMPARE(messages.count(), 1);
+    QVERIFY(messages.at(0).at(1).toString().contains("unknown"));
+    QVERIFY(database.m_records == before);
+    QVERIFY(MintDescriptorNextIndexes(*wallet) == descriptors);
+    QVERIFY(!wallet::WalletBatch{database}.WritePaymasterProviderPool({}));
+    QVERIFY(database.MakeBatch()->Write(std::string{wallet::DBKeys::PAYMASTER_PROVIDER_POOL}, intact_pool));
+    poll();
+    QVERIFY(button->isEnabled());
+    {
+        const auto other_wallet = SetupDescriptorsWallet(m_node, test, "mint-availability-other");
+        DigiDollarMiniGUI other_gui(m_node);
+        other_gui.initModelForWallet(m_node, other_wallet);
+        DigiDollarTest::SyncDGBBalance(*other_gui.walletModel);
+        mint.setWalletModel(other_gui.walletModel.get());
+        const QString expected = available->text();
+        QVERIFY(expected != QStringLiteral("Unavailable"));
+        available->setText("old-wallet-signal");
+        Q_EMIT model.dgbBalanceChanged(model.getCachedBalance());
+        QCOMPARE(available->text(), QStringLiteral("old-wallet-signal"));
+        Q_EMIT other_gui.walletModel->dgbBalanceChanged(other_gui.walletModel->getCachedBalance());
+        QCOMPARE(available->text(), expected);
+    }
+    // Destruction of the selected model clears availability and the Mint gate.
+    QCOMPARE(available->text(), QStringLiteral("Unavailable"));
+    QVERIFY(!button->isEnabled());
+    mint.setWalletModel(&model);
+    QVERIFY(button->isEnabled());
 }
 
 // Regression test for the RC30/RC31 DD balance-refresh bug class: while the
@@ -5839,6 +5961,7 @@ void DigiDollarWidgetTests::privacyMintMaskTests()
 
     DigiDollarMiniGUI mini_gui(m_node);
     mini_gui.initModelForWallet(m_node, wallet);
+    DigiDollarTest::SyncDGBBalance(*mini_gui.walletModel);
 
     DigiDollarMintWidget mintWidget;
     mintWidget.setWalletModel(mini_gui.walletModel.get());

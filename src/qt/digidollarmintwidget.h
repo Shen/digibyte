@@ -5,6 +5,10 @@
 #ifndef DIGIBYTE_QT_DIGIDOLLARMINTWIDGET_H
 #define DIGIBYTE_QT_DIGIDOLLARMINTWIDGET_H
 
+#include <consensus/amount.h>
+
+#include <optional>
+
 #include <QWidget>
 
 class WalletModel;
@@ -81,6 +85,7 @@ private:
 
     QString formatDDAmount(double amount) const;
     QString formatDGBAmount(double amount) const;
+    QString availableDGBText() const;
     QString formatUSDAmount(double amount) const;
     QString formatDigiDollarUSDEquivalent(double amount) const;
     QString formatRatio(double ratio) const;
@@ -141,7 +146,7 @@ private:
     ClientModel* m_clientModel;
 
     // Data
-    double m_availableDGBBalance;
+    std::optional<CAmount> m_availableDGBBalance;
     double m_oraclePrice;
     double m_mintAmount;
     int m_selectedTier;

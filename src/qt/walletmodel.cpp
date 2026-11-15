@@ -1526,13 +1526,6 @@ CAmount WalletModel::getLockedCollateral() const
     }
 }
 
-CAmount WalletModel::getAvailableDGBBalance() const
-{
-    // Retain the legacy ownership projection for existing display callers.
-    const interfaces::WalletBalances& balances = getCachedBalance();
-    return balances.balance;
-}
-
 std::optional<CAmount> WalletModel::getSpendableDGBBalance() const
 {
     const auto& balances = getCachedBalance();
