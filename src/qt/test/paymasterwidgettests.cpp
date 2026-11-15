@@ -5102,6 +5102,9 @@ void PaymasterWidgetTests::paymasterClientRecipientlessCancellation()
             primary->click();
             QCOMPARE(primary->text(), QStringLiteral("Start a new transfer"));
             primary->click();
+            // New-transfer closure rechecks Core through a queued observation.
+            // Wait for that operation, then keep the editability assertions below.
+            QTRY_VERIFY_WITH_TIMEOUT(client->m_send.view().requestId.isEmpty(), 5000);
         }
     } else {
         closed = true;
