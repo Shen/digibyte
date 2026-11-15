@@ -412,6 +412,8 @@ FUZZ_WALLET_SRC += \
 endif # USE_SQLITE
 
 DIGIBYTE_TEST_SUITE += \
+  wallet/test/paymaster_chain.h \
+  wallet/test/paymaster_checkpoint.h \
   wallet/test/wallet_test_fixture.cpp \
   wallet/test/wallet_test_fixture.h \
   wallet/test/init_test_fixture.cpp \

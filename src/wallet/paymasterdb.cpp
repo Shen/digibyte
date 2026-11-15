@@ -2660,7 +2660,7 @@ bool WalletBatch::WritePaymasterFinanceLedger(
     // internal callers. Normal event updates use WritePaymasterFinanceEvents.
     if (!PaymasterCheckpointWrite(this, *m_batch, m_database)) return fail();
     for (const auto& prefix : {FINANCE_EVENT, FINANCE_TIME, FINANCE_TX, FINANCE_DAY}) {
-        if (!m_batch->ErasePrefix(FinancePrefix(prefix))) return fail();
+        if (!ErasePaymasterCheckpointPrefix(this, *m_batch, FinancePrefix(prefix))) return fail();
     }
     for (const auto& event : ledger.events) {
         if (!WritePaymasterIC(std::make_pair(FINANCE_EVENT, event.event_id), event) ||
@@ -2795,7 +2795,7 @@ bool WalletBatch::RepairPaymasterFinanceDerivations(
     };
     if (!PaymasterCheckpointWrite(this, *m_batch, m_database)) return fail("PAYMASTER_FINANCE_DATABASE_WRITE");
     for (const auto& prefix : {FINANCE_TIME, FINANCE_TX, FINANCE_DAY}) {
-        if (!m_batch->ErasePrefix(FinancePrefix(prefix))) return fail("PAYMASTER_FINANCE_DATABASE_WRITE");
+        if (!ErasePaymasterCheckpointPrefix(this, *m_batch, FinancePrefix(prefix))) return fail("PAYMASTER_FINANCE_DATABASE_WRITE");
     }
     // Preserve every immutable event byte. Only disposable derivations change.
     for (const auto& event : ledger.events) {

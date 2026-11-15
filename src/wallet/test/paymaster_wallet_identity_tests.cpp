@@ -41,6 +41,7 @@
 #include <wallet/rpc/paymaster.h>
 #include <wallet/rpc/paymaster_internal.h>
 #include <wallet/test/paymaster_chain.h>
+#include <wallet/test/paymaster_checkpoint.h>
 #include <wallet/test/util.h>
 #include <wallet/test/wallet_test_fixture.h>
 #include <wallet/wallet.h>
@@ -2411,11 +2412,14 @@ BOOST_AUTO_TEST_CASE(maintenance_cancellation_is_selected_atomic_and_signature_s
     BOOST_REQUIRE(CancelPaymasterMaintenance(m_wallet, retry_ids, false, {}, 2000, result, error));
     const auto retry_plan = result.plan_id;
     const auto before_commit = db.m_records;
-    db.FailCommit();
-    BOOST_CHECK(!CancelPaymasterMaintenance(m_wallet, retry_ids, true, retry_plan, 2000, result, error));
-    BOOST_CHECK_EQUAL(error, "PAYMASTER_DATABASE_COMMIT");
-    db.ClearFailureInjection();
-    BOOST_CHECK(db.m_records == before_commit);
+    {
+        PaymasterFinalCommitFailure failure{db};
+        BOOST_CHECK(!CancelPaymasterMaintenance(m_wallet, retry_ids, true, retry_plan, 2000, result, error));
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_DATABASE_COMMIT");
+        BOOST_REQUIRE(failure.Armed());
+    }
+    BOOST_REQUIRE(db.m_records.count(PaymasterCheckpointIntentKey()));
+    BOOST_CHECK(WithoutPaymasterCheckpointIntent(db.m_records) == before_commit);
     BOOST_CHECK(!CheckPaymasterCheckpoint(m_wallet.GetDatabase(), error));
     BOOST_CHECK(!CancelPaymasterMaintenance(m_wallet, retry_ids, true, retry_plan, 2000, result, error));
 }
@@ -2919,10 +2923,13 @@ BOOST_AUTO_TEST_CASE(capital_release_is_reviewed_atomic_and_fail_closed)
     BOOST_CHECK_EQUAL(plan.entries, 0U);
     const auto released = db.m_records;
     const auto empty_plan = plan.plan_id;
-    db.FailCommit();
-    BOOST_CHECK(!ReleasePaymasterCapital(m_wallet, true, empty_plan, 2000, plan, error));
-    db.ClearFailureInjection();
-    BOOST_CHECK(db.m_records == released);
+    {
+        PaymasterFinalCommitFailure failure{db};
+        BOOST_CHECK(!ReleasePaymasterCapital(m_wallet, true, empty_plan, 2000, plan, error));
+        BOOST_REQUIRE(failure.Armed());
+    }
+    BOOST_REQUIRE(db.m_records.count(PaymasterCheckpointIntentKey()));
+    BOOST_CHECK(WithoutPaymasterCheckpointIntent(db.m_records) == released);
     // An external-ahead commit failure never permits a blind fresh retry.
     BOOST_CHECK(!CheckPaymasterCheckpoint(m_wallet.GetDatabase(), error));
 }
@@ -3112,11 +3119,18 @@ BOOST_AUTO_TEST_CASE(capital_recovery_release_is_atomic_and_retires_identity)
             continue;
         }
         if (scenario == 1 || scenario == 2) {
+            std::optional<PaymasterFinalCommitFailure> commit_failure;
             if (scenario == 1) database.FailWriteAt(1); // after the retirement record, before pool update
-            else database.FailCommit();
+            else commit_failure.emplace(database);
             BOOST_CHECK(!ReleasePaymasterCapital(wallet, true, plan, 2000, preview, error, true));
+            if (commit_failure) BOOST_REQUIRE(commit_failure->Armed());
+            commit_failure.reset();
             database.ClearFailureInjection();
-            BOOST_CHECK(database.m_records == before);
+            if (scenario == 1) BOOST_CHECK(database.m_records == before);
+            else {
+                BOOST_REQUIRE(database.m_records.count(PaymasterCheckpointIntentKey()));
+                BOOST_CHECK(WithoutPaymasterCheckpointIntent(database.m_records) == before);
+            }
             if (scenario == 2) {
                 BOOST_CHECK(!CheckPaymasterCheckpoint(original.GetDatabase(), error));
                 BOOST_CHECK(!ReleasePaymasterCapital(wallet, false, {}, 2000, preview, error, true));
@@ -3267,11 +3281,18 @@ BOOST_AUTO_TEST_CASE(current_backup_adoption_is_atomic_and_fences_old_copies)
             continue;
         }
         if (scenario == 1 || scenario == 2) {
+            std::optional<PaymasterFinalCommitFailure> commit_failure;
             if (scenario == 1) database.FailWriteAt(0); // checkpoint update before guard removal
-            else database.FailCommit();
+            else commit_failure.emplace(database);
             BOOST_CHECK(!AdoptPaymasterBackup(wallet, true, plan, 2000, preview, error));
+            if (commit_failure) BOOST_REQUIRE(commit_failure->Armed());
+            commit_failure.reset();
             database.ClearFailureInjection();
-            BOOST_CHECK(database.m_records == before);
+            if (scenario == 1) BOOST_CHECK(database.m_records == before);
+            else {
+                BOOST_REQUIRE(database.m_records.count(PaymasterCheckpointIntentKey()));
+                BOOST_CHECK(WithoutPaymasterCheckpointIntent(database.m_records) == before);
+            }
             if (scenario == 2) {
                 BOOST_CHECK(!CheckPaymasterCheckpoint(original.GetDatabase(), error));
                 BOOST_CHECK(!AdoptPaymasterBackup(wallet, false, {}, 2000, preview, error));
@@ -3496,10 +3517,13 @@ BOOST_AUTO_TEST_CASE(carrier_withdrawal_preview_owns_wallet_observation_lock)
         auto& database = GetMockableDatabase(provider_wallet);
         const auto before_release = database.m_records;
         if (fail_commit) {
-            database.m_fail_commit = true;
-            BOOST_CHECK_THROW(paymaster_app::WithdrawPaymasterCarrier(context, provider_wallet, request), ApplicationError);
-            database.m_fail_commit = false;
-            BOOST_CHECK(database.m_records == before_release);
+            {
+                PaymasterFinalCommitFailure failure{database};
+                BOOST_CHECK_THROW(paymaster_app::WithdrawPaymasterCarrier(context, provider_wallet, request), ApplicationError);
+                BOOST_REQUIRE(failure.Armed());
+            }
+            BOOST_REQUIRE(database.m_records.count(PaymasterCheckpointIntentKey()));
+            BOOST_CHECK(WithoutPaymasterCheckpointIntent(database.m_records) == before_release);
             BOOST_CHECK(!CheckPaymasterCheckpoint(provider_wallet.GetDatabase(), error));
             BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_CHECKPOINT_REVIEW_REQUIRED");
             continue;
@@ -3989,13 +4013,16 @@ void CheckCapacityProofReservationLifecycle(WalletTestingSetup& fixture, uint16_
         BOOST_CHECK(database.m_records == before_expiry);
     }
     if (fail_commit) {
-        database.FailCommit();
-        BOOST_CHECK(!store.ExpireProviderCapacityReservations(
-            173, expired_reservations, error));
-        BOOST_CHECK_EQUAL(error, "PAYMASTER_DATABASE_COMMIT");
-        BOOST_CHECK_EQUAL(expired_reservations, 0U);
-        database.ClearFailureInjection();
-        BOOST_CHECK(database.m_records == before_expiry);
+        {
+            PaymasterFinalCommitFailure failure{database};
+            BOOST_CHECK(!store.ExpireProviderCapacityReservations(
+                173, expired_reservations, error));
+            BOOST_CHECK_EQUAL(error, "PAYMASTER_DATABASE_COMMIT");
+            BOOST_CHECK_EQUAL(expired_reservations, 0U);
+            BOOST_REQUIRE(failure.Armed());
+        }
+        BOOST_REQUIRE(database.m_records.count(PaymasterCheckpointIntentKey()));
+        BOOST_CHECK(WithoutPaymasterCheckpointIntent(database.m_records) == before_expiry);
         // The independent checkpoint is advanced before DB commit. A failed
         // commit must keep the old reservation and require recovery review.
         BOOST_CHECK(!CheckPaymasterCheckpoint(m_wallet.GetDatabase(), error));
@@ -4004,7 +4031,20 @@ void CheckCapacityProofReservationLifecycle(WalletTestingSetup& fixture, uint16_
             173, expired_reservations, error));
         BOOST_CHECK_EQUAL(error, "PAYMASTER_DATABASE_WRITE");
         BOOST_CHECK_EQUAL(expired_reservations, 0U);
-        BOOST_CHECK(database.m_records == before_expiry);
+        BOOST_CHECK(WithoutPaymasterCheckpointIntent(database.m_records) == before_expiry);
+        wallet::CWallet recovered{m_node.chain.get(), "capacity-exact-intent-restart", DuplicateMockDatabase(database)};
+        BOOST_REQUIRE(recovered.LoadWallet() == DBErrors::LOAD_OK);
+        BOOST_REQUIRE(CheckPaymasterCheckpoint(recovered.GetDatabase(), error));
+        std::vector<ProviderPoolEntry> recovered_pool;
+        ProviderBudgetLedger recovered_budget;
+        WalletBatch replayed{recovered.GetDatabase()};
+        BOOST_REQUIRE(replayed.ReadPaymasterProviderPool(recovered_pool));
+        BOOST_CHECK(std::none_of(recovered_pool.begin(), recovered_pool.end(), [&](const auto& entry) {
+            return entry.reservation_id == reserved_request.client_nonce;
+        }));
+        BOOST_REQUIRE(replayed.ReadPaymasterProviderBudgetLedger(recovered_budget));
+        BOOST_CHECK(std::none_of(recovered_budget.capacity_admissions.begin(), recovered_budget.capacity_admissions.end(),
+            [&](const auto& admission) { return admission.state == CapacityAdmissionState::RESERVED; }));
         return;
     }
 
@@ -4486,10 +4526,13 @@ BOOST_AUTO_TEST_CASE(finite_setup_authority_and_history_commit_atomically)
     parameters.plan_id = paymaster_app::PreparePaymasterPool(context, provider, parameters).plan_id;
     parameters.execute = true;
     auto& database = GetMockableDatabase(provider);
-    database.m_fail_commit = true;
-    BOOST_CHECK_EXCEPTION(paymaster_app::PreparePaymasterPool(context, provider, parameters), ApplicationError,
-        [](const ApplicationError& e) { return e.code == "PAYMASTER_DATABASE_COMMIT"; });
-    database.ClearFailureInjection();
+    {
+        PaymasterFinalCommitFailure failure{database};
+        BOOST_CHECK_EXCEPTION(paymaster_app::PreparePaymasterPool(context, provider, parameters), ApplicationError,
+            [](const ApplicationError& e) { return e.code == "PAYMASTER_DATABASE_COMMIT"; });
+        BOOST_REQUIRE(failure.Armed());
+    }
+    BOOST_REQUIRE(database.m_records.count(PaymasterCheckpointIntentKey()));
     WalletBatch batch{database};
     ProviderSetupAuthorization authorization;
     ProviderMaintenanceLedger ledger;

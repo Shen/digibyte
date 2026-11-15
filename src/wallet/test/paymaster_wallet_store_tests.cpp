@@ -46,6 +46,7 @@
 #include <wallet/scriptpubkeyman.h>
 #include <wallet/test/paymaster_chain.h>
 #include <wallet/test/util.h>
+#include <wallet/test/paymaster_checkpoint.h>
 #include <wallet/test/wallet_test_fixture.h>
 #include <wallet/wallet.h>
 #include <wallet/walletdb.h>
@@ -4090,20 +4091,43 @@ static void CheckProviderQuoteCommit(WalletTestingSetup& fixture, bool fail_comm
         check_uncommitted();
     }
     if (fail_commit) {
-        database.FailCommit();
-        BOOST_CHECK(!store.CommitProviderQuote(
-            attempt, request.intent.genesis_hash, now, error));
-        BOOST_CHECK_EQUAL(error, "PAYMASTER_DATABASE_COMMIT");
-        database.ClearFailureInjection();
-        BOOST_CHECK(database.m_records == before_commit);
+        {
+            PaymasterFinalCommitFailure failure{database};
+            BOOST_CHECK(!store.CommitProviderQuote(
+                attempt, request.intent.genesis_hash, now, error));
+            BOOST_CHECK_EQUAL(error, "PAYMASTER_DATABASE_COMMIT");
+            BOOST_REQUIRE(failure.Armed());
+        }
+        BOOST_REQUIRE(database.m_records.count(PaymasterCheckpointIntentKey()));
+        BOOST_CHECK(WithoutPaymasterCheckpointIntent(database.m_records) == before_commit);
         check_uncommitted();
         BOOST_CHECK(!CheckPaymasterCheckpoint(m_wallet.GetDatabase(), error));
         BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_CHECKPOINT_REVIEW_REQUIRED");
         BOOST_CHECK(!store.CommitProviderQuote(
             attempt, request.intent.genesis_hash, now, error));
         BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_CHECKPOINT_REVIEW_REQUIRED");
-        BOOST_CHECK(database.m_records == before_commit);
+        BOOST_CHECK(WithoutPaymasterCheckpointIntent(database.m_records) == before_commit);
         check_uncommitted();
+        wallet::CWallet recovered_wallet{m_node.chain.get(), "quote-exact-intent-restart", DuplicateMockDatabase(database)};
+        BOOST_REQUIRE(recovered_wallet.LoadWallet() == DBErrors::LOAD_OK);
+        BOOST_REQUIRE(CheckPaymasterCheckpoint(recovered_wallet.GetDatabase(), error));
+        PaymasterStore recovered_store{recovered_wallet};
+        ProviderAttempt recovered_attempt;
+        BOOST_REQUIRE(recovered_store.GetAttempt(attempt.attempt_id, recovered_attempt));
+        BOOST_CHECK(recovered_attempt.state == AttemptState::QUOTED);
+        BOOST_CHECK(recovered_attempt.signed_quote == attempt.signed_quote);
+        ProviderBudgetLedger recovered_budget;
+        std::vector<ProviderPoolEntry> recovered_pool;
+        WalletBatch recovered_batch{recovered_wallet.GetDatabase()};
+        BOOST_REQUIRE(recovered_batch.ReadPaymasterProviderBudgetLedger(recovered_budget));
+        BOOST_REQUIRE_EQUAL(recovered_budget.reservations.size(), 1U);
+        BOOST_CHECK(recovered_budget.reservations.front().state == BudgetReservationState::RESERVED);
+        BOOST_REQUIRE(recovered_batch.ReadPaymasterProviderPool(recovered_pool));
+        BOOST_REQUIRE_EQUAL(recovered_pool.size(), 1U);
+        BOOST_CHECK(recovered_pool.front().reservation_id == attempt.commit_key);
+        const auto recovered_image = GetMockableDatabase(recovered_wallet).m_records;
+        BOOST_REQUIRE_MESSAGE(recovered_store.CommitProviderQuote(attempt, request.intent.genesis_hash, now, error), error);
+        BOOST_CHECK(GetMockableDatabase(recovered_wallet).m_records == recovered_image);
         return;
     }
 

@@ -1791,6 +1791,14 @@ DBErrors WalletBatch::LoadWallet(CWallet* pwallet)
 
     LOCK(pwallet->cs_wallet);
 
+    // Replay a previously authorized exact checkpoint mutation before flags,
+    // coin-lock owners or any other wallet record becomes visible in memory.
+    std::string checkpoint_error;
+    if (!RecoverPaymasterCheckpointJournal(m_database, checkpoint_error)) {
+        pwallet->WalletLogPrintf("Paymaster checkpoint recovery refused: %s\n", checkpoint_error);
+        return DBErrors::LOAD_FAIL;
+    }
+
     // Last client version to open this wallet
     int last_client = CLIENT_VERSION;
     bool has_last_client = m_batch->Read(DBKeys::VERSION, last_client);
@@ -1998,7 +2006,7 @@ bool WalletBatch::EraseAddressData(const CTxDestination& dest)
 {
     DataStream prefix;
     prefix << DBKeys::DESTDATA << EncodeDestination(dest);
-    return m_batch->ErasePrefix(prefix);
+    return ErasePaymasterCheckpointPrefix(this, *m_batch, prefix);
 }
 
 bool WalletBatch::WriteHDChain(const CHDChain& chain)

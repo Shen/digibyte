@@ -15,6 +15,7 @@
 #include <paymaster/sponsorship.h>
 #include <script/sign.h>
 #include <wallet/db.h>
+#include <wallet/paymastercheckpoint.h>
 #include <wallet/walletutil.h>
 
 #include <stdint.h>
@@ -320,7 +321,11 @@ private:
     template <typename K, typename T>
     bool WriteIC(const K& key, const T& value, bool fOverwrite = true)
     {
-        if (!m_batch->Write(key, value, fOverwrite)) {
+        DataStream encoded_key;
+        CDataStream encoded_value{SER_DISK, CLIENT_VERSION};
+        encoded_key << key;
+        encoded_value << value;
+        if (!WritePaymasterCheckpointRecord(this, *m_batch, encoded_key, encoded_value, fOverwrite)) {
             return false;
         }
         m_database.IncrementUpdateCounter();
@@ -333,7 +338,9 @@ private:
     template <typename K>
     bool EraseIC(const K& key)
     {
-        if (!m_batch->Erase(key)) {
+        DataStream encoded_key;
+        encoded_key << key;
+        if (!ErasePaymasterCheckpointRecord(this, *m_batch, encoded_key)) {
             return false;
         }
         m_database.IncrementUpdateCounter();

@@ -29,6 +29,7 @@
 #include <wallet/paymastersessionindex.h>
 #include <wallet/rpc/paymaster.h>
 #include <wallet/test/util.h>
+#include <wallet/test/paymaster_checkpoint.h>
 #include <wallet/test/wallet_test_fixture.h>
 #include <wallet/walletdb.h>
 
@@ -879,16 +880,19 @@ BOOST_AUTO_TEST_CASE(transaction_pages_keep_256_budget_and_retry_failed_commits)
     BOOST_CHECK_EQUAL(Metadata().totals.total.dd_income.value, 256 * 3);
     BOOST_CHECK_LE(database->reads.rows, 257U); // Includes the look-ahead index row.
     const auto saved = database->m_records;
-    database->m_fail_commit = true;
-    BOOST_CHECK(!ReconcileProviderFinanceReport(*provider, false, error));
-    BOOST_CHECK_EQUAL(error, "PAYMASTER_DATABASE_COMMIT");
-    BOOST_CHECK(database->m_records == saved);
-    database->m_fail_commit = false;
+    {
+        PaymasterFinalCommitFailure failure{*database};
+        BOOST_CHECK(!ReconcileProviderFinanceReport(*provider, false, error));
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_DATABASE_COMMIT");
+        BOOST_REQUIRE(failure.Armed());
+    }
+    BOOST_REQUIRE(database->m_records.count(PaymasterCheckpointIntentKey()));
+    BOOST_CHECK(WithoutPaymasterCheckpointIntent(database->m_records) == saved);
     // The independent checkpoint was advanced before the rejected DB commit.
     // Retain the job, but never bypass that fence on an automatic retry.
     BOOST_CHECK(!CheckPaymasterCheckpoint(*database, error));
     BOOST_CHECK(!ReconcileProviderFinanceReport(*provider, false, error));
-    BOOST_CHECK(database->m_records == saved);
+    BOOST_CHECK(WithoutPaymasterCheckpointIntent(database->m_records) == saved);
     {
         LOCK(provider->cs_wallet);
         BOOST_CHECK(!AreProviderFinancesCurrent(*provider));
@@ -943,9 +947,12 @@ BOOST_AUTO_TEST_CASE(committed_finance_sources_enqueue_but_aborted_writes_do_not
     BOOST_CHECK(WITH_LOCK(provider->cs_wallet, return AreProviderFinancesCurrent(*provider)));
     BOOST_REQUIRE(ReconcileProviderFinanceReport(*provider, false, error));
     BOOST_CHECK_EQUAL(Metadata().event_count, 0U);
-    database->m_fail_commit = true;
-    BOOST_CHECK(!batch.WritePaymasterFinanceEvents(Metadata(), {event}, error));
-    database->m_fail_commit = false;
+    {
+        PaymasterFinalCommitFailure failure{*database};
+        BOOST_CHECK(!batch.WritePaymasterFinanceEvents(Metadata(), {event}, error));
+        BOOST_REQUIRE(failure.Armed());
+    }
+    BOOST_REQUIRE(database->m_records.count(PaymasterCheckpointIntentKey()));
     BOOST_REQUIRE(ReconcileProviderFinanceReport(*provider, false, error));
     BOOST_CHECK_EQUAL(Metadata().event_count, 0U);
     BOOST_CHECK(!CheckPaymasterCheckpoint(*database, error));
@@ -1294,12 +1301,15 @@ BOOST_AUTO_TEST_CASE(recovery_final_commit_failure_cannot_publish_finance_or_spe
     Drain();
     auto [recovery, commit] = Recovery();
     const auto before = database->m_records;
-    database->m_fail_commit = true;
     PaymasterStore store{*provider};
-    BOOST_CHECK(!store.CommitProviderAlternativeRecoveryFinal(recovery, commit,
-        recovery.signed_result, Params().GenesisBlock().GetHash(), error));
-    database->m_fail_commit = false;
-    BOOST_CHECK(database->m_records == before);
+    {
+        PaymasterFinalCommitFailure failure{*database};
+        BOOST_CHECK(!store.CommitProviderAlternativeRecoveryFinal(recovery, commit,
+            recovery.signed_result, Params().GenesisBlock().GetHash(), error));
+        BOOST_REQUIRE(failure.Armed());
+    }
+    BOOST_REQUIRE(database->m_records.count(PaymasterCheckpointIntentKey()));
+    BOOST_CHECK(WithoutPaymasterCheckpointIntent(database->m_records) == before);
     BOOST_CHECK_EQUAL(Metadata().event_count, 0U);
     WalletBatch batch{*database};
     ProviderFinanceEvent event;
@@ -1311,6 +1321,21 @@ BOOST_AUTO_TEST_CASE(recovery_final_commit_failure_cannot_publish_finance_or_spe
     BOOST_REQUIRE(batch.ReadPaymasterAlternativeRecovery(recovery.recovery_id, saved));
     BOOST_CHECK(saved.phase == AlternativeRecoveryPhase::USER_SIGNED);
     BOOST_CHECK(!CheckPaymasterCheckpoint(*database, error));
+    wallet::CWallet reloaded{m_node.chain.get(), "recovery-final-intent-restart", DuplicateMockDatabase(*database)};
+    BOOST_REQUIRE(reloaded.LoadWallet() == DBErrors::LOAD_OK);
+    BOOST_REQUIRE(CheckPaymasterCheckpoint(reloaded.GetDatabase(), error));
+    WalletBatch recovered{reloaded.GetDatabase()};
+    ProviderCommitRecord exact;
+    BOOST_REQUIRE(recovered.ReadPaymasterProviderCommit(commit.commit_key, exact));
+    BOOST_CHECK(exact.final_transaction == commit.final_transaction);
+    BOOST_REQUIRE(recovered.ReadPaymasterProviderBudgetLedger(budget));
+    BOOST_CHECK(budget.reservations.front().state == BudgetReservationState::SPENT);
+    BOOST_REQUIRE(recovered.ReadPaymasterAlternativeRecovery(recovery.recovery_id, saved));
+    BOOST_CHECK(saved.phase == AlternativeRecoveryPhase::FINAL_COMMITTED);
+    BOOST_CHECK(saved.final_transaction == commit.final_transaction);
+    BOOST_REQUIRE(recovered.ReadPaymasterFinanceEvent(commit.commit_key, event) == DatabaseReadStatus::FOUND);
+    BOOST_CHECK(event.kind == ProviderFinanceEventKind::RECOVERY);
+    BOOST_CHECK_EQUAL(event.dgb_cost.value, 500);
 }
 
 BOOST_AUTO_TEST_CASE(derived_maintenance_cost_repair_survives_reload_and_journal_pruning)
@@ -1355,11 +1380,14 @@ BOOST_AUTO_TEST_CASE(maintenance_cost_repair_failed_commit_preserves_source_and_
     BOOST_REQUIRE(batch.WritePaymasterMaintenanceLedger(ledger));
     BOOST_REQUIRE(batch.WritePaymasterFinanceEvents(Metadata(), {EstimatedMaintenanceEvent(record)}, error));
     const auto before = database->m_records;
-    database->m_fail_commit = true;
     size_t changed{0};
-    BOOST_CHECK(!RebuildProviderFinances(*provider, changed, error));
-    database->m_fail_commit = false;
-    BOOST_CHECK(database->m_records == before);
+    {
+        PaymasterFinalCommitFailure failure{*database};
+        BOOST_CHECK(!RebuildProviderFinances(*provider, changed, error));
+        BOOST_REQUIRE(failure.Armed());
+    }
+    BOOST_REQUIRE(database->m_records.count(PaymasterCheckpointIntentKey()));
+    BOOST_CHECK(WithoutPaymasterCheckpointIntent(database->m_records) == before);
     BOOST_CHECK_EQUAL(Metadata().totals.total.dgb_cost.value, 100);
     BOOST_REQUIRE(batch.ReadPaymasterMaintenanceLedger(ledger));
     BOOST_CHECK_EQUAL(ledger.records.front().actual_fee.value, 100);
@@ -1502,12 +1530,15 @@ BOOST_AUTO_TEST_CASE(finance_derived_repair_failed_commit_preserves_sources_and_
     BOOST_REQUIRE_EQUAL(keys.size(), 1U);
     database->m_records.erase(keys.front());
     const auto damaged = database->m_records;
-    database->m_fail_commit = true;
     size_t changed{0};
-    BOOST_CHECK(!RebuildProviderFinances(*provider, changed, error));
-    database->m_fail_commit = false;
+    {
+        PaymasterFinalCommitFailure failure{*database};
+        BOOST_CHECK(!RebuildProviderFinances(*provider, changed, error));
+        BOOST_REQUIRE(failure.Armed());
+    }
+    BOOST_REQUIRE(database->m_records.count(PaymasterCheckpointIntentKey()));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_DATABASE_COMMIT");
-    BOOST_CHECK(database->m_records == damaged);
+    BOOST_CHECK(WithoutPaymasterCheckpointIntent(database->m_records) == damaged);
     BOOST_CHECK(!CheckPaymasterCheckpoint(*database, error));
     BOOST_CHECK(!WITH_LOCK(provider->cs_wallet, return AreProviderFinancesCurrent(*provider)));
 }

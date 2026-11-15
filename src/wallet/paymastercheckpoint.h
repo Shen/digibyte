@@ -6,10 +6,12 @@
 #define DIGIBYTE_WALLET_PAYMASTERCHECKPOINT_H
 
 #include <serialize.h>
+#include <span.h>
 #include <uint256.h>
 #include <util/fs.h>
 
 #include <cstdint>
+#include <cstddef>
 #include <string>
 
 namespace wallet {
@@ -41,6 +43,21 @@ struct PaymasterCheckpoint {
 
 fs::path PaymasterCheckpointPath(const uint256& genesis, const uint256& provider);
 bool CheckPaymasterCheckpoint(WalletDatabase& database, std::string& error);
+
+/** Finish only an independently committed exact database intent, before wallet
+ * records/flags/coin-lock owners are loaded into memory. Never a live repair or
+ * a stale-backup adoption operation. Unknown or inconsistent intent is retained. */
+bool RecoverPaymasterCheckpointJournal(WalletDatabase& database, std::string& error);
+
+// Record the complete raw mutation of a WalletBatch transaction, including
+// ordinary flags and coin-lock rows sharing a Paymaster financial transition.
+// Transactions without a Paymaster checkpoint keep the ordinary backend flow.
+bool WritePaymasterCheckpointRecord(const WalletBatch* owner, DatabaseBatch& batch,
+    Span<const std::byte> key, Span<const std::byte> value, bool overwrite);
+bool ErasePaymasterCheckpointRecord(const WalletBatch* owner, DatabaseBatch& batch,
+    Span<const std::byte> key);
+bool ErasePaymasterCheckpointPrefix(const WalletBatch* owner, DatabaseBatch& batch,
+    Span<const std::byte> prefix);
 
 /** Read-only recovery proof: an explicitly restored wallet must match the
  * independently retained, enrolled checkpoint and have no unfinished fence.
