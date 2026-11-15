@@ -940,7 +940,7 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
         self.log.info("Manual submit rejects mutation and commits exact retries once")
         submit_request_id = "550e8400-e29b-41d4-a716-446655441002"
         assert_equal(client.getbalance(), 0)
-        options, _, send = harness.wait_for_quote(
+        options, provider_quote, send = harness.wait_for_quote(
             submit_request_id, recipient, 500)
         # Simulated external client: prepare without authorization, explicitly
         # accept the returned commitment, then discard one response and resume.
@@ -986,12 +986,18 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
             before_commit.provider_budget["user_paid"]
             ["reserved_network_fee_satoshis"] > 0,
             True)
-        assert_raises_rpc_error(
-            -4, "", provider.cancelpaymasterquote,
-            authorization["attempt_id"])
         commit = provider.submitpaymasterdigidollar(psbt)
         assert_equal(len(commit["txid"]), 64)
         assert_equal(commit["broadcast"], True)
+        # Provider and client attempt IDs have independent authority. Exercise
+        # the provider-signature veto using the actual provider quote.
+        signed_snapshot = value_snapshot(
+            self.nodes[0], provider, client, recipient_wallet)
+        assert_raises_rpc_error(
+            -4, "PAYMASTER_PROVIDER_SIGNATURE_MAY_EXIST",
+            provider.cancelpaymasterquote, provider_quote["attempt_id"])
+        assert_equal(value_snapshot(
+            self.nodes[0], provider, client, recipient_wallet), signed_snapshot)
 
         def check_public_transaction_metadata():
             # Durable commit/recovery markers remain in the wallet database,

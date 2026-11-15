@@ -1385,6 +1385,249 @@ struct ProviderRequestProcessingContext {
     std::string& error;
 };
 
+// A replay is a read-only application operation. All request types reload their
+// own authoritative artifact, validate its binding and lifetime/closure state,
+// and use one guarded queue path. Absence alone permits fresh admission.
+struct ProviderReplayResponse {
+    DirectPayload payload;
+    ProviderProcessingResult result;
+};
+using ProviderReplayLookup = std::variant<std::monostate, ProviderProcessingResult, ProviderReplayResponse>;
+
+ProviderReplayLookup LoadProviderRequestReplay(
+    const ProviderRequestProcessingContext& request, const DirectMessage& direct,
+    const PaymasterCapacityRequest& capacity_request, PaymasterStore& store)
+{
+    PaymasterCapacityProof proof;
+    const auto status = store.GetProviderCapacityProofWithStatus(capacity_request,
+        request.now, proof, request.error);
+    if (status == ProviderCapacityProofStatus::NOT_FOUND) return {};
+    if (status == ProviderCapacityProofStatus::READ_ERROR) {
+        throw ApplicationError(ErrorKind::WALLET,
+            request.error.empty() ? "PAYMASTER_CAPACITY_DATABASE_READ" : request.error);
+    }
+    if (status != ProviderCapacityProofStatus::FOUND) {
+        return RejectProviderMessage(*request.context.paymaster, direct,
+            request.error, "capacity");
+    }
+    ProviderProcessingResult result;
+    result.message_type = "capacity";
+    result.provider_id = proof.provider_id;
+    result.client_nonce = proof.client_nonce;
+    result.capacity_snapshot_id = proof.snapshot_id;
+    return ProviderReplayResponse{DirectPayload{std::move(proof)}, std::move(result)};
+}
+
+ProviderReplayLookup LoadProviderRequestReplay(
+    const ProviderRequestProcessingContext& request,
+    const DirectMessage& direct, const AlternativeRecoveryRequest& recovery_request,
+    PaymasterStore& store)
+{
+    WalletContext& context = request.context;
+    const int64_t now = request.now;
+    const uint256 recovery_id = GetAlternativeRecoveryId(
+        recovery_request.request_id,
+        recovery_request.session_id,
+        recovery_request.recovery_provider_id,
+        recovery_request.client_nonce);
+    AlternativeRecoveryRecord persisted;
+    const DatabaseReadStatus recovery_status = store.GetAlternativeRecoveryByIdWithStatus(recovery_id, persisted);
+    if (recovery_status != DatabaseReadStatus::FOUND && recovery_status != DatabaseReadStatus::NOT_FOUND) {
+        throw ApplicationError(ErrorKind::WALLET,
+            recovery_status == DatabaseReadStatus::UNSUPPORTED_VERSION
+                ? "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION" : "PAYMASTER_RECOVERY_DATABASE_READ");
+    }
+    if (recovery_status == DatabaseReadStatus::NOT_FOUND) return {};
+    ProviderProcessingResult result;
+    result.disposition = ProviderProcessingDisposition::PROCESSED;
+    result.queued = false;
+    result.message_type = "recovery_request";
+    if (!persisted.provider_side ||
+        persisted.recovery_provider_id != request.readiness.identity.provider_id ||
+        persisted.recovery_provider_identity_key != request.readiness.identity.identity_key ||
+        persisted.recovery_request.genesis_hash != Params().GenesisBlock().GetHash() ||
+        persisted.recovery_request_hash != GetAlternativeRecoveryRequestHash(persisted.recovery_request) ||
+        persisted.phase < AlternativeRecoveryPhase::RESPONSE_VALIDATED ||
+        !ValidateAlternativeRecoveryResponse(persisted.recovery_response, persisted.recovery_request,
+            persisted.recovery_provider_identity_key, persisted.recovery_response.created_at, request.error)) {
+        throw ApplicationError(
+            ErrorKind::WALLET,
+            "PAYMASTER_ALTERNATIVE_RECOVERY_CONFLICT");
+    }
+    if (persisted.expired ||
+        persisted.recovery_request_hash != GetAlternativeRecoveryRequestHash(recovery_request) ||
+        SerializeRecoveryMessage(persisted.recovery_request) != SerializeRecoveryMessage(recovery_request)) {
+        return RejectProviderMessage(*context.paymaster, direct,
+            "PAYMASTER_ALTERNATIVE_RECOVERY_CONFLICT", "recovery_request");
+    }
+    result.request_id = persisted.request_id;
+    result.session_id = persisted.session_id;
+    result.provider_id = persisted.recovery_provider_id;
+    result.recovery_id = persisted.recovery_id;
+    result.template_commitment = persisted.recovery_response.manifest
+            .template_commitment;
+    return ProviderReplayResponse{DirectPayload{persisted.recovery_response}, std::move(result)};
+}
+
+ProviderReplayLookup LoadProviderRequestReplay(
+    const ProviderRequestProcessingContext& request, const DirectMessage& direct,
+    const PaymasterQuoteRequest& quote_request, PaymasterStore& store)
+{
+    WalletContext& context = request.context;
+    const ProviderReadiness& readiness = request.readiness;
+    const int64_t now = request.now;
+    std::string& error = request.error;
+    const std::vector<unsigned char> redacted_request =
+        SerializeRedactedQuoteRequest(quote_request);
+    PaymentSession persisted_session;
+    const auto session_status = store.GetSessionByRequestIdWithStatus(
+        quote_request.intent.request_id, persisted_session);
+    if (session_status != DatabaseReadStatus::FOUND &&
+        session_status != DatabaseReadStatus::NOT_FOUND) {
+        throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SESSION_DATABASE_READ");
+    }
+    if (session_status == DatabaseReadStatus::NOT_FOUND) return {};
+    {
+        // An intact client session or retained tombstone owns this request ID,
+        // but does not promise a provider attempt that can answer this peer.
+        if (!persisted_session.provider_side) {
+            return RejectProviderMessage(*context.paymaster, direct,
+                "PAYMASTER_REQUEST_ID_CONFLICT", "quote");
+        }
+        ProviderAttempt persisted_attempt;
+        PaymentIntent authorized_intent;
+        PaymasterQuote authorized_quote;
+        CollaborativePSBTTemplate trusted;
+        // Validate saved authority independently of the incoming request. A
+        // conflicting peer must never hide a damaged local attempt as rejection.
+        if (persisted_session.attempt_ids.size() != 1 ||
+            !store.GetAttempt(persisted_session.attempt_ids.front(), persisted_attempt) ||
+            !LoadAttemptAuthorizationArtifacts(persisted_attempt, authorized_intent,
+                authorized_quote, trusted, error) ||
+            persisted_session.request_id != authorized_intent.request_id ||
+            persisted_session.session_id != authorized_intent.session_id ||
+            persisted_session.canonical_request_hash != Hash(persisted_attempt.quote_request) ||
+            persisted_attempt.session_id != authorized_intent.session_id ||
+            persisted_attempt.provider_id != authorized_intent.provider_id ||
+            persisted_attempt.client_nonce != authorized_intent.client_nonce ||
+            persisted_attempt.intent_hash != GetPaymentIntentHash(authorized_intent) ||
+            persisted_attempt.created_at <= 0 ||
+            persisted_attempt.quote_expires_at <= persisted_attempt.created_at ||
+            persisted_attempt.retry_until < persisted_attempt.quote_expires_at ||
+            persisted_attempt.created_at != authorized_quote.created_at ||
+            persisted_attempt.quote_expires_at != authorized_quote.expires_at ||
+            persisted_attempt.retry_until != authorized_quote.retry_until) {
+            throw ApplicationError(ErrorKind::WALLET,
+                "PAYMASTER_PERSISTED_QUOTE_CORRUPT");
+        }
+
+        PaymasterQuoteRequest persisted_request;
+        PaymasterQuoteResponse response;
+        try {
+            CDataStream request_stream{persisted_attempt.quote_request, SER_NETWORK,
+                                       ::PROTOCOL_VERSION};
+            request_stream >> persisted_request;
+            SpanReader stream{::PROTOCOL_VERSION, persisted_attempt.signed_quote};
+            stream >> response;
+            if (!request_stream.empty() ||
+                SerializeRedactedQuoteRequest(persisted_request) != persisted_attempt.quote_request ||
+                !IsSupportedDirectProtocolVersion(persisted_request.version) ||
+                !IsSupportedDirectProtocolVersion(response.version) ||
+                !stream.empty() || SerializeQuoteResponse(response) !=
+                                       persisted_attempt.signed_quote) {
+                throw std::ios_base::failure("non-canonical persisted quote");
+            }
+        } catch (const std::ios_base::failure&) {
+            throw ApplicationError(ErrorKind::WALLET,
+                               "PAYMASTER_PERSISTED_QUOTE_CORRUPT");
+        }
+        if (response.request_id != persisted_session.request_id ||
+            response.session_id != persisted_session.session_id ||
+            response.quote.provider_id != persisted_attempt.provider_id ||
+            response.quote.quote_id != persisted_attempt.quote_id ||
+            response.quote.template_commitment !=
+                persisted_attempt.template_commitment ||
+            !ValidateQuoteResponseEnvelope(response, Params().GenesisBlock().GetHash(),
+                response.quote.created_at, error) ||
+            !persisted_attempt.provider_identity_key.IsFullyValid() ||
+            GetPaymasterId(persisted_attempt.provider_identity_key) !=
+                persisted_attempt.provider_id ||
+            !persisted_attempt.provider_identity_key.VerifySchnorr(
+                GetPaymasterQuoteSignatureHash(response.quote),
+                response.quote.identity_signature) ||
+            response.quote.template_commitment !=
+                GetCollaborativeTemplateCommitment(authorized_intent, response.quote, trusted)) {
+            throw ApplicationError(ErrorKind::WALLET,
+                               "PAYMASTER_PERSISTED_QUOTE_CORRUPT");
+        }
+        if (persisted_session.session_id != quote_request.intent.session_id ||
+            persisted_session.canonical_request_hash != Hash(redacted_request) ||
+            persisted_attempt.provider_id != readiness.identity.provider_id ||
+            persisted_attempt.client_nonce != quote_request.intent.client_nonce ||
+            persisted_attempt.intent_hash != GetPaymentIntentHash(quote_request.intent) ||
+            persisted_attempt.quote_request != redacted_request) {
+            return RejectProviderMessage(*context.paymaster, direct,
+                "PAYMASTER_REQUEST_ID_CONFLICT", "quote");
+        }
+        if (persisted_attempt.quote_expires_at <= now ||
+            persisted_attempt.retry_until < now) {
+            return RejectProviderMessage(*context.paymaster, direct,
+                "PAYMASTER_PROVIDER_RETRY_EXPIRED", "quote");
+        }
+        if (persisted_attempt.state == AttemptState::REJECTED ||
+            persisted_attempt.state == AttemptState::QUOTE_EXPIRED ||
+            persisted_attempt.state == AttemptState::CONFLICTED ||
+            persisted_session.state == SessionState::FAILED ||
+            persisted_session.state == SessionState::CANCELED_SAFE ||
+            persisted_session.state == SessionState::CONFLICTED) {
+            return RejectProviderMessage(*context.paymaster, direct,
+                "PAYMASTER_PROVIDER_QUOTE_CLOSED", "quote");
+        }
+        ProviderProcessingResult result;
+        result.message_type = "quote";
+        result.request_id = response.request_id;
+        result.session_id = response.session_id;
+        result.provider_id = response.quote.provider_id;
+        result.attempt_id = persisted_attempt.attempt_id;
+        result.quote_id = response.quote.quote_id;
+        result.template_commitment = response.quote.template_commitment;
+        return ProviderReplayResponse{DirectPayload{std::move(response)}, std::move(result)};
+    }
+}
+
+template <typename Request, typename Validate>
+std::optional<ProviderProcessingResult> ReplayProviderRequest(
+    const ProviderRequestProcessingContext& request, const DirectMessage& direct,
+    const Request& payload, PaymasterStore& store, Validate validate)
+{
+    // Restricted admission proofs may consult chainstate; check them before
+    // taking the wallet lock used to serialize closure and queueing.
+    validate();
+    // Serialize closure and response queueing. A completed cancellation cannot
+    // race a stale read into offering the closed quote again.
+    LOCK(request.wallet->cs_wallet);
+    if (!CheckPaymasterProviderRestoreGuard(*request.wallet, request.error)) {
+        throw ApplicationError(ErrorKind::WALLET, request.error);
+    }
+    auto lookup = LoadProviderRequestReplay(request, direct, payload, store);
+    if (std::holds_alternative<std::monostate>(lookup)) return std::nullopt;
+    if (const auto* rejected = std::get_if<ProviderProcessingResult>(&lookup)) return *rejected;
+    auto& replay = std::get<ProviderReplayResponse>(lookup);
+    const auto encoded = std::visit([](const auto& response) {
+        CDataStream stream{SER_NETWORK, ::PROTOCOL_VERSION};
+        stream << response;
+        const auto bytes = MakeUCharSpan(stream);
+        return std::vector<unsigned char>{bytes.begin(), bytes.end()};
+    }, replay.payload);
+    const auto message_id = Hash(encoded);
+    replay.result.queued = request.context.paymaster->HasOutboundDirectMessage(direct.peer_id, message_id) ||
+        request.context.paymaster->QueueOutboundDirectMessage(direct.peer_id, message_id,
+            encoded.size(), replay.payload, request.now);
+    replay.result.disposition = ProviderProcessingDisposition::PROCESSED;
+    if (*replay.result.queued && request.node->connman) request.node->connman->WakeMessageHandler();
+    return replay.result;
+}
+
 ProviderProcessingResult ProcessProviderCapacityRequest(
     const ProviderRequestProcessingContext& request,
     const DirectMessage& direct)
@@ -1415,22 +1658,16 @@ ProviderProcessingResult ProcessProviderCapacityRequest(
         result.rejection_reason = error.empty() ? "PAYMASTER_INVALID_CAPACITY_REQUEST" : error;
         return result;
     }
+    PaymasterStore store{*wallet};
+    if (const auto replay = ReplayProviderRequest(request, direct, *capacity_request, store, [] {})) return *replay;
     if (wallet->IsLocked()) {
         throw ApplicationError(ErrorKind::UNLOCK,
-                           "Provider wallet unlock is required for a capacity proof");
+            "Provider wallet unlock is required for a new capacity proof");
     }
-    PaymasterStore store{*wallet};
-    PaymasterCapacityProof proof;
-    const auto capacity_status = store.GetProviderCapacityProofWithStatus(*capacity_request, now, proof, error);
-    if (capacity_status != ProviderCapacityProofStatus::FOUND && capacity_status != ProviderCapacityProofStatus::NOT_FOUND)
-        throw ApplicationError(ErrorKind::WALLET, error.empty() ? "PAYMASTER_CAPACITY_DATABASE_READ" : error);
-    const bool have_stored_response = capacity_status == ProviderCapacityProofStatus::FOUND;
     const uint8_t requested_model = capacity_request->funding_model == FundingModel::SPONSORED
         ? FUNDING_MODEL_SPONSORED : FUNDING_MODEL_USER_PAID;
-    const bool model_ready = request.new_capacity && readiness.ready && (readiness.available_funding_models & requested_model) != 0;
-    const bool continuation_ready = CapacityContinuationMayProceed(readiness);
-    if (!model_ready && !(have_stored_response && continuation_ready)) {
-        if (continuation_ready) {
+    if (!request.new_capacity || !readiness.ready || (readiness.available_funding_models & requested_model) == 0) {
+        if (CapacityContinuationMayProceed(readiness)) {
             message_guard.Defer();
             result.disposition = ProviderProcessingDisposition::DEFERRED;
             result.deferral_reason = "PAYMASTER_PROVIDER_DRAIN_ONLY";
@@ -1438,6 +1675,7 @@ ProviderProcessingResult ProcessProviderCapacityRequest(
         }
         throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_PROVIDER_NOT_RUNNING");
     }
+    PaymasterCapacityProof proof;
     error.clear();
     uint256 reference_block;
     int tip_height{-1};
@@ -1458,7 +1696,7 @@ ProviderProcessingResult ProcessProviderCapacityRequest(
                            "PAYMASTER_NETGROUP_BUCKET_UNAVAILABLE");
     }
     std::vector<ProviderPoolEntry> reserved;
-    if (!have_stored_response && !ReserveAndBuildPaymasterCapacityProof(
+    if (!ReserveAndBuildPaymasterCapacityProof(
             *wallet, readiness.identity, *capacity_request,
             Params().GenesisBlock().GetHash(), reference_block,
             tip_height, /*minimum_confirmations=*/1,
@@ -1494,65 +1732,6 @@ struct ValidatedProviderRecoveryInputs {
     PaymasterCapacityProof capacity_proof;
     std::vector<CollaborativeInput> user_inputs;
 };
-
-std::optional<ProviderProcessingResult> ReplayProviderRecoveryRequest(
-    const ProviderRequestProcessingContext& request,
-    const DirectMessage& direct, const AlternativeRecoveryRequest& recovery_request,
-    PaymasterStore& store)
-{
-    WalletContext& context = request.context;
-    node::NodeContext* const node = request.node;
-    const int64_t now = request.now;
-    const uint256 recovery_id = GetAlternativeRecoveryId(
-        recovery_request.request_id,
-        recovery_request.session_id,
-        recovery_request.recovery_provider_id,
-        recovery_request.client_nonce);
-    AlternativeRecoveryRecord persisted;
-    const DatabaseReadStatus recovery_status = store.GetAlternativeRecoveryByIdWithStatus(recovery_id, persisted);
-    if (recovery_status != DatabaseReadStatus::FOUND && recovery_status != DatabaseReadStatus::NOT_FOUND) {
-        throw ApplicationError(ErrorKind::WALLET,
-            recovery_status == DatabaseReadStatus::UNSUPPORTED_VERSION
-                ? "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION" : "PAYMASTER_RECOVERY_DATABASE_READ");
-    }
-    if (recovery_status == DatabaseReadStatus::NOT_FOUND) return std::nullopt;
-    ProviderProcessingResult result;
-    result.disposition = ProviderProcessingDisposition::PROCESSED;
-    result.queued = false;
-    result.message_type = "recovery_request";
-    if (!persisted.provider_side ||
-        persisted.recovery_request_hash != GetAlternativeRecoveryRequestHash(persisted.recovery_request) ||
-        persisted.phase < AlternativeRecoveryPhase::RESPONSE_VALIDATED) {
-        throw ApplicationError(
-            ErrorKind::WALLET,
-            "PAYMASTER_ALTERNATIVE_RECOVERY_CONFLICT");
-    }
-    if (persisted.expired ||
-        persisted.recovery_request_hash != GetAlternativeRecoveryRequestHash(recovery_request) ||
-        SerializeRecoveryMessage(persisted.recovery_request) != SerializeRecoveryMessage(recovery_request)) {
-        return RejectProviderMessage(*context.paymaster, direct,
-            "PAYMASTER_ALTERNATIVE_RECOVERY_CONFLICT", "recovery_request");
-    }
-    const std::vector<unsigned char> encoded =
-        SerializeRecoveryMessage(persisted.recovery_response);
-    const bool queued =
-        context.paymaster->HasOutboundDirectMessage(
-            direct.peer_id, Hash(encoded)) ||
-        context.paymaster->QueueOutboundDirectMessage(
-            direct.peer_id, Hash(encoded), encoded.size(),
-            DirectPayload{persisted.recovery_response}, now);
-    if (queued && node->connman) {
-        node->connman->WakeMessageHandler();
-    }
-    result.queued = queued;
-    result.request_id = persisted.request_id;
-    result.session_id = persisted.session_id;
-    result.provider_id = persisted.recovery_provider_id;
-    result.recovery_id = persisted.recovery_id;
-    result.template_commitment = persisted.recovery_response.manifest
-            .template_commitment;
-    return result;
-}
 
 // A rejection is returned only after the remote defect has been established.
 // Unknown local storage/index/chain authority throws and retains the inbox lease.
@@ -1979,7 +2158,7 @@ ProviderProcessingResult ProcessProviderRecoveryRequest(
     }
 
     PaymasterStore store{*wallet};
-    if (const auto replay = ReplayProviderRecoveryRequest(request, direct, *recovery_request, store)) {
+    if (const auto replay = ReplayProviderRequest(request, direct, *recovery_request, store, [] {})) {
         return *replay;
     }
     auto preflight = PreflightProviderRecoveryRequest(request, direct, *recovery_request, store);
@@ -2051,118 +2230,9 @@ ProviderProcessingResult ProcessProviderQuoteRequest(
     };
 
     PaymasterStore store{*wallet};
-    const std::vector<unsigned char> redacted_request =
-        SerializeRedactedQuoteRequest(*quote_request);
-    PaymentSession persisted_session;
-    const auto session_status = store.GetSessionByRequestIdWithStatus(
-        quote_request->intent.request_id, persisted_session);
-    if (session_status != DatabaseReadStatus::FOUND &&
-        session_status != DatabaseReadStatus::NOT_FOUND) {
-        throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SESSION_DATABASE_READ");
-    }
-    if (session_status == DatabaseReadStatus::FOUND) {
-        // An intact client session or retained tombstone owns this request ID,
-        // but does not promise a provider attempt that can answer this peer.
-        if (!persisted_session.provider_side) {
-            return RejectProviderMessage(*context.paymaster, direct,
-                "PAYMASTER_REQUEST_ID_CONFLICT", "quote");
-        }
-        ProviderAttempt persisted_attempt;
-        PaymentIntent authorized_intent;
-        PaymasterQuote authorized_quote;
-        CollaborativePSBTTemplate trusted;
-        // Validate saved authority independently of the incoming request. A
-        // conflicting peer must never hide a damaged local attempt as rejection.
-        if (persisted_session.attempt_ids.size() != 1 ||
-            !store.GetAttempt(persisted_session.attempt_ids.front(), persisted_attempt) ||
-            !LoadAttemptAuthorizationArtifacts(persisted_attempt, authorized_intent,
-                authorized_quote, trusted, error) ||
-            persisted_session.request_id != authorized_intent.request_id ||
-            persisted_session.session_id != authorized_intent.session_id ||
-            persisted_session.canonical_request_hash != Hash(persisted_attempt.quote_request) ||
-            persisted_attempt.session_id != authorized_intent.session_id ||
-            persisted_attempt.provider_id != authorized_intent.provider_id ||
-            persisted_attempt.client_nonce != authorized_intent.client_nonce ||
-            persisted_attempt.intent_hash != GetPaymentIntentHash(authorized_intent) ||
-            persisted_attempt.created_at <= 0 ||
-            persisted_attempt.quote_expires_at <= persisted_attempt.created_at ||
-            persisted_attempt.retry_until < persisted_attempt.quote_expires_at ||
-            persisted_attempt.created_at != authorized_quote.created_at ||
-            persisted_attempt.quote_expires_at != authorized_quote.expires_at ||
-            persisted_attempt.retry_until != authorized_quote.retry_until) {
-            throw ApplicationError(ErrorKind::WALLET,
-                "PAYMASTER_PERSISTED_QUOTE_CORRUPT");
-        }
-
-        PaymasterQuoteRequest persisted_request;
-        PaymasterQuoteResponse response;
-        try {
-            CDataStream request_stream{persisted_attempt.quote_request, SER_NETWORK,
-                                       ::PROTOCOL_VERSION};
-            request_stream >> persisted_request;
-            SpanReader stream{::PROTOCOL_VERSION, persisted_attempt.signed_quote};
-            stream >> response;
-            if (!request_stream.empty() ||
-                SerializeRedactedQuoteRequest(persisted_request) != persisted_attempt.quote_request ||
-                !IsSupportedDirectProtocolVersion(persisted_request.version) ||
-                !IsSupportedDirectProtocolVersion(response.version) ||
-                !stream.empty() || SerializeQuoteResponse(response) !=
-                                       persisted_attempt.signed_quote) {
-                throw std::ios_base::failure("non-canonical persisted quote");
-            }
-        } catch (const std::ios_base::failure&) {
-            throw ApplicationError(ErrorKind::WALLET,
-                               "PAYMASTER_PERSISTED_QUOTE_CORRUPT");
-        }
-        if (response.request_id != persisted_session.request_id ||
-            response.session_id != persisted_session.session_id ||
-            response.quote.provider_id != persisted_attempt.provider_id ||
-            response.quote.quote_id != persisted_attempt.quote_id ||
-            response.quote.template_commitment !=
-                persisted_attempt.template_commitment ||
-            !ValidateQuoteResponseEnvelope(response, Params().GenesisBlock().GetHash(),
-                response.quote.created_at, error) ||
-            !persisted_attempt.provider_identity_key.IsFullyValid() ||
-            GetPaymasterId(persisted_attempt.provider_identity_key) !=
-                persisted_attempt.provider_id ||
-            !persisted_attempt.provider_identity_key.VerifySchnorr(
-                GetPaymasterQuoteSignatureHash(response.quote),
-                response.quote.identity_signature) ||
-            response.quote.template_commitment !=
-                GetCollaborativeTemplateCommitment(authorized_intent, response.quote, trusted)) {
-            throw ApplicationError(ErrorKind::WALLET,
-                               "PAYMASTER_PERSISTED_QUOTE_CORRUPT");
-        }
-        if (persisted_session.session_id != quote_request->intent.session_id ||
-            persisted_session.canonical_request_hash != Hash(redacted_request) ||
-            persisted_attempt.provider_id != readiness.identity.provider_id ||
-            persisted_attempt.client_nonce != quote_request->intent.client_nonce ||
-            persisted_attempt.intent_hash != GetPaymentIntentHash(quote_request->intent) ||
-            persisted_attempt.quote_request != redacted_request) {
-            return RejectProviderMessage(*context.paymaster, direct,
-                "PAYMASTER_REQUEST_ID_CONFLICT", "quote");
-        }
-        if (persisted_attempt.quote_expires_at <= now ||
-            persisted_attempt.retry_until < now) {
-            return RejectProviderMessage(*context.paymaster, direct,
-                "PAYMASTER_PROVIDER_RETRY_EXPIRED", "quote");
-        }
-        validate_restricted_request();
-
-        const uint256 message_id = Hash(persisted_attempt.signed_quote);
-        const bool queued = context.paymaster->QueueOutboundDirectMessage(
-            direct.peer_id, message_id,
-            persisted_attempt.signed_quote.size(), DirectPayload{response}, now);
-        if (queued && node->connman) node->connman->WakeMessageHandler();
-        result.queued = queued;
-        result.request_id = response.request_id;
-        result.session_id = response.session_id;
-        result.provider_id = response.quote.provider_id;
-        result.attempt_id = persisted_attempt.attempt_id;
-        result.quote_id = response.quote.quote_id;
-        result.template_commitment = response.quote.template_commitment;
-        return result;
-    }
+    if (const auto replay = ReplayProviderRequest(request, direct, *quote_request,
+            store, validate_restricted_request)) return *replay;
+    const std::vector<unsigned char> redacted_request = SerializeRedactedQuoteRequest(*quote_request);
 
     if (direct.canonical_netgroup.empty()) {
         throw ApplicationError(ErrorKind::WALLET,

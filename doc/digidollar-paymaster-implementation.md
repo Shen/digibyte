@@ -746,6 +746,13 @@ unlock, restore and exact signing authority are still checked at execution.
 
 `GetAlternativeRecoveryByIdWithStatus` preserves the database read status;
 stored recovery shape is validated before interpreting nested bindings.
+Provider capacity, quote and recovery requests share `ReplayProviderRequest`:
+typed loaders validate authoritative saved bindings, signatures and closure
+state; the guarded queue path serializes replay with cancellation. Exact live
+artifacts require no new key access, budget, pool reservation or checkpoint, so
+a manually running locked wallet can replay them. New proofs and quotes still
+require unlock. Closed quotes are not re-offered. Recovery replay validates its
+saved signed response before queueing; final-commit replay remains independent.
 Recovery requests pass separate replay, preflight and commit phases. Permanent
 peer defects are consumed without faulting the automatic service or blocking
 later quote/submit work. `GetProviderCapacityProofWithStatus` distinguishes a

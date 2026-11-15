@@ -614,8 +614,8 @@ RPCHelpMan cancelpaymasterquote()
 {
     return RPCHelpMan{
         "cancelpaymasterquote",
-        "Atomically reject an unsigned provider quote and release its operational pool slot.\n"
-        "Cancellation is refused once a user signature may exist.\n",
+        "Atomically reject a provider quote before a provider signature may exist.\n"
+        "A user signature alone does not prevent provider-side cancellation. Existing capacity promises retain their pool holds until expiry.\n",
         {
             {"attempt_id", RPCArg::Type::STR_HEX, RPCArg::Optional::NO, "Persistent provider attempt identifier"},
         },

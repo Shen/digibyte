@@ -8989,7 +8989,7 @@ BOOST_FIXTURE_TEST_CASE(provider_recovery_read_failure_retains_request_and_repla
     const uint256 message_id{Hash(encoded)};
     auto& database = GetMockableDatabase(wallet);
     const auto absent_rows = database.m_records;
-    for (int scenario = 0; scenario < 4; ++scenario) {
+    for (int scenario = 0; scenario < 5; ++scenario) {
         BOOST_TEST_CONTEXT("provider recovery read scenario " << scenario) {
             database.m_records = absent_rows;
             Manager transport{true};
@@ -9003,8 +9003,10 @@ BOOST_FIXTURE_TEST_CASE(provider_recovery_read_failure_retains_request_and_repla
                 auto batch = wallet.GetDatabase().MakeBatch();
                 if (scenario < 2) {
                     BOOST_REQUIRE(batch->Write(key, uint16_t(AlternativeRecoveryRecord::CURRENT_VERSION + scenario)));
-                } else if (scenario == 3) {
-                    BOOST_REQUIRE(batch->Write(key, record));
+                } else if (scenario >= 3) {
+                    auto persisted = record;
+                    if (scenario == 4) persisted.recovery_response.identity_signature.front() ^= 1;
+                    BOOST_REQUIRE(batch->Write(key, persisted));
                 }
             }
             const auto before = database.m_records;
@@ -9026,7 +9028,8 @@ BOOST_FIXTURE_TEST_CASE(provider_recovery_read_failure_retains_request_and_repla
                 BOOST_CHECK_EQUAL(transport.DirectMessageCount(), 0U);
                 BOOST_CHECK_EQUAL(transport.OutboundDirectMessageCount(), 0U);
             } else {
-                const char* expected = scenario == 0 ? "PAYMASTER_RECOVERY_DATABASE_READ" : "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION";
+                const char* expected = scenario == 0 ? "PAYMASTER_RECOVERY_DATABASE_READ" :
+                    scenario == 4 ? "PAYMASTER_ALTERNATIVE_RECOVERY_CONFLICT" : "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION";
                 BOOST_CHECK_EXCEPTION(paymaster_app::ProcessPaymasterRequests(context, wallet, paymaster_app::ExecutionMode::MANUAL),
                     ApplicationError, [&](const ApplicationError& failure) {
                         return failure.code == expected && failure.disposition == ErrorDisposition::RECONCILE &&
@@ -9551,6 +9554,87 @@ BOOST_FIXTURE_TEST_CASE(continuing_capacity_replay_preserves_promoted_quote, Quo
     BOOST_CHECK(result.queued.value_or(false));
     BOOST_CHECK_EQUAL(manager.DirectMessageCount(), 0U);
     BOOST_CHECK(GetMockableDatabase(wallet).m_records == before);
+}
+
+BOOST_FIXTURE_TEST_CASE(closed_provider_quote_is_not_offered_again, QuoteRequestProcessingSetup)
+{
+    PaymasterStore store{wallet};
+    ProviderAttempt closed;
+    std::string error;
+    // Provider-only closure remains safe after accepting the user's signature:
+    // no provider signature or final transaction has been authorized yet.
+    auto authorized = fixture.attempt;
+    authorized.state = AttemptState::USER_SIGNED;
+    authorized.user_signed_psbt = SignClosureUserPSBT(authorized.unsigned_psbt, fixture.user_key, error);
+    BOOST_REQUIRE_MESSAGE(!authorized.user_signed_psbt.empty(), error);
+    BOOST_REQUIRE_MESSAGE(store.TransitionSession(fixture.request.intent.request_id,
+        SessionState::AUTHORIZED, PendingPhase::NONE, {}, now, error), error);
+    BOOST_REQUIRE_MESSAGE(store.UpdateAttempt(fixture.request.intent.request_id, authorized, error), error);
+    BOOST_REQUIRE_MESSAGE(store.AcceptUserAuthorization(fixture.request.intent.request_id,
+        authorized.attempt_id, Hash(authorized.user_signed_psbt), now, error), error);
+    BOOST_REQUIRE(store.GetAttempt(authorized.attempt_id, authorized));
+    BOOST_REQUIRE(authorized.state == AttemptState::USER_PSBT_ACCEPTED);
+    BOOST_REQUIRE_MESSAGE(store.CancelProviderQuote(fixture.attempt.attempt_id,
+        now, closed, error), error);
+    BOOST_REQUIRE(closed.state == AttemptState::REJECTED);
+    CheckClassification(fixture.request, false, "PAYMASTER_PROVIDER_QUOTE_CLOSED");
+    // Cancellation cannot conceal damaged local authority as a peer defect.
+    closed.signed_quote.front() ^= 1;
+    BOOST_REQUIRE(WalletBatch{wallet.GetDatabase()}.WritePaymasterAttempt(closed));
+    CheckClassification(fixture.request, true, "PAYMASTER_PERSISTED_QUOTE_CORRUPT");
+}
+
+BOOST_FIXTURE_TEST_CASE(locked_provider_replays_exact_artifacts_but_cannot_admit_new_capacity,
+                        QuoteRequestProcessingSetup)
+{
+    SecureString passphrase{"stored-response-replay"};
+    BOOST_REQUIRE(wallet.EncryptWallet(passphrase));
+    BOOST_REQUIRE(wallet.IsLocked());
+    const auto checkpoint_before = CheckpointBytes();
+    auto& database = GetMockableDatabase(wallet);
+    const auto before = database.m_records;
+    const auto exercise = [&](const DirectPayload& payload, bool stored) {
+        Manager transport{true};
+        context.paymaster = &transport;
+        BOOST_REQUIRE(transport.StartProvider(wallet.GetName(), environment.identity.provider_id));
+        const auto bytes = std::visit([](const auto& message) {
+            return SerializePaymasterSecurityObject(message);
+        }, payload);
+        BOOST_REQUIRE(transport.EnqueueNetworkDirectMessage(44, Hash(bytes), bytes.size(), payload,
+            GetTime(), 44, {1, 8, 8}, DirectAdmissionClass::REQUEST) == DirectEnqueueResult::ACCEPTED);
+        if (stored) {
+            const auto result = paymaster_app::ProcessPaymasterRequests(context, wallet,
+                paymaster_app::ExecutionMode::MANUAL);
+            BOOST_CHECK(result.queued.value_or(false));
+            BOOST_CHECK_EQUAL(transport.DirectMessageCount(), 0U);
+            const auto replies = transport.TakeOutboundDirectMessages(44, 1, GetTime());
+            BOOST_REQUIRE_EQUAL(replies.size(), 1U);
+            if (const auto* proof = std::get_if<PaymasterCapacityProof>(&replies.front().payload)) {
+                BOOST_CHECK(SerializePaymasterSecurityObject(*proof) == SerializePaymasterSecurityObject(fixture.capacity_proof));
+            } else {
+                const auto* quote = std::get_if<PaymasterQuoteResponse>(&replies.front().payload);
+                BOOST_REQUIRE(quote);
+                BOOST_CHECK(SerializePaymasterSecurityObject(*quote) == fixture.attempt.signed_quote);
+            }
+        } else {
+            BOOST_CHECK_EXCEPTION(paymaster_app::ProcessPaymasterRequests(context, wallet,
+                paymaster_app::ExecutionMode::MANUAL), ApplicationError,
+                [](const ApplicationError& failure) { return failure.kind == ErrorKind::UNLOCK; });
+            BOOST_CHECK_EQUAL(transport.DirectMessageCount(), 1U);
+            BOOST_CHECK_EQUAL(transport.OutboundDirectMessageCount(), 0U);
+        }
+        BOOST_CHECK(database.m_records == before);
+        BOOST_CHECK(CheckpointBytes() == checkpoint_before);
+        BOOST_CHECK(wallet.IsLocked());
+        context.paymaster = &manager;
+    };
+    exercise(DirectPayload{fixture.capacity_request}, true);
+    exercise(DirectPayload{fixture.request}, true);
+    auto fresh = fixture.capacity_request;
+    fresh.request_id = "550e8400-e29b-41d4-a716-446655441223";
+    fresh.session_id = SecurityTestId(seed, 712);
+    fresh.client_nonce = SecurityTestId(seed, 713);
+    exercise(DirectPayload{fresh}, false);
 }
 
 BOOST_FIXTURE_TEST_CASE(deferred_capacity_preserves_request_and_yields_next_turn, QuoteRequestProcessingSetup)

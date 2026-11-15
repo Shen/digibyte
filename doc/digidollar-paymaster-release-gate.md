@@ -19,6 +19,21 @@ local ignored `.ai/implement-review-027/`. Retained dependencies lack complete
 transitive rebuild provenance. Full product/platform builds, full suites,
 sanitizers and Tidy remain operator/release checks.
 
+Provider replay follow-up: the capacity/quote/recovery application operation
+checks saved response authority before using one cancellation-serialized queue
+path. Six focused native cases pass with **276 assertions**, covering closed
+quotes, encrypted-wallet exact replay/new-admission refusal, drain restart,
+promoted capacity, recovery read failure and damaged capacity indexes. The
+processing, discovery-RPC and test units were freshly compiled. Native partial
+link: `8332e2c2622e6366326e3e51c1fcd5eb901c45791bd044227e0dd2b490e9110c`.
+The RPC functional cancellation assertion now uses the provider's attempt ID
+after signing and checks unchanged financial state; full functional execution
+requires an operator build of the changed daemon.
+Two subsequent focused runs also pass after freshly compiling the test unit:
+recovery-signature corruption/retained request (**83 assertions**) and closure
+after accepted user authorization (**62 assertions**). These rerun existing
+cases and are not additional independent cases. Functional Python syntax passes.
+
 ## Exact-final relay, checkpoint recovery and shared setup (2026-11-15)
 
 Review baseline: `3b9e5c5d6b2c657996be8926e9c2ea794d34b040`; implementation
