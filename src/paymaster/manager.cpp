@@ -695,7 +695,7 @@ void Manager::PruneReplays(int64_t now,
                                message.payload) ||
                            std::holds_alternative<PaymasterQuoteResponse>(
                                message.payload);
-                       return (message.retained_result ||
+                       return (message.retained_result || message.quarantined_result ||
                                (retain_equivocation_candidates && evidence_candidate)) &&
                               GetDirectReplayKey(message.payload) == replay.first;
                    });
@@ -727,7 +727,7 @@ void Manager::PruneInboundMessages(int64_t now,
                                    bool retain_equivocation_candidates)
 {
     for (auto it = m_direct_messages.begin(); it != m_direct_messages.end();) {
-        if (it->retained_result) {
+        if (it->retained_result || it->quarantined_result) {
             ++it;
             continue;
         }
@@ -831,6 +831,17 @@ DirectEnqueueResult Manager::EnqueueDirectMessageResult(int64_t peer_id,
                                                         DirectAdmissionClass admission,
                                                         std::optional<bool> arrived_via_onion)
 {
+    return EnqueueDirectMessageInternal(peer_id, message_id, serialized_size,
+        std::move(payload), now, keyed_netgroup, std::move(canonical_netgroup),
+        admission, arrived_via_onion, /*require_expected_response=*/false);
+}
+
+DirectEnqueueResult Manager::EnqueueDirectMessageInternal(int64_t peer_id,
+    const uint256& message_id, size_t serialized_size, DirectPayload payload,
+    int64_t now, std::optional<uint64_t> keyed_netgroup,
+    std::vector<unsigned char> canonical_netgroup, DirectAdmissionClass admission,
+    std::optional<bool> arrived_via_onion, bool require_expected_response)
+{
     if (!Enabled() || peer_id < 0 || message_id.IsNull() || serialized_size == 0 ||
         serialized_size > MAX_DIRECT_MESSAGE_BYTES || now <= 0) {
         return Enabled() ? DirectEnqueueResult::INVALID : DirectEnqueueResult::DISABLED;
@@ -839,6 +850,17 @@ DirectEnqueueResult Manager::EnqueueDirectMessageResult(int64_t peer_id,
     const uint256 session_key = GetDirectSessionKey(payload);
     LOCK(m_direct_mutex);
     if (!Enabled()) return DirectEnqueueResult::DISABLED;
+    if (require_expected_response) {
+        // The routing check and provenance assignment share the insertion
+        // lock. Disconnect/expiry cannot invalidate the expected reply in
+        // between, and low-level queue callers cannot create this provenance.
+        PruneExpectedResponses(now);
+        if (m_expected_responses.count({peer_id, session_key, payload.index()}) == 0)
+            return DirectEnqueueResult::INVALID;
+    }
+    const bool quarantine_result = require_expected_response &&
+        (std::holds_alternative<PaymasterResultMessage>(payload) ||
+         std::holds_alternative<AlternativeRecoveryResultMessage>(payload));
     PruneReplays(now, /*retain_equivocation_candidates=*/true);
     // Signed Capacity proofs and quote responses may conflict with a durable
     // wallet baseline. Retain them until periodic maintenance has scanned all
@@ -853,12 +875,14 @@ DirectEnqueueResult Manager::EnqueueDirectMessageResult(int64_t peer_id,
     // Suppress the same concurrently queued artifact. A repeated retained
     // conflict remains classified as CONFLICT so reconnecting peers still
     // take the network-layer disconnect path without multiplying queue work.
-    if (std::any_of(
-            m_direct_messages.begin(), m_direct_messages.end(),
-            [&replay_key, &message_id](const DirectMessage& queued) {
-                return queued.message_id == message_id &&
-                       GetDirectReplayKey(queued.payload) == replay_key;
-            })) {
+    const auto queued_copy = std::find_if(m_direct_messages.begin(), m_direct_messages.end(),
+        [&replay_key, &message_id](const DirectMessage& queued) {
+            return queued.message_id == message_id &&
+                   GetDirectReplayKey(queued.payload) == replay_key;
+        });
+    if (queued_copy != m_direct_messages.end()) {
+        if (quarantine_result && !queued_copy->retained_result)
+            queued_copy->quarantined_result = true;
         return conflicting_replay ? DirectEnqueueResult::CONFLICT : DirectEnqueueResult::DUPLICATE;
     }
 
@@ -934,7 +958,7 @@ DirectEnqueueResult Manager::EnqueueDirectMessageResult(int64_t peer_id,
                                               keyed_netgroup,
                                               std::move(canonical_netgroup),
                                               queue_sequence, admission, false,
-                                              arrived_via_onion});
+                                              arrived_via_onion, quarantine_result});
     if (conflicting_replay) return DirectEnqueueResult::CONFLICT;
     return exact_replay ? DirectEnqueueResult::DUPLICATE : DirectEnqueueResult::ACCEPTED;
 }
@@ -1421,9 +1445,9 @@ DirectEnqueueResult Manager::EnqueueNetworkDirectMessage(
     std::optional<bool> arrived_via_onion)
 {
     if (!CanReceiveDirectMessage(peer_id, payload, admission, now)) return DirectEnqueueResult::INVALID;
-    return EnqueueDirectMessageResult(peer_id, message_id, serialized_size,
+    return EnqueueDirectMessageInternal(peer_id, message_id, serialized_size,
         std::move(payload), now, keyed_netgroup, std::move(canonical_netgroup), admission,
-        arrived_via_onion);
+        arrived_via_onion, admission != DirectAdmissionClass::REQUEST);
 }
 
 void Manager::ForgetDirectPeer(int64_t peer_id)
@@ -1547,6 +1571,7 @@ bool Manager::RetainAuthenticatedResult(const DirectMessage& message)
         return false;
     }
     queued->retained_result = true;
+    queued->quarantined_result = false;
     return true;
 }
 

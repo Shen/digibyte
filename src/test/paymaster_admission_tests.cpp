@@ -249,6 +249,131 @@ BOOST_AUTO_TEST_CASE(expected_response_storage_is_bounded_and_disconnect_reclaim
     BOOST_CHECK(!manager.CanReceiveDirectMessage(2, Reply(Request(2)), DirectAdmissionClass::RESPONSE, NOW));
 }
 
+BOOST_AUTO_TEST_CASE(expected_final_result_quarantine_precedes_wallet_reads_and_survives_disconnect)
+{
+    for (const bool recovery : {false, true}) {
+        Manager manager{true};
+        const auto capacity = Request(1);
+        PaymasterSubmit submit;
+        submit.provider_id = capacity.provider_id;
+        submit.request_id = capacity.request_id;
+        submit.session_id = capacity.session_id;
+        PaymasterResultMessage result;
+        result.request_id = capacity.request_id;
+        result.session_id = capacity.session_id;
+        result.result.provider_id = capacity.provider_id;
+        AlternativeRecoverySubmit recovery_submit;
+        recovery_submit.recovery_provider_id = capacity.provider_id;
+        recovery_submit.request_id = capacity.request_id;
+        recovery_submit.session_id = capacity.session_id;
+        AlternativeRecoveryResultMessage recovery_result;
+        recovery_result.request_id = capacity.request_id;
+        recovery_result.session_id = capacity.session_id;
+        recovery_result.result.provider_id = capacity.provider_id;
+        const DirectPayload request = recovery ? DirectPayload{recovery_submit} : DirectPayload{submit};
+        const DirectPayload response = recovery ? DirectPayload{recovery_result} : DirectPayload{result};
+        const auto admission = recovery ? DirectAdmissionClass::RECOVERY : DirectAdmissionClass::RESPONSE;
+        BOOST_CHECK(Receive(manager, 1, 10, response, admission) == DirectEnqueueResult::INVALID);
+        BOOST_REQUIRE(manager.QueueOutboundDirectMessage(1, Id(2), 100, request, NOW));
+        BOOST_CHECK(Receive(manager, 2, 10, response, admission) == DirectEnqueueResult::INVALID);
+        auto wrong_provider = response;
+        if (recovery) std::get<AlternativeRecoveryResultMessage>(wrong_provider).result.provider_id = Id(101);
+        else std::get<PaymasterResultMessage>(wrong_provider).result.provider_id = Id(101);
+        BOOST_CHECK(Receive(manager, 1, 11, wrong_provider, admission) == DirectEnqueueResult::INVALID);
+        BOOST_REQUIRE(Receive(manager, 1, 10, response, admission) == DirectEnqueueResult::ACCEPTED);
+        BOOST_CHECK(Receive(manager, 1, 10, response, admission) == DirectEnqueueResult::DUPLICATE);
+        manager.ForgetDirectPeer(1);
+        const int64_t after = NOW + DIRECT_REPLAY_TTL_SECONDS + MAX_DIRECT_MESSAGE_TTL_SECONDS + 1;
+        // This simulates wallet authority remaining unreadable longer than
+        // either timer. No application read or result signature was needed.
+        BOOST_REQUIRE(manager.EnqueueDirectMessage(2, Id(3), 100, Request(2), after));
+        BOOST_REQUIRE(manager.AcknowledgeDirectMessagesIfPresent({Id(3)}));
+        manager.PruneDirectMessages(after);
+        BOOST_REQUIRE_EQUAL(manager.DirectMessageCount(), 1U);
+        const auto retained = manager.TakeDirectMessages(1);
+        BOOST_REQUIRE_EQUAL(retained.size(), 1U);
+        BOOST_CHECK(retained.front().quarantined_result);
+        BOOST_CHECK(!retained.front().retained_result);
+        BOOST_CHECK(retained.front().message_id == Id(10));
+        BOOST_CHECK(manager.TakeDirectMessages(1).empty());
+
+        // The public fixture queue cannot manufacture network provenance,
+        // including by choosing the reply quota directly.
+        Manager untrusted{true};
+        BOOST_REQUIRE(untrusted.EnqueueDirectMessageResult(1, Id(10), 100, response,
+            NOW, 1, {}, admission) == DirectEnqueueResult::ACCEPTED);
+        untrusted.PruneDirectMessages(after);
+        BOOST_CHECK_EQUAL(untrusted.DirectMessageCount(), 0U);
+    }
+}
+
+BOOST_AUTO_TEST_CASE(quarantined_final_results_preserve_class_session_and_byte_limits)
+{
+    Manager manager{true};
+    for (const bool recovery : {false, true}) {
+        const auto admission = recovery ? DirectAdmissionClass::RECOVERY : DirectAdmissionClass::RESPONSE;
+        const auto class_index = static_cast<size_t>(admission);
+        for (uint32_t index{0}; index <= DIRECT_CLASS_MESSAGES[class_index]; ++index) {
+            const auto capacity = Request(100 + index);
+            const int64_t peer = (recovery ? 100 : 10) + index;
+            PaymasterSubmit submit;
+            submit.provider_id = capacity.provider_id;
+            submit.request_id = capacity.request_id;
+            submit.session_id = capacity.session_id;
+            PaymasterResultMessage result;
+            result.request_id = capacity.request_id;
+            result.session_id = capacity.session_id;
+            result.result.provider_id = capacity.provider_id;
+            AlternativeRecoverySubmit recovery_submit;
+            recovery_submit.recovery_provider_id = capacity.provider_id;
+            recovery_submit.request_id = capacity.request_id;
+            recovery_submit.session_id = capacity.session_id;
+            AlternativeRecoveryResultMessage recovery_result;
+            recovery_result.request_id = capacity.request_id;
+            recovery_result.session_id = capacity.session_id;
+            recovery_result.result.provider_id = capacity.provider_id;
+            const DirectPayload request = recovery ? DirectPayload{recovery_submit} : DirectPayload{submit};
+            const DirectPayload response = recovery ? DirectPayload{recovery_result} : DirectPayload{result};
+            BOOST_REQUIRE(manager.QueueOutboundDirectMessage(peer, Id(1000 + peer), 100, request, NOW));
+            BOOST_REQUIRE_EQUAL(manager.TakeOutboundDirectMessages(peer, 1, NOW).size(), 1U);
+            BOOST_CHECK(Receive(manager, peer, 2000 + peer, response, admission, peer) ==
+                (index < DIRECT_CLASS_MESSAGES[class_index] ? DirectEnqueueResult::ACCEPTED : DirectEnqueueResult::FULL));
+        }
+    }
+    manager.PruneDirectMessages(NOW + DIRECT_REPLAY_TTL_SECONDS + MAX_DIRECT_MESSAGE_TTL_SECONDS + 1);
+    BOOST_CHECK_EQUAL(manager.DirectMessageCount(), DIRECT_CLASS_MESSAGES[1] + DIRECT_CLASS_MESSAGES[2]);
+
+    Manager session_manager{true};
+    const auto capacity = Request(1);
+    PaymasterSubmit submit;
+    submit.provider_id = capacity.provider_id;
+    submit.request_id = capacity.request_id;
+    submit.session_id = capacity.session_id;
+    BOOST_REQUIRE(session_manager.QueueOutboundDirectMessage(1, Id(1), 100, submit, NOW));
+    PaymasterResultMessage result;
+    result.request_id = capacity.request_id;
+    result.session_id = capacity.session_id;
+    result.result.provider_id = capacity.provider_id;
+    for (uint32_t sequence{1}; sequence <= MAX_DIRECT_INBOX_MESSAGES_PER_SESSION + 1; ++sequence) {
+        result.result.result_sequence = sequence;
+        BOOST_CHECK(Receive(session_manager, 1, sequence + 10, result, DirectAdmissionClass::RESPONSE) ==
+            (sequence <= MAX_DIRECT_INBOX_MESSAGES_PER_SESSION ? DirectEnqueueResult::ACCEPTED : DirectEnqueueResult::FULL));
+    }
+    BOOST_CHECK(Receive(session_manager, 1, 99, result, DirectAdmissionClass::RESPONSE, 1,
+        MAX_DIRECT_MESSAGE_BYTES + 1) == DirectEnqueueResult::INVALID);
+    BOOST_CHECK_EQUAL(session_manager.DirectMessageCount(), MAX_DIRECT_INBOX_MESSAGES_PER_SESSION);
+
+    Manager bytes_manager{true};
+    BOOST_REQUIRE(bytes_manager.QueueOutboundDirectMessage(1, Id(1), 100, submit, NOW));
+    result.result.result_sequence = 1;
+    BOOST_REQUIRE(Receive(bytes_manager, 1, 21, result, DirectAdmissionClass::RESPONSE, 1,
+        MAX_DIRECT_MESSAGE_BYTES) == DirectEnqueueResult::ACCEPTED);
+    result.result.result_sequence = 2;
+    BOOST_CHECK(Receive(bytes_manager, 1, 22, result, DirectAdmissionClass::RESPONSE, 1, 1)
+        == DirectEnqueueResult::FULL);
+    BOOST_CHECK_EQUAL(bytes_manager.DirectMessageCount(), 1U);
+}
+
 
 BOOST_AUTO_TEST_CASE(all_five_wire_request_phases_register_only_their_matching_response)
 {

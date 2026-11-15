@@ -164,6 +164,10 @@ struct DirectMessage {
     /** Trusted local transport observation at authenticated enqueue. Unknown
      * is not proof of clearnet; this survives removal of the live CNode. */
     std::optional<bool> arrived_via_onion;
+    /** A network reply matched a locally queued request before wallet reads.
+     * This only preserves bounded inbox evidence; the wallet must separately
+     * authenticate its signature and durable financial authority. */
+    bool quarantined_result{false};
 };
 
 struct OutboundDirectMessage {
@@ -278,6 +282,10 @@ public:
         int64_t peer_id, const uint256& message_id, size_t serialized_size,
         DirectPayload payload, int64_t now, uint64_t keyed_netgroup,
         std::vector<unsigned char> canonical_netgroup, DirectAdmissionClass admission);
+    /** The authenticated network adapter must already have checked its channel.
+     * Expected final replies are quarantined within ordinary inbox quotas before
+     * any wallet read. Quarantine is evidence preservation, not acceptance of a
+     * result signature, transaction or financial authorization. */
     DirectEnqueueResult EnqueueNetworkDirectMessage(
         int64_t peer_id, const uint256& message_id, size_t serialized_size,
         DirectPayload payload, int64_t now, uint64_t keyed_netgroup,
@@ -530,6 +538,12 @@ private:
         uint256 message_id;
         int64_t expires_at{0};
     };
+
+    DirectEnqueueResult EnqueueDirectMessageInternal(int64_t peer_id,
+        const uint256& message_id, size_t serialized_size, DirectPayload payload,
+        int64_t now, std::optional<uint64_t> keyed_netgroup,
+        std::vector<unsigned char> canonical_netgroup, DirectAdmissionClass admission,
+        std::optional<bool> arrived_via_onion, bool require_expected_response);
 
     void PruneReplays(int64_t now, bool retain_equivocation_candidates)
         EXCLUSIVE_LOCKS_REQUIRED(m_direct_mutex);

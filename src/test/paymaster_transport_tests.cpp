@@ -809,6 +809,49 @@ BOOST_FIXTURE_TEST_CASE(channel_handler_reauthenticates_after_disconnect, Paymas
     m_node.peerman->FinalizeNode(*next);
 }
 
+BOOST_FIXTURE_TEST_CASE(authenticated_expected_final_reply_is_quarantined_before_wallet_access, PaymasterChannelSetup)
+{
+    LOCK(NetEventsInterface::g_msgproc_mutex);
+    CKey identity;
+    identity.MakeNewKey(true);
+    const auto provider = GetPaymasterId(XOnlyPubKey{identity.GetPubKey()});
+    V2Transport remote{490, false, SER_NETWORK, INIT_PROTO_VERSION};
+    auto node = MakePeer(490, false, remote, provider);
+    const CNetMsgMaker maker{::PROTOCOL_VERSION};
+    const auto challenge = BeginAuthentication(*node, remote);
+    Receive(*node, remote, maker.Make(NetMsgType::PMAUTHRESP, Sign(challenge, identity)));
+    BOOST_REQUIRE(node->m_paymaster_negotiated);
+    PaymasterSubmit submit;
+    submit.genesis_hash = Params().GenesisBlock().GetHash();
+    submit.provider_id = provider;
+    submit.request_id = "550e8400-e29b-41d4-a716-446655440490";
+    submit.session_id = GetRandHash();
+    submit.commit_key = GetRandHash();
+    BOOST_REQUIRE(manager.QueueOutboundDirectMessage(node->GetId(), GetRandHash(), 100, submit, GetTime()));
+    PaymasterResultMessage result;
+    result.request_id = submit.request_id;
+    result.session_id = submit.session_id;
+    result.result.genesis_hash = submit.genesis_hash;
+    result.result.provider_id = provider;
+    result.result.commit_key = submit.commit_key;
+    result.result.result_sequence = 1;
+    result.result.status = PaymasterResultStatus::USER_PSBT_ACCEPTED;
+    result.result.updated_at = GetTime();
+    result.result.identity_signature.resize(64);
+    BOOST_REQUIRE(identity.SignSchnorr(GetPaymasterResultSignatureHash(result.result),
+        result.result.identity_signature, nullptr, GetRandHash()));
+    Receive(*node, remote, maker.Make(NetMsgType::PMRESULT, result));
+    BOOST_REQUIRE(!node->fDisconnect);
+    BOOST_REQUIRE_EQUAL(manager.DirectMessageCount(), 1U);
+    m_node.peerman->FinalizeNode(*node);
+    manager.PruneDirectMessages(GetTime() + DIRECT_REPLAY_TTL_SECONDS + MAX_DIRECT_MESSAGE_TTL_SECONDS + 1);
+    const auto messages = manager.TakeResults(submit.request_id, submit.session_id, provider, 1);
+    BOOST_REQUIRE_EQUAL(messages.size(), 1U);
+    BOOST_CHECK(messages.front().quarantined_result);
+    BOOST_CHECK(!messages.front().retained_result);
+    BOOST_CHECK(manager.TakeResults(submit.request_id, submit.session_id, provider, 1).empty());
+}
+
 BOOST_FIXTURE_TEST_CASE(channel_handler_provider_proof_precedes_all_responses, PaymasterChannelSetup)
 {
     LOCK(NetEventsInterface::g_msgproc_mutex);
