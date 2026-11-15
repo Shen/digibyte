@@ -16,6 +16,7 @@ class CKey;
 namespace wallet {
 
 class CWallet;
+class WalletBatch;
 class WalletDatabase;
 
 bool CheckPaymasterProviderWallet(const CWallet& wallet, std::string& error);
@@ -57,6 +58,12 @@ bool GetPaymasterProviderBackupStatus(
     DigiDollar::Paymaster::ProviderBackupStatus& status,
     int64_t now,
     std::string& error, bool persist = true);
+
+/** Renew the reminder in the caller's material-configuration transaction. */
+bool WritePaymasterProviderBackupReminder(
+    WalletBatch& batch,
+    const DigiDollar::Paymaster::ProviderIdentityRecord& identity,
+    int64_t now, std::string& error);
 
 /** Record a successful full-wallet backup without retaining its path. */
 bool MarkPaymasterProviderBackupCompleted(const CWallet& wallet,

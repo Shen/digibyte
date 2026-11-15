@@ -26,6 +26,47 @@ namespace wallet {
 using DigiDollar::Paymaster::ProviderBackupStatus;
 using DigiDollar::Paymaster::ProviderIdentityRecord;
 
+/** Move the non-blocking backup reminder forward in the same database
+ * transaction as a material provider-configuration change. No backup path or
+ * filename is stored, and ordinary runtime/accounting updates do not call this
+ * helper. */
+bool WritePaymasterProviderBackupReminder(WalletBatch& batch,
+                                          const ProviderIdentityRecord& identity,
+                                          int64_t now,
+                                          std::string& error)
+{
+    ProviderBackupStatus status;
+    if (!batch.ReadPaymasterBackupStatus(status)) {
+        if (batch.HasPaymasterBackupStatus()) {
+            error = "PAYMASTER_INVALID_BACKUP_STATUS";
+            return false;
+        }
+        status.genesis_hash = Params().GenesisBlock().GetHash();
+        status.provider_id = identity.provider_id;
+        status.identity_created_at = identity.created_at;
+    }
+    if (status.genesis_hash != Params().GenesisBlock().GetHash() ||
+        status.provider_id != identity.provider_id) {
+        error = "PAYMASTER_BACKUP_STATUS_BINDING_MISMATCH";
+        return false;
+    }
+    // Configuration writes and backups can happen within the same timestamp
+    // second. Advance past every completed backup marker so an immediately
+    // following material change cannot accidentally appear protected by the
+    // older backup. Saturation keeps corrupted or extreme timestamps from
+    // wrapping around.
+    status.reminder_updated_at = std::max(
+        {status.reminder_updated_at, now,
+         DigiDollar::Paymaster::SaturatingAddSeconds(status.last_successful_backup_at, 1),
+         DigiDollar::Paymaster::SaturatingAddSeconds(status.external_backup_acknowledged_at, 1)});
+    if (!DigiDollar::Paymaster::ValidateProviderBackupStatus(status, error) ||
+        !batch.WritePaymasterBackupStatus(status)) {
+        if (error.empty()) error = "PAYMASTER_BACKUP_STATUS_DATABASE_WRITE";
+        return false;
+    }
+    return true;
+}
+
 bool MarkPaymasterProviderRestored(WalletDatabase& database, bool& guarded, std::string& error)
 {
     error.clear();

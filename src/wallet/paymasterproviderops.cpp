@@ -413,6 +413,10 @@ CarrierWithdrawalResult WithdrawPaymasterCarrier(WalletContext& context, CWallet
             ProviderLiquidityPolicy current_policy;
             ProviderCarrierWithdrawalPlan current_plan;
             std::vector<ProviderPoolEntry> pool;
+            ProviderIdentityRecord identity;
+            if (!GetPaymasterIdentity(*wallet, identity)) {
+                throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_IDENTITY_NOT_FOUND");
+            }
             if (!batch.ReadPaymasterLiquidityPolicy(current_policy) ||
                 !batch.ReadPaymasterCarrierWithdrawalPlan(current_plan) ||
                 !batch.ReadPaymasterProviderPool(pool) ||
@@ -467,11 +471,13 @@ CarrierWithdrawalResult WithdrawPaymasterCarrier(WalletContext& context, CWallet
             }
             if (!batch.WritePaymasterProviderPool(pool) ||
                 !batch.WritePaymasterLiquidityPolicy(
-                    current_policy)) {
+                    current_policy) ||
+                !WritePaymasterProviderBackupReminder(
+                    batch, identity, now, policy_error)) {
                 batch.TxnAbort();
                 throw ApplicationError(
                     ErrorKind::WALLET,
-                    "PAYMASTER_DATABASE_WRITE");
+                    policy_error.empty() ? "PAYMASTER_DATABASE_WRITE" : policy_error);
             }
             if (!batch.TxnCommit()) {
                 throw ApplicationError(

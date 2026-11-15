@@ -3415,77 +3415,110 @@ BOOST_AUTO_TEST_CASE(policy_and_enablement_are_atomically_bound)
 
 BOOST_AUTO_TEST_CASE(carrier_withdrawal_preview_owns_wallet_observation_lock)
 {
-    ScopedPaymasterMockTime clock{2000};
-    SyncWithValidationInterfaceQueue();
-    CWallet provider_wallet{m_node.chain.get(), "maintenance-approval-test", CreateMockableWalletDatabase()};
-    {
-        LOCK(provider_wallet.cs_wallet);
-        provider_wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
-        provider_wallet.SetupDescriptorScriptPubKeyMans();
-        provider_wallet.SetLastBlockProcessed(100, Params().GenesisBlock().GetHash());
-        provider_wallet.EnsureDDWallet();
+    for (const bool fail_commit : {false, true}) {
+        ScopedPaymasterMockTime clock{2000};
+        SyncWithValidationInterfaceQueue();
+        CWallet provider_wallet{m_node.chain.get(), "maintenance-approval-test", CreateMockableWalletDatabase()};
+        {
+            LOCK(provider_wallet.cs_wallet);
+            provider_wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+            provider_wallet.SetupDescriptorScriptPubKeyMans();
+            provider_wallet.SetLastBlockProcessed(100, Params().GenesisBlock().GetHash());
+            provider_wallet.EnsureDDWallet();
+        }
+        ProviderIdentityRecord identity;
+        std::string error;
+        BOOST_REQUIRE(CreatePaymasterIdentity(provider_wallet, "withdrawal preview", 1000, identity, error));
+        ProviderPolicy policy;
+        policy.funding_models = FUNDING_MODEL_USER_PAID;
+        policy.fee_rate_bps = 50;
+        policy.min_payment = DDCents{100};
+        policy.max_payment = DDCents{1000000};
+        policy.maximum_network_fee = DGBSatoshis{MIN_ADMISSION_DGB_SATOSHIS};
+        BOOST_REQUIRE_MESSAGE(SetPaymasterProviderPolicy(provider_wallet, policy, 1001, error), error);
+        ProviderLiquidityPolicy liquidity;
+        liquidity.target_admission_dgb = 3;
+        liquidity.target_operational_dgb = 1;
+        liquidity.target_admission_carriers = 3;
+        liquidity.target_operational_carriers = 1;
+        liquidity.updated_at = 1002;
+        BOOST_REQUIRE(SetPaymasterProviderLiquidityPolicy(provider_wallet, liquidity, 1002, error));
+        CMutableTransaction parent;
+        parent.SetDigiDollarType(::DD_TX_TRANSFER);
+        parent.vin.emplace_back(COutPoint{uint256S("d1"), 0});
+        parent.vout.emplace_back(0, identity.identity_script);
+        parent.vout.emplace_back(0, CScript() << OP_RETURN << std::vector<unsigned char>{'D', 'D'}
+            << CScriptNum(::DD_TX_TRANSFER) << CScriptNum(200));
+        const auto funding = MakeTransactionRef(parent);
+        CMutableTransaction abandoned;
+        abandoned.vin.emplace_back(COutPoint{funding->GetHash(), 0});
+        abandoned.vout.emplace_back(0, identity.identity_script);
+        {
+            LOCK(provider_wallet.cs_wallet);
+            BOOST_REQUIRE(provider_wallet.AddToWallet(funding, TxStateConfirmed{Params().GenesisBlock().GetHash(), 1, 0}));
+            BOOST_REQUIRE(provider_wallet.AddToWallet(MakeTransactionRef(abandoned), TxStateInactive{true}));
+        }
+        ProviderPoolEntry carrier;
+        carrier.outpoint = COutPoint{funding->GetHash(), 0};
+        carrier.asset = PoolAsset::DD_CARRIER;
+        carrier.purpose = PoolPurpose::OPERATIONAL;
+        carrier.script_pub_key = identity.identity_script;
+        carrier.carrier_value = DDCents{200};
+        carrier.confirmation_height = 1;
+        carrier.updated_at = 1003;
+        BOOST_REQUIRE(SetPaymasterProviderPoolEntries(provider_wallet, {carrier}, error));
+        WalletContext context;
+        context.chain = m_node.chain.get();
+        context.args = m_node.args;
+        Manager manager{true};
+        context.paymaster = &manager;
+        paymaster_app::CarrierWithdrawalParameters request;
+        request.mode = CarrierWithdrawalMode::RELEASE_SLOT;
+        request.source = carrier.outpoint;
+        // Intentionally no caller-held wallet lock. IsSpent visits the abandoned
+        // spend and its GetTxDepthInMainChain lock assertion in this fixture.
+        const auto preview = paymaster_app::WithdrawPaymasterCarrier(context, provider_wallet, request);
+        BOOST_CHECK(!preview.executed.value_or(true));
+        BOOST_CHECK(preview.plan_id.has_value());
+        BOOST_CHECK_EQUAL(preview.source_carriers.value_or(0), 1U);
+        request.mode = CarrierWithdrawalMode::ALL_EXCESS;
+        BOOST_CHECK_EXCEPTION(paymaster_app::WithdrawPaymasterCarrier(context, provider_wallet, request), ApplicationError,
+            [](const ApplicationError& failure) {
+                return std::string{failure.what()}.rfind("PAYMASTER_CARRIER_WITHDRAWAL_PREVIEW_FAILED", 0) == 0;
+            });
+        request.mode = CarrierWithdrawalMode::RELEASE_SLOT;
+        BOOST_REQUIRE(AcknowledgePaymasterProviderExternalBackup(provider_wallet, 2000, error));
+        ProviderBackupStatus backup;
+        BOOST_REQUIRE(GetPaymasterProviderBackupStatus(provider_wallet, backup, 2000, error));
+        BOOST_CHECK(!ProviderBackupRequired(backup));
+        request.execute = true;
+        request.plan_id = preview.plan_id;
+        auto& database = GetMockableDatabase(provider_wallet);
+        const auto before_release = database.m_records;
+        if (fail_commit) {
+            database.m_fail_commit = true;
+            BOOST_CHECK_THROW(paymaster_app::WithdrawPaymasterCarrier(context, provider_wallet, request), ApplicationError);
+            database.m_fail_commit = false;
+            BOOST_CHECK(database.m_records == before_release);
+            BOOST_CHECK(!CheckPaymasterCheckpoint(provider_wallet.GetDatabase(), error));
+            BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_CHECKPOINT_REVIEW_REQUIRED");
+            continue;
+        }
+        const auto released = paymaster_app::WithdrawPaymasterCarrier(context, provider_wallet, request);
+        BOOST_CHECK(released.executed.value_or(false));
+        BOOST_CHECK_EQUAL(released.operational_carrier_target.value_or(99), 0U);
+        BOOST_REQUIRE(GetPaymasterProviderBackupStatus(provider_wallet, backup, 2000, error));
+        BOOST_CHECK(ProviderBackupRequired(backup));
+        BOOST_CHECK_EQUAL(backup.reminder_updated_at, 2001);
+        BOOST_REQUIRE(AcknowledgePaymasterProviderExternalBackup(provider_wallet, 2001, error));
+        const auto after_backup = database.m_records;
+        BOOST_CHECK(paymaster_app::WithdrawPaymasterCarrier(context, provider_wallet, request).executed.value_or(false));
+        BOOST_CHECK(database.m_records == after_backup);
+        BOOST_REQUIRE(GetPaymasterProviderBackupStatus(provider_wallet, backup, 2001, error));
+        BOOST_CHECK(!ProviderBackupRequired(backup));
     }
-    ProviderIdentityRecord identity;
-    std::string error;
-    BOOST_REQUIRE(CreatePaymasterIdentity(provider_wallet, "withdrawal preview", 1000, identity, error));
-    ProviderPolicy policy;
-    policy.funding_models = FUNDING_MODEL_USER_PAID;
-    policy.fee_rate_bps = 50;
-    policy.min_payment = DDCents{100};
-    policy.max_payment = DDCents{1000000};
-    policy.maximum_network_fee = DGBSatoshis{MIN_ADMISSION_DGB_SATOSHIS};
-    BOOST_REQUIRE_MESSAGE(SetPaymasterProviderPolicy(provider_wallet, policy, 1001, error), error);
-    ProviderLiquidityPolicy liquidity;
-    liquidity.target_admission_dgb = 3;
-    liquidity.target_operational_dgb = 1;
-    liquidity.target_admission_carriers = 3;
-    liquidity.target_operational_carriers = 1;
-    liquidity.updated_at = 1002;
-    BOOST_REQUIRE(SetPaymasterProviderLiquidityPolicy(provider_wallet, liquidity, 1002, error));
-    CMutableTransaction parent;
-    parent.SetDigiDollarType(::DD_TX_TRANSFER);
-    parent.vin.emplace_back(COutPoint{uint256S("d1"), 0});
-    parent.vout.emplace_back(0, identity.identity_script);
-    parent.vout.emplace_back(0, CScript() << OP_RETURN << std::vector<unsigned char>{'D', 'D'}
-        << CScriptNum(::DD_TX_TRANSFER) << CScriptNum(200));
-    const auto funding = MakeTransactionRef(parent);
-    CMutableTransaction abandoned;
-    abandoned.vin.emplace_back(COutPoint{funding->GetHash(), 0});
-    abandoned.vout.emplace_back(0, identity.identity_script);
-    {
-        LOCK(provider_wallet.cs_wallet);
-        BOOST_REQUIRE(provider_wallet.AddToWallet(funding, TxStateConfirmed{Params().GenesisBlock().GetHash(), 1, 0}));
-        BOOST_REQUIRE(provider_wallet.AddToWallet(MakeTransactionRef(abandoned), TxStateInactive{true}));
-    }
-    ProviderPoolEntry carrier;
-    carrier.outpoint = COutPoint{funding->GetHash(), 0};
-    carrier.asset = PoolAsset::DD_CARRIER;
-    carrier.purpose = PoolPurpose::OPERATIONAL;
-    carrier.script_pub_key = identity.identity_script;
-    carrier.carrier_value = DDCents{200};
-    carrier.confirmation_height = 1;
-    carrier.updated_at = 1003;
-    BOOST_REQUIRE(SetPaymasterProviderPoolEntries(provider_wallet, {carrier}, error));
-    WalletContext context;
-    context.chain = m_node.chain.get();
-    context.args = m_node.args;
-    Manager manager{true};
-    context.paymaster = &manager;
-    paymaster_app::CarrierWithdrawalParameters request;
-    request.mode = CarrierWithdrawalMode::RELEASE_SLOT;
-    request.source = carrier.outpoint;
-    // Intentionally no caller-held wallet lock. IsSpent visits the abandoned
-    // spend and its GetTxDepthInMainChain lock assertion in this fixture.
-    const auto preview = paymaster_app::WithdrawPaymasterCarrier(context, provider_wallet, request);
-    BOOST_CHECK(!preview.executed.value_or(true));
-    BOOST_CHECK(preview.plan_id.has_value());
-    BOOST_CHECK_EQUAL(preview.source_carriers.value_or(0), 1U);
-    request.mode = CarrierWithdrawalMode::ALL_EXCESS;
-    BOOST_CHECK_EXCEPTION(paymaster_app::WithdrawPaymasterCarrier(context, provider_wallet, request), ApplicationError,
-        [](const ApplicationError& failure) {
-            return std::string{failure.what()}.rfind("PAYMASTER_CARRIER_WITHDRAWAL_PREVIEW_FAILED", 0) == 0;
-        });
 }
+
 
 BOOST_AUTO_TEST_CASE(liquidity_approval_binds_provider_policy_atomically)
 {

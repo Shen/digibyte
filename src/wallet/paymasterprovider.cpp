@@ -85,47 +85,6 @@ bool Abort(WalletBatch& batch, std::string& error)
     return false;
 }
 
-/** Move the non-blocking backup reminder forward in the same database
- * transaction as a material provider-configuration change. No backup path or
- * filename is stored, and ordinary runtime/accounting updates do not call this
- * helper. */
-bool WriteProviderBackupReminder(WalletBatch& batch,
-                                 const ProviderIdentityRecord& identity,
-                                 int64_t now,
-                                 std::string& error)
-{
-    ProviderBackupStatus status;
-    if (!batch.ReadPaymasterBackupStatus(status)) {
-        if (batch.HasPaymasterBackupStatus()) {
-            error = "PAYMASTER_INVALID_BACKUP_STATUS";
-            return false;
-        }
-        status.genesis_hash = Params().GenesisBlock().GetHash();
-        status.provider_id = identity.provider_id;
-        status.identity_created_at = identity.created_at;
-    }
-    if (status.genesis_hash != Params().GenesisBlock().GetHash() ||
-        status.provider_id != identity.provider_id) {
-        error = "PAYMASTER_BACKUP_STATUS_BINDING_MISMATCH";
-        return false;
-    }
-    // Configuration writes and backups can happen within the same timestamp
-    // second. Advance past every completed backup marker so an immediately
-    // following material change cannot accidentally appear protected by the
-    // older backup. Saturation keeps corrupted or extreme timestamps from
-    // wrapping around.
-    status.reminder_updated_at = std::max(
-        {status.reminder_updated_at, now,
-         SaturatingAddSeconds(status.last_successful_backup_at, 1),
-         SaturatingAddSeconds(status.external_backup_acknowledged_at, 1)});
-    if (!ValidateProviderBackupStatus(status, error) ||
-        !batch.WritePaymasterBackupStatus(status)) {
-        if (error.empty()) error = "PAYMASTER_BACKUP_STATUS_DATABASE_WRITE";
-        return false;
-    }
-    return true;
-}
-
 /** Hash the complete persisted liquidity policy for change detection. The
  * timestamp is normalized by the caller, so only operator-visible settings
  * can trigger a new backup recommendation. */
@@ -1309,7 +1268,7 @@ bool SetPaymasterProviderPolicy(CWallet& wallet,
     if (!batch.WritePaymasterPolicy(policy) ||
         !batch.WritePaymasterSettings(settings) ||
         (policy_changed &&
-         !WriteProviderBackupReminder(batch, identity, now, error))) {
+         !WritePaymasterProviderBackupReminder(batch, identity, now, error))) {
         return Abort(batch, error);
     }
     if (!batch.TxnCommit()) {
@@ -1375,7 +1334,7 @@ bool SetPaymasterProviderEnabled(CWallet& wallet, bool enabled, int64_t now, std
     }
     if (!batch.WritePaymasterSettings(settings) ||
         (settings_changed && have_identity &&
-         !WriteProviderBackupReminder(batch, identity, now, error))) {
+         !WritePaymasterProviderBackupReminder(batch, identity, now, error))) {
         return Abort(batch, error);
     }
     if (!batch.TxnCommit()) {
@@ -1410,7 +1369,7 @@ bool PausePaymasterProvider(CWallet& wallet, bool pause_setup, int64_t now, std:
         return false;
     }
     if (!batch.WritePaymasterSettings(settings) ||
-        (changed && have_identity && !WriteProviderBackupReminder(batch, identity, now, error))) return Abort(batch, error);
+        (changed && have_identity && !WritePaymasterProviderBackupReminder(batch, identity, now, error))) return Abort(batch, error);
     if (!batch.TxnCommit()) {
         error = "PAYMASTER_DATABASE_COMMIT";
         return false;
@@ -1462,7 +1421,7 @@ bool SetPaymasterProviderRuntimeSettings(CWallet& wallet,
     }
     if (!batch.WritePaymasterSettings(settings) ||
         (settings_changed && have_identity &&
-         !WriteProviderBackupReminder(batch, identity, now, error))) {
+         !WritePaymasterProviderBackupReminder(batch, identity, now, error))) {
         return Abort(batch, error);
     }
     if (!batch.TxnCommit()) {
@@ -1559,7 +1518,7 @@ bool SetPaymasterProviderSafetyPolicy(CWallet& wallet,
     }
     if (!batch.WritePaymasterProviderSafetyPolicy(persisted) ||
         !batch.WritePaymasterProviderBudgetLedger(ledger) ||
-        (policy_changed && !WriteProviderBackupReminder(
+        (policy_changed && !WritePaymasterProviderBackupReminder(
                                batch, identity, effective_now, error))) {
         return Abort(batch, error);
     }
@@ -1646,7 +1605,7 @@ bool SetPaymasterProviderLiquidityPolicy(
     if (!batch.WritePaymasterLiquidityPolicy(policy) ||
         !batch.WritePaymasterMaintenanceLedger(ledger) ||
         (policy_changed &&
-         !WriteProviderBackupReminder(batch, identity, now, error))) {
+         !WritePaymasterProviderBackupReminder(batch, identity, now, error))) {
         batch.TxnAbort();
         if (error.empty()) error = "PAYMASTER_DATABASE_WRITE";
         return false;
@@ -1982,7 +1941,7 @@ bool ReleasePaymasterCapital(CWallet& wallet, bool execute, const uint256& expec
     if (!batch.WritePaymasterProviderPool(pool) ||
         (!uncreated_maintenance.empty() && !batch.WritePaymasterMaintenanceLedger(maintenance)) ||
         (liquidity_status == DatabaseReadStatus::FOUND && !batch.WritePaymasterLiquidityPolicy(liquidity)) ||
-        !WriteProviderBackupReminder(batch, identity, now, error)) {
+        !WritePaymasterProviderBackupReminder(batch, identity, now, error)) {
         batch.TxnAbort();
         if (error.empty()) error = "PAYMASTER_DATABASE_WRITE";
         return false;
@@ -2146,7 +2105,7 @@ bool CancelPaymasterMaintenance(CWallet& wallet, const std::vector<uint256>& ope
     if (!batch.TxnBegin()) return fail("PAYMASTER_DATABASE_BEGIN");
     if (!batch.WritePaymasterMaintenanceLedger(ledger) ||
         (liquidity_status == DatabaseReadStatus::FOUND && !batch.WritePaymasterLiquidityPolicy(liquidity)) ||
-        !WriteProviderBackupReminder(batch, identity, now, error)) {
+        !WritePaymasterProviderBackupReminder(batch, identity, now, error)) {
         batch.TxnAbort();
         if (error.empty()) error = "PAYMASTER_DATABASE_WRITE";
         return false;
@@ -2202,7 +2161,7 @@ bool AdoptPaymasterBackup(CWallet& wallet, bool execute, const uint256& expected
     }
     ProviderIdentityRecord identity;
     if (!batch.ReadPaymasterIdentity(identity) ||
-        !WriteProviderBackupReminder(batch, identity, now, error) || !batch.TxnCommit()) {
+        !WritePaymasterProviderBackupReminder(batch, identity, now, error) || !batch.TxnCommit()) {
         batch.TxnAbort();
         if (error.empty()) error = "PAYMASTER_DATABASE_COMMIT";
         return false;
