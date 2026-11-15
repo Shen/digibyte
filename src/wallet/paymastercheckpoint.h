@@ -26,6 +26,7 @@ class DatabaseBatch;
 class WalletBatch;
 class WalletDatabase;
 struct PaymasterMaintenanceExecution;
+class ValidatedPaymasterConflictCompletion;
 
 enum class PaymasterMaintenanceAccounting { MISMATCH, BEFORE, AFTER };
 /** Classify already validated immutable accounting snapshots. This grants no
@@ -113,6 +114,7 @@ public:
      * its exact cleanup was committed and financial work must not be repeated. */
     bool Resume(const PaymasterMaintenanceExecution& execution, std::string& error);
     bool Complete(std::string& error);
+    bool CompleteConflict(const ValidatedPaymasterConflictCompletion& completion, std::string& error);
 private:
     CWallet& m_wallet;
     bool m_active{false};

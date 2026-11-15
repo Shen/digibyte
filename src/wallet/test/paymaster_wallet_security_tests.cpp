@@ -7565,7 +7565,8 @@ BOOST_FIXTURE_TEST_CASE(client_recovery_read_failure_stops_new_preparation,
 static void ExerciseFirstProviderRecoveryCommit(node::NodeContext& node,
     AlternativeRecoveryRecord recovery, const CKey& provider_key,
     const CTransactionRef& funding, const PaymasterResult& result, int64_t now,
-    ClientRecoveryReadSetup* chain_setup = nullptr, const TxStateConfirmed* confirmed_state = nullptr)
+    ClientRecoveryReadSetup* chain_setup = nullptr, const TxStateConfirmed* confirmed_state = nullptr,
+    bool settle_conflict = false)
 {
     wallet::CWallet provider{node.chain.get(), "first-provider-recovery", CreateMockableWalletDatabase()};
     BOOST_REQUIRE(provider.LoadWallet() == DBErrors::LOAD_OK);
@@ -7716,6 +7717,57 @@ static void ExerciseFirstProviderRecoveryCommit(node::NodeContext& node,
     BOOST_REQUIRE_EQUAL(repaired_budget.reservations.size(), 1U);
     BOOST_CHECK(repaired_budget.reservations.front().state == BudgetReservationState::SPENT);
 
+    if (settle_conflict) {
+        IndexWaitSynced(*g_txindex);
+        const int height = *node.chain->getHeight();
+        const auto tip = node.chain->getBlockHash(height);
+        uint256 funding_block;
+        CTransactionRef exact_funding;
+        BOOST_REQUIRE(g_txindex->FindTx(funding->GetHash(), funding_block, exact_funding));
+        const int funding_height = WITH_LOCK(cs_main, return node.chainman->m_blockman.LookupBlockIndex(funding_block)->nHeight);
+        {
+            LOCK(reopened.cs_wallet);
+            BOOST_REQUIRE(reopened.AddToWallet(funding, TxStateConfirmed{funding_block, funding_height, 2}));
+            reopened.SetLastBlockProcessed(height, tip);
+        }
+        auto proof = ObservePaymasterInputConflict(reopened, CTransaction{*result.final_transaction}, identity.provider_id,
+            (HashWriter{} << commit).GetHash(), now + 4, error);
+        BOOST_REQUIRE_MESSAGE(proof, error);
+        PaymasterStore conflict_store{reopened};
+        const auto budget_bytes = SerializePaymasterSecurityObject(repaired_budget);
+        size_t finance_changes{0};
+        BOOST_REQUIRE_MESSAGE(RebuildProviderFinances(reopened, finance_changes, error), error);
+        BOOST_REQUIRE_MESSAGE(conflict_store.SettleProviderConflict(commit, *proof, now + 4, error), error);
+        BOOST_REQUIRE_MESSAGE(ReconcileProviderFinances(reopened, finance_changes, error), error);
+        ProviderFinanceEvent closed_event;
+        BOOST_REQUIRE(WalletBatch{reopened.GetDatabase()}.ReadPaymasterFinanceEvent(commit.commit_key, closed_event) == DatabaseReadStatus::FOUND);
+        BOOST_CHECK(closed_event.state == ProviderFinanceEventState::INVALIDATED);
+        AlternativeRecoveryRecord archived;
+        BOOST_REQUIRE(conflict_store.GetProviderAlternativeRecoveryByCommit(commit, archived, error));
+        std::vector<AlternativeRecoveryRecord> active;
+        BOOST_REQUIRE(WalletBatch{reopened.GetDatabase()}.ListPaymasterAlternativeRecoveries(active));
+        BOOST_CHECK(active.empty());
+        BOOST_REQUIRE(WalletBatch{reopened.GetDatabase()}.ReadPaymasterProviderBudgetLedger(repaired_budget));
+        BOOST_CHECK(SerializePaymasterSecurityObject(repaired_budget) == budget_bytes);
+        BOOST_REQUIRE(conflict_store.ReconcileProviderPoolSuccessors(repaired_successors, error));
+        BOOST_CHECK_EQUAL(repaired_successors, 0U);
+        BOOST_CHECK(!conflict_store.CommitProviderAlternativeRecoveryFinal(recovery, commit, result, result.genesis_hash, error));
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_TRANSACTION_CONFLICT_SETTLED");
+        environment.settings.enabled = environment.settings.autostart = false;
+        environment.settings.policy_hash = GetProviderPolicyHash(environment.policy);
+        {
+            LOCK(reopened.cs_wallet);
+            WalletBatch batch{reopened.GetDatabase()};
+            BOOST_REQUIRE(batch.WritePaymasterPolicy(environment.policy));
+            BOOST_REQUIRE(batch.WritePaymasterSettings(environment.settings));
+        }
+        CompleteProviderHistoryObservation(reopened);
+        PaymasterCapitalRelease release;
+        BOOST_REQUIRE_MESSAGE(ReleasePaymasterCapital(reopened, false, {}, now + 5, release, error), error);
+        BOOST_CHECK_EQUAL(release.entries, 1U);
+        BOOST_REQUIRE_MESSAGE(ReleasePaymasterCapital(reopened, true, release.plan_id, now + 5, release, error), error);
+        return;
+    }
     if (!chain_setup) return;
     // The flag-repair clone above owns the current independent checkpoint.
     wallet::CWallet& history_wallet = reopened;
@@ -8061,6 +8113,495 @@ static void ExerciseFirstProviderRecoveryCommit(node::NodeContext& node,
         BOOST_CHECK(paymaster_store::internal::CheckProviderHistoryCapacity(batch, terminal_reopened.GetDatabase(),
             next_quote.request.intent.request_id, error));
     }
+}
+
+static void ExerciseProviderConflictClosures(ClientRecoveryReadSetup& setup, wallet::CWallet& signer,
+    ProviderQuoteFixture original, const ProviderSecurityEnvironment& environment, const CKey& user_key,
+    const CBlock& funding, int funding_height, const AlternativeRecoveryRecord& recovery,
+    const CKey& recovery_key, const PaymasterResult& recovery_result, int64_t now)
+{
+    using wallet::CWallet;
+    auto& node = setup.m_node;
+    std::string error;
+    const auto& quote = original.response.quote;
+    auto& attempt = original.attempt;
+    ProviderSafetyPolicy safety = environment.safety;
+    safety.public_sponsored = SecurityLimits(4 * COIN);
+    safety.public_sponsored.maximum_network_fee_per_transaction = quote.network_fee;
+    safety.public_sponsored.maximum_network_fee_per_hour = DGBSatoshis{4 * COIN};
+    safety.public_sponsored.maximum_network_fee_per_day = DGBSatoshis{4 * COIN};
+    CollaborativePSBTTemplate trusted;
+    BOOST_REQUIRE(DecodeRawPSBT(trusted.psbt, MakeByteSpan(attempt.unsigned_psbt), error));
+    trusted.input_roles = {InputRole::USER_DD, InputRole::PROVIDER_DGB};
+    attempt.provider_netgroup_bucket = environment.netgroup_bucket;
+    BOOST_REQUIRE_MESSAGE(BuildProviderAuthorizationManifest(original.request.intent, quote, trusted,
+        GetProviderSafetyPolicyHash(safety), attempt.provider_manifest, error), error);
+    ProviderCommitRecord commit;
+    commit.commit_key = attempt.commit_key;
+    commit.provider_id = attempt.provider_id;
+    commit.quote_id = attempt.quote_id;
+    commit.template_commitment = attempt.template_commitment;
+    commit.final_txid = attempt.final_txid;
+    commit.final_transaction = attempt.final_transaction;
+    commit.raw_transaction_hash = Hash(commit.final_transaction);
+    commit.provider_inputs = attempt.provider_manifest.provider_dgb_inputs;
+    commit.committed_at = now + 1;
+    commit.retry_until = attempt.retry_until;
+    ProviderCommitArtifacts artifacts;
+    BOOST_REQUIRE_MESSAGE(ValidateProviderCommitArtifacts(attempt, commit, artifacts, error), error);
+    CWallet provider{node.chain.get(), "payment-conflict-owner", DuplicateSecurityFixtureDatabase(setup.wallet.GetDatabase())};
+    BOOST_REQUIRE(provider.LoadWallet() == DBErrors::LOAD_OK);
+    BOOST_REQUIRE(AddTaprootSigningKey(provider, environment.identity_key, error));
+    ProviderBudgetLedger budget;
+    budget.recipient_bucket_secret = environment.ledger.recipient_bucket_secret;
+    budget.accounting_time_high_water = now;
+    BOOST_REQUIRE_MESSAGE(ReserveProviderBudget(budget, safety, FundingModel::SPONSORED, SponsorshipScope::PUBLIC,
+        commit.commit_key, quote.network_fee, GetRecipientBudgetBucket(budget, original.request.intent.recipient_script),
+        now, error, attempt.provider_netgroup_bucket), error);
+    BOOST_REQUIRE(SpendProviderBudget(budget, commit.commit_key, now + 1, error));
+    const auto spent_budget = SerializePaymasterSecurityObject(budget);
+    PaymentSession provider_session;
+    provider_session.provider_side = true;
+    provider_session.request_id = original.request.intent.request_id;
+    provider_session.session_id = attempt.session_id;
+    provider_session.canonical_request_hash = original.request.intent.canonical_request_hash;
+    provider_session.fee_mode_requested = provider_session.fee_mode_used = FeeMode::PAYMASTER;
+    provider_session.state = SessionState::PENDING_PROVIDER;
+    provider_session.pending_phase = PendingPhase::PENDING_NETWORK;
+    provider_session.attempt_ids = {attempt.attempt_id};
+    provider_session.final_txid = commit.final_txid;
+    provider_session.created_at = now;
+    provider_session.updated_at = now + 1;
+    ProviderPoolEntry source;
+    source.outpoint = commit.provider_inputs.front();
+    source.script_pub_key = funding.vtx.at(3)->vout.at(0).scriptPubKey;
+    source.asset = PoolAsset::DGB;
+    source.state = PoolEntryState::COMMITTED;
+    source.dgb_value = DGBSatoshis{2 * COIN};
+    source.confirmation_height = funding_height;
+    source.reservation_id = commit.commit_key;
+    source.updated_at = now + 1;
+    std::vector<ProviderPoolEntry> pool{source};
+    COutPoint lost_successor;
+    {
+        LOCK(provider.cs_wallet);
+        WalletBatch batch{provider.GetDatabase()};
+        BOOST_REQUIRE(provider.AddToWallet(funding.vtx.at(3), TxStateConfirmed{funding.GetHash(), funding_height, 3}));
+        ProviderIdentityRecord stored_identity;
+        BOOST_REQUIRE(batch.ReadPaymasterIdentity(stored_identity));
+        BOOST_CHECK(stored_identity.provider_id == environment.identity.provider_id);
+        BOOST_REQUIRE(batch.WritePaymasterProviderSafetyPolicy(safety));
+        BOOST_REQUIRE(batch.WritePaymasterProviderBudgetLedger(budget));
+        BOOST_REQUIRE(batch.WritePaymasterAttempt(attempt));
+        BOOST_REQUIRE(batch.WritePaymasterTemplate(attempt.template_commitment, attempt.attempt_id));
+        BOOST_REQUIRE(batch.WritePaymasterUnsignedTx(attempt.unsigned_txid, attempt.attempt_id));
+        BOOST_REQUIRE(batch.WritePaymasterSession(provider_session));
+        BOOST_REQUIRE(batch.WritePaymasterSessionId(attempt.session_id, provider_session.request_id));
+        BOOST_REQUIRE(batch.WritePaymasterProviderCommit(commit));
+        bool changed{false};
+        BOOST_REQUIRE_MESSAGE(paymaster_store::internal::RegisterProviderPoolSuccessors(provider, attempt, commit,
+            CTransaction{artifacts.final_transaction}, std::nullopt, pool, changed, error), error);
+        BOOST_REQUIRE(changed);
+        BOOST_REQUIRE(batch.WritePaymasterProviderPool(pool));
+        BOOST_REQUIRE(batch.WritePaymasterReservation({InputReservation::CURRENT_VERSION, source.outpoint,
+            provider_session.request_id, provider_session.session_id, ReservationRole::PROVIDER_DGB, true, now}));
+        BOOST_REQUIRE(batch.WritePaymasterLockedUTXO(source.outpoint));
+        provider.LockPaymasterCoin(source.outpoint);
+        BOOST_REQUIRE(provider.LockCoin(source.outpoint, &batch));
+        // Keep the real consumed source only in durable history. At the full
+        // inventory limit the lost final's successor is the sole removable row.
+        std::vector<ProviderPoolEntry> full;
+        for (const auto& entry : pool) if (entry.outpoint.hash == commit.final_txid) { full.push_back(entry); lost_successor = entry.outpoint; }
+        BOOST_REQUIRE_EQUAL(full.size(), 1U);
+        for (size_t i{0}; i < 255; ++i) {
+            auto filler = source;
+            filler.outpoint = COutPoint{SecurityTestId(commit.commit_key, 1000 + i), 0};
+            filler.state = PoolEntryState::AVAILABLE;
+            filler.reservation_id.SetNull();
+            full.push_back(filler);
+        }
+        BOOST_REQUIRE(batch.WritePaymasterProviderPool(full));
+    }
+    // A separate identity retains a native replenish transaction signed before
+    // wallet insertion. One ordinary funding input will lose; the other remains
+    // protected solely by the pending immutable journal until safe completion.
+    auto native_database = std::make_unique<CheckpointJournalFailureDatabase>();
+    auto* native_db = native_database.get();
+    CWallet native{node.chain.get(), "native-conflict-owner", std::move(native_database)};
+    BOOST_REQUIRE(native.LoadWallet() == DBErrors::LOAD_OK);
+    CKey native_key;
+    native_key.MakeNewKey(true);
+    BOOST_REQUIRE(AddTaprootSigningKey(native, native_key, error));
+    BOOST_REQUIRE(AddTaprootSigningKey(native, environment.identity_key, error));
+    BOOST_REQUIRE(AddTaprootSigningKey(native, user_key, error));
+    ProviderIdentityRecord native_identity = environment.identity;
+    native_identity.identity_key = XOnlyPubKey{native_key.GetPubKey()};
+    native_identity.provider_id = GetPaymasterId(native_identity.identity_key);
+    TaprootBuilder native_builder;
+    native_builder.Finalize(native_identity.identity_key);
+    native_identity.identity_script = GetScriptForDestination(native_builder.GetOutput());
+    CMutableTransaction native_tx;
+    native_tx.vin.emplace_back(COutPoint{funding.vtx.at(3)->GetHash(), 0});
+    native_tx.vin.emplace_back(COutPoint{funding.vtx.at(5)->GetHash(), 0});
+    constexpr CAmount native_fee{1000};
+    native_tx.vout.emplace_back(COIN, native_identity.identity_script);
+    native_tx.vout.emplace_back(3 * COIN - native_fee, funding.vtx.at(5)->vout.front().scriptPubKey);
+    {
+        LOCK(signer.cs_wallet);
+        BOOST_REQUIRE(signer.AddToWallet(funding.vtx.at(5), TxStateConfirmed{funding.GetHash(), funding_height, 5}));
+        BOOST_REQUIRE(signer.SignTransaction(native_tx));
+    }
+    ProviderMaintenanceRecord operation;
+    operation.operation_id = SecurityTestId(native_identity.provider_id, 201);
+    operation.plan_id = SecurityTestId(native_identity.provider_id, 202);
+    operation.kind = ProviderMaintenanceKind::REPLENISH_DGB;
+    operation.maximum_fee = DGBSatoshis{native_fee};
+    operation.created_at = operation.updated_at = now;
+    operation.outputs = {{PoolPurpose::OPERATIONAL, PoolAsset::DGB, native_identity.identity_script, DGBSatoshis{COIN}, {}}};
+    PaymasterMaintenanceExecution execution;
+    execution.genesis_hash = Params().GenesisBlock().GetHash();
+    execution.provider_id = native_identity.provider_id;
+    execution.operation_id = SecurityTestId(native_identity.provider_id, 203);
+    execution.created_at = now;
+    execution.had_pool = execution.has_ledger = true;
+    execution.before_ledger.records = {operation};
+    execution.after_ledger = execution.before_ledger;
+    BOOST_REQUIRE(SpendProviderMaintenanceBudget(execution.after_ledger, operation.operation_id,
+        native_tx.GetHash(), DGBSatoshis{native_fee}, now + 1, error));
+    ProviderPoolEntry pending;
+    pending.outpoint = COutPoint{native_tx.GetHash(), 0};
+    pending.asset = PoolAsset::DGB;
+    pending.state = PoolEntryState::PENDING_SUCCESSOR;
+    pending.script_pub_key = native_identity.identity_script;
+    pending.dgb_value = DGBSatoshis{COIN};
+    pending.reservation_id = pending.origin_commit_key = operation.operation_id;
+    pending.updated_at = now + 1;
+    execution.after_pool = {pending};
+    PaymasterMaintenanceExecutionLeg leg;
+    leg.transaction = SerializePaymasterSecurityObject(native_tx);
+    leg.fee = DGBSatoshis{native_fee};
+    execution.legs = {leg};
+    BOOST_REQUIRE(ValidatePaymasterMaintenanceExecution(execution));
+    {
+        LOCK(native.cs_wallet);
+        BOOST_REQUIRE(native.AddToWallet(funding.vtx.at(3), TxStateConfirmed{funding.GetHash(), funding_height, 3}));
+        BOOST_REQUIRE(native.AddToWallet(funding.vtx.at(5), TxStateConfirmed{funding.GetHash(), funding_height, 5}));
+        WalletBatch batch{native.GetDatabase()};
+        BOOST_REQUIRE(batch.WritePaymasterIdentity(native_identity));
+        BOOST_REQUIRE(batch.WritePaymasterProviderPool({}));
+        BOOST_REQUIRE(batch.WritePaymasterMaintenanceLedger(execution.before_ledger));
+        PaymasterCheckpointOperation checkpoint{native};
+        BOOST_REQUIRE_MESSAGE(checkpoint.Begin(execution, error), error);
+        BOOST_REQUIRE(native.LockCoin(source.outpoint, &batch));
+    }
+    BOOST_CHECK(IsPaymasterInputReserved(native, source.outpoint));
+    auto retirement = std::make_shared<CWallet>(node.chain.get(), "two-leg-conflict-retirement", CreateMockableWalletDatabase());
+    BOOST_REQUIRE(retirement->LoadWallet() == DBErrors::LOAD_OK);
+    CKey retirement_key;
+    retirement_key.MakeNewKey(true);
+    BOOST_REQUIRE(AddTaprootSigningKey(*retirement, retirement_key, error));
+    BOOST_REQUIRE(AddTaprootSigningKey(*retirement, user_key, error));
+    BOOST_REQUIRE(AddTaprootSigningKey(*retirement, environment.identity_key, error));
+    ProviderIdentityRecord retirement_identity = native_identity;
+    retirement_identity.identity_key = XOnlyPubKey{retirement_key.GetPubKey()};
+    retirement_identity.provider_id = GetPaymasterId(retirement_identity.identity_key);
+    TaprootBuilder retirement_builder;
+    retirement_builder.Finalize(retirement_identity.identity_key);
+    retirement_identity.identity_script = GetScriptForDestination(retirement_builder.GetOutput());
+    CMutableTransaction losing_dd{artifacts.final_transaction};
+    losing_dd.vout.front().scriptPubKey = retirement_identity.identity_script;
+    CMutableTransaction confirmed_dgb;
+    confirmed_dgb.vin.emplace_back(COutPoint{funding.vtx.at(4)->GetHash(), 0});
+    confirmed_dgb.vout.emplace_back(2 * COIN - native_fee, retirement_identity.identity_script);
+    {
+        LOCK(signer.cs_wallet);
+        for (auto& input : losing_dd.vin) { input.scriptSig.clear(); input.scriptWitness.SetNull(); }
+        BOOST_REQUIRE(signer.SignTransaction(losing_dd));
+        BOOST_REQUIRE(signer.AddToWallet(funding.vtx.at(4), TxStateConfirmed{funding.GetHash(), funding_height, 4}));
+        BOOST_REQUIRE(signer.SignTransaction(confirmed_dgb));
+    }
+    PaymasterMaintenanceExecution retirement_execution;
+    retirement_execution.genesis_hash = execution.genesis_hash;
+    retirement_execution.provider_id = retirement_identity.provider_id;
+    retirement_execution.operation_id = SecurityTestId(retirement_identity.provider_id, 204);
+    retirement_execution.created_at = now;
+    retirement_execution.had_pool = true;
+    auto retiring_source = source;
+    retiring_source.outpoint = confirmed_dgb.vin.front().prevout;
+    retiring_source.script_pub_key = funding.vtx.at(4)->vout.front().scriptPubKey;
+    retiring_source.state = PoolEntryState::AVAILABLE;
+    retiring_source.reservation_id.SetNull();
+    retirement_execution.before_pool = {retiring_source};
+    retiring_source.state = PoolEntryState::SPENT;
+    retirement_execution.after_pool = {retiring_source};
+    auto dd_leg = leg;
+    dd_leg.transaction = SerializePaymasterSecurityObject(losing_dd);
+    dd_leg.fee = quote.network_fee;
+    dd_leg.digidollar = true;
+    dd_leg.history_recipient = retirement_identity.identity_script;
+    dd_leg.history_amount = DDCents{10000};
+    dd_leg.multiple_recipients = true;
+    auto dgb_leg = leg;
+    dgb_leg.transaction = SerializePaymasterSecurityObject(confirmed_dgb);
+    for (auto* item : {&dd_leg, &dgb_leg}) item->metadata["paymaster_retirement_provider"] = retirement_identity.provider_id.GetHex();
+    retirement_execution.legs = {dd_leg, dgb_leg};
+    BOOST_REQUIRE(ValidatePaymasterMaintenanceExecution(retirement_execution));
+    {
+        LOCK(retirement->cs_wallet);
+        WalletBatch batch{retirement->GetDatabase()};
+        for (int index : {3, 4})
+            BOOST_REQUIRE(retirement->AddToWallet(funding.vtx.at(index), TxStateConfirmed{funding.GetHash(), funding_height, index}));
+        BOOST_REQUIRE(batch.WritePaymasterIdentity(retirement_identity));
+        BOOST_REQUIRE(batch.WritePaymasterProviderPool(retirement_execution.before_pool));
+        PaymasterCheckpointOperation checkpoint{*retirement};
+        BOOST_REQUIRE_MESSAGE(checkpoint.Begin(retirement_execution, error), error);
+        BOOST_REQUIRE(retirement->LockCoin(source.outpoint, &batch));
+    }
+    CMutableTransaction winner{artifacts.final_transaction};
+    winner.vin.at(1).prevout = COutPoint{funding.vtx.at(5)->GetHash(), 0};
+    for (auto& input : winner.vin) { input.scriptSig.clear(); input.scriptWitness.SetNull(); }
+    {
+        LOCK(signer.cs_wallet);
+        BOOST_REQUIRE(signer.SignTransaction(winner));
+    }
+    const auto won = setup.CreateAndProcessBlock({winner}, CScript() << OP_TRUE);
+    BOOST_REQUIRE(won.GetHash() == WITH_LOCK(cs_main, return node.chainman->ActiveChain().Tip()->GetBlockHash()));
+    for (int i{0}; i < DEFAULT_REORG_SAFETY_DEPTH - 2; ++i) setup.CreateAndProcessBlock({}, CScript() << OP_TRUE);
+    const auto update = [&](CWallet& wallet) {
+        IndexWaitSynced(*g_txindex);
+        SyncWithValidationInterfaceQueue();
+        LOCK(wallet.cs_wallet);
+        LOCK(cs_main);
+        const auto* tip = node.chainman->ActiveChain().Tip();
+        wallet.SetLastBlockProcessed(tip->nHeight, tip->GetBlockHash());
+    };
+    update(provider);
+    update(native);
+    BOOST_CHECK(!provider.GetWalletTx(commit.final_txid));
+    BOOST_CHECK(!native.GetWalletTx(native_tx.GetHash()));
+    auto proof = ObservePaymasterInputConflict(provider, CTransaction{artifacts.final_transaction}, commit.provider_id,
+        (HashWriter{} << commit).GetHash(), now + 2, error);
+    BOOST_CHECK(!proof);
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_CONFLICT_PROOF_NOT_SETTLED");
+    BOOST_CHECK(!paymaster_app::ResumeProviderMaintenanceTransactions(native, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_CONFLICT_PROOF_NOT_SETTLED");
+    BOOST_CHECK(!native.GetWalletTx(native_tx.GetHash()));
+    setup.CreateAndProcessBlock({}, CScript() << OP_TRUE);
+    update(provider);
+    update(native);
+    proof = ObservePaymasterInputConflict(provider, CTransaction{artifacts.final_transaction}, commit.provider_id,
+        (HashWriter{} << commit).GetHash(), now + 3, error);
+    BOOST_REQUIRE_MESSAGE(proof, error);
+    PaymasterStore store{provider};
+    auto& database = GetMockableDatabase(provider);
+    // A read-only observer also bounds parent discovery before historical
+    // scanning. Twenty distinct indexed parents require a continuation; a
+    // repeated parent is looked up once. No financial artifacts use this probe.
+    CMutableTransaction many_parents{artifacts.final_transaction};
+    for (size_t index{0}; index < 20; ++index)
+        many_parents.vin.emplace_back(COutPoint{setup.m_coinbase_txns.at(index)->GetHash(), 0});
+    many_parents.vin.push_back(many_parents.vin.back());
+    const CTransaction parent_probe{many_parents};
+    const auto probe_authority = SecurityTestId(commit.commit_key, 250);
+    const auto probe_key = (HashWriter{} << probe_authority << parent_probe.GetHash() << parent_probe.GetWitnessHash()).GetHash();
+    BOOST_CHECK(!ObservePaymasterInputConflict(provider, parent_probe, commit.provider_id, probe_authority, now + 3, error));
+    BOOST_CHECK(error.empty());
+    auto progress = GetPaymasterConflictScanPosition(provider.GetDatabase(), probe_key);
+    BOOST_CHECK_EQUAL(progress.parent_blocks.size(), 16U);
+    BOOST_CHECK(!progress.anchored);
+    ForgetPaymasterSessionIndex(provider.GetDatabase());
+    BOOST_CHECK(!ObservePaymasterInputConflict(provider, parent_probe, commit.provider_id, probe_authority, now + 3, error));
+    BOOST_CHECK(error.empty());
+    progress = GetPaymasterConflictScanPosition(provider.GetDatabase(), probe_key);
+    BOOST_CHECK(progress.anchored);
+    BOOST_CHECK(progress.parent_blocks.empty());
+    size_t finance_changes{0};
+    BOOST_REQUIRE_MESSAGE(RebuildProviderFinances(provider, finance_changes, error), error);
+    ProviderFinanceEvent payment_event;
+    BOOST_REQUIRE(WalletBatch{provider.GetDatabase()}.ReadPaymasterFinanceEvent(commit.commit_key, payment_event) == DatabaseReadStatus::FOUND);
+    BOOST_CHECK(payment_event.state == ProviderFinanceEventState::PENDING);
+    const auto before = database.m_records;
+    database.FailCommit();
+    BOOST_CHECK(!store.SettleProviderConflict(commit, *proof, now + 3, error));
+    database.ClearFailureInjection();
+    BOOST_CHECK(database.m_records == before);
+    {
+        LOCK(provider.cs_wallet);
+        std::vector<ProviderPoolEntry> stale_pool;
+        WalletBatch batch{provider.GetDatabase()};
+        BOOST_REQUIRE(batch.ReadPaymasterProviderPool(stale_pool));
+        for (auto& entry : stale_pool) if (entry.outpoint == lost_successor) {
+            entry.state = PoolEntryState::AVAILABLE;
+            entry.reservation_id.SetNull();
+            entry.confirmation_height = funding_height + 1;
+        }
+        BOOST_REQUIRE(batch.WritePaymasterProviderPool(stale_pool));
+    }
+    BOOST_REQUIRE_MESSAGE(store.SettleProviderConflict(commit, *proof, now + 3, error), error);
+    PaymentSession removed;
+    BOOST_CHECK(WalletBatch{provider.GetDatabase()}.ReadPaymasterSessionWithStatus(provider_session.request_id, removed) == DatabaseReadStatus::NOT_FOUND);
+    BOOST_REQUIRE(store.GetSessionByRequestId(provider_session.request_id, provider_session));
+    BOOST_CHECK(provider_session.state == SessionState::CONFLICTED);
+    IdempotencyTombstone tombstone;
+    BOOST_REQUIRE(WalletBatch{provider.GetDatabase()}.ReadPaymasterTombstone(original.request.intent.request_id, tombstone));
+    BOOST_CHECK(tombstone.final_state == SessionState::CONFLICTED);
+    BOOST_REQUIRE(ReadProviderSecurityState(provider, budget, pool));
+    BOOST_CHECK(SerializePaymasterSecurityObject(budget) == spent_budget);
+    const auto freed = std::find_if(pool.begin(), pool.end(), [&](const auto& entry) { return entry.outpoint == source.outpoint; });
+    BOOST_REQUIRE(freed != pool.end());
+    BOOST_CHECK(freed->state == PoolEntryState::AVAILABLE);
+    BOOST_CHECK(freed->reservation_id.IsNull());
+    BOOST_CHECK(WITH_LOCK(provider.cs_wallet, return provider.IsLockedCoin(source.outpoint)));
+    BOOST_CHECK(IsPaymasterInputReserved(provider, source.outpoint)); // Operational capital stays excluded from ordinary sending.
+    BOOST_CHECK_EQUAL(pool.size(), 256U);
+    {
+        LOCK(provider.cs_wallet);
+        ProviderPoolEntry successor;
+        BOOST_REQUIRE(WalletBatch{provider.GetDatabase()}.ReadPaymasterPoolHistoryWithStatus(
+            lost_successor, successor) == DatabaseReadStatus::FOUND);
+        BOOST_CHECK(successor.state == PoolEntryState::RELEASED);
+    }
+    BOOST_CHECK(std::all_of(pool.begin(), pool.end(), [&](const auto& entry) { return entry.outpoint.hash != commit.final_txid || entry.state == PoolEntryState::RELEASED; }));
+    BOOST_CHECK_EQUAL(RecoverDurablePaymasterCommit(provider, commit, now + 4).error, "PAYMASTER_TRANSACTION_CONFLICT_SETTLED");
+    BOOST_REQUIRE_MESSAGE(ReconcileProviderFinances(provider, finance_changes, error), error);
+    BOOST_REQUIRE(WalletBatch{provider.GetDatabase()}.ReadPaymasterFinanceEvent(commit.commit_key, payment_event) == DatabaseReadStatus::FOUND);
+    BOOST_CHECK(payment_event.state == ProviderFinanceEventState::INVALIDATED);
+    {
+        LOCK(native.cs_wallet);
+        auto completion = PreparePaymasterNativeConflictCompletion(native, execution, error);
+        BOOST_REQUIRE_MESSAGE(completion, error);
+        PaymasterCheckpointOperation checkpoint{native};
+        BOOST_REQUIRE_MESSAGE(checkpoint.Resume(execution, error), error);
+        native_db->ResetJournalFailure();
+        native_db->fail_commit_at = 1;
+        const auto before_intent = native_db->m_records;
+        BOOST_CHECK(!checkpoint.CompleteConflict(*completion, error));
+        BOOST_CHECK(native_db->m_records == before_intent);
+        native_db->ResetJournalFailure();
+        native_db->fail_commit_at = 2;
+        BOOST_CHECK(!checkpoint.CompleteConflict(*completion, error));
+        BOOST_CHECK_EQUAL(native_db->commit_attempts, 2U);
+        native_db->ResetJournalFailure();
+    }
+    CWallet reopened{node.chain.get(), "native-conflict-reopened", DuplicateMockDatabase(*native_db)};
+    BOOST_REQUIRE(reopened.LoadWallet() == DBErrors::LOAD_OK);
+    update(reopened);
+    {
+        LOCK(reopened.cs_wallet);
+        WalletBatch batch{reopened.GetDatabase()};
+        PaymasterMaintenanceExecution retained;
+        BOOST_CHECK(batch.ReadPaymasterMaintenanceExecutionWithStatus(retained) == DatabaseReadStatus::NOT_FOUND);
+        ProviderMaintenanceLedger ledger;
+        BOOST_REQUIRE(batch.ReadPaymasterMaintenanceLedger(ledger));
+        BOOST_REQUIRE_EQUAL(ledger.records.size(), 1U);
+        BOOST_CHECK(ledger.records.front().state == ProviderMaintenanceState::CONFLICT_SETTLED);
+        BOOST_CHECK(!ledger.records.front().HasUnresolvedTransaction());
+        ProviderMaintenanceBudgetUsage usage;
+        BOOST_REQUIRE(SummarizeProviderMaintenanceBudget(ledger, now + 4, usage, error));
+        BOOST_CHECK_EQUAL(usage.reserved_fee.value, 0);
+        BOOST_CHECK_EQUAL(usage.spent_last_day.value, native_fee);
+        BOOST_REQUIRE(batch.ReadPaymasterProviderPool(pool));
+        BOOST_REQUIRE_EQUAL(pool.size(), 1U);
+        BOOST_CHECK(pool.front().state == PoolEntryState::RELEASED);
+        BOOST_CHECK(reopened.IsLockedCoin(source.outpoint));
+        BOOST_REQUIRE_MESSAGE(CheckPaymasterCheckpoint(reopened.GetDatabase(), error), error);
+    }
+    BOOST_CHECK(!IsPaymasterInputReserved(reopened, source.outpoint));
+    BOOST_REQUIRE_MESSAGE(paymaster_app::ResumeProviderMaintenanceTransactions(reopened, error), error);
+    CWallet legacy{node.chain.get(), "maintenance-conflict-rotation", CreateMockableWalletDatabase()};
+    BOOST_REQUIRE(legacy.LoadWallet() == DBErrors::LOAD_OK);
+    CKey legacy_key;
+    legacy_key.MakeNewKey(true);
+    BOOST_REQUIRE(AddTaprootSigningKey(legacy, legacy_key, error));
+    BOOST_REQUIRE(AddTaprootSigningKey(legacy, native_key, error));
+    auto legacy_identity = native_identity;
+    legacy_identity.identity_key = XOnlyPubKey{legacy_key.GetPubKey()};
+    legacy_identity.provider_id = GetPaymasterId(legacy_identity.identity_key);
+    TaprootBuilder legacy_builder;
+    legacy_builder.Finalize(legacy_identity.identity_key);
+    legacy_identity.identity_script = GetScriptForDestination(legacy_builder.GetOutput());
+    CMutableTransaction unresolved_tx = confirmed_dgb;
+    unresolved_tx.vout = native_tx.vout;
+    unresolved_tx.vout.back().nValue = COIN - native_fee;
+    unresolved_tx.vin.front().scriptWitness.SetNull();
+    WITH_LOCK(signer.cs_wallet, BOOST_REQUIRE(signer.SignTransaction(unresolved_tx)));
+    ProviderMaintenanceLedger rotating;
+    for (const auto& pair : {std::make_pair(uint256::ONE, unresolved_tx.GetHash()),
+                            std::make_pair(uint256S("02"), native_tx.GetHash())}) {
+        auto item = operation;
+        item.operation_id = pair.first;
+        item.transaction_id = pair.second;
+        item.state = ProviderMaintenanceState::BROADCAST;
+        item.actual_fee = DGBSatoshis{native_fee};
+        rotating.records.push_back(item);
+    }
+    {
+        LOCK(legacy.cs_wallet);
+        WalletBatch batch{legacy.GetDatabase()};
+        BOOST_REQUIRE(batch.WritePaymasterIdentity(legacy_identity));
+        ProviderLiquidityPolicy legacy_policy;
+        legacy_policy.updated_at = now;
+        BOOST_REQUIRE(batch.WritePaymasterLiquidityPolicy(legacy_policy));
+        BOOST_REQUIRE(batch.WritePaymasterMaintenanceLedger(rotating));
+        BOOST_REQUIRE(batch.WritePaymasterProviderPool({}));
+        BOOST_REQUIRE(legacy.AddToWallet(MakeTransactionRef(unresolved_tx), TxStateInactive{}));
+        const int winning_height = WITH_LOCK(cs_main, return node.chainman->m_blockman.LookupBlockIndex(won.GetHash())->nHeight);
+        BOOST_REQUIRE(legacy.AddToWallet(MakeTransactionRef(native_tx), TxStateConflicted{won.GetHash(), winning_height}));
+    }
+    update(legacy);
+    for (int tick{0}; tick < 3; ++tick) {
+        size_t recovered{0};
+        BOOST_REQUIRE_MESSAGE(paymaster_app::ReconcileProviderMaintenance(legacy, recovered, error), error);
+    }
+    {
+        LOCK(legacy.cs_wallet);
+        BOOST_REQUIRE(WalletBatch{legacy.GetDatabase()}.ReadPaymasterMaintenanceLedger(rotating));
+        BOOST_CHECK(rotating.records.at(0).HasUnresolvedTransaction());
+        BOOST_CHECK(rotating.records.at(1).state == ProviderMaintenanceState::CONFLICT_SETTLED);
+        ProviderMaintenanceBudgetUsage usage;
+        BOOST_REQUIRE(SummarizeProviderMaintenanceBudget(rotating, now + 5, usage, error));
+        BOOST_CHECK_EQUAL(usage.reserved_fee.value, native_fee);
+        BOOST_CHECK_EQUAL(usage.spent_last_day.value, native_fee);
+    }
+    const auto confirmed_retirement = setup.CreateAndProcessBlock({confirmed_dgb}, CScript() << OP_TRUE);
+    BOOST_REQUIRE(confirmed_retirement.GetHash() == WITH_LOCK(cs_main, return node.chainman->ActiveChain().Tip()->GetBlockHash()));
+    update(*retirement);
+    WalletContext retirement_context;
+    retirement_context.chain = node.chain.get();
+    retirement_context.args = &setup.m_args;
+    Manager disabled_manager{false};
+    retirement_context.paymaster = &disabled_manager;
+    BOOST_REQUIRE(AddWallet(retirement_context, retirement));
+    RunPeriodicPaymasterMaintenance(retirement_context, now + 5);
+    {
+        LOCK(retirement->cs_wallet);
+        PaymasterMaintenanceExecution retained;
+        WalletBatch batch{retirement->GetDatabase()};
+        BOOST_CHECK(batch.ReadPaymasterMaintenanceExecutionWithStatus(retained) == DatabaseReadStatus::NOT_FOUND);
+        const auto* retained_leg = retirement->GetWalletTx(confirmed_dgb.GetHash());
+        BOOST_REQUIRE(retained_leg);
+        BOOST_CHECK(retained_leg->state<TxStateConfirmed>());
+        BOOST_CHECK_EQUAL(retained_leg->mapValue.at("paymaster_retirement_provider"), retirement_identity.provider_id.GetHex());
+        BOOST_CHECK(!retirement->GetWalletTx(losing_dd.GetHash()));
+        BOOST_CHECK(retirement->IsOrdinaryLockedCoin(source.outpoint));
+        std::vector<ProviderFinanceEvent> retirement_events;
+        BOOST_REQUIRE(batch.ReadPaymasterFinanceTransactionEvents(confirmed_dgb.GetHash(), retirement_events));
+        BOOST_REQUIRE_EQUAL(retirement_events.size(), 1U);
+        BOOST_CHECK(retirement_events.front().kind == ProviderFinanceEventKind::POOL_RETIREMENT);
+        BOOST_CHECK(retirement_events.front().state == ProviderFinanceEventState::CONFIRMED);
+        BOOST_CHECK_EQUAL(retirement_events.front().dgb_cost.value, native_fee);
+        BOOST_REQUIRE(batch.ReadPaymasterProviderPool(pool));
+        BOOST_REQUIRE_EQUAL(pool.size(), 1U);
+        BOOST_CHECK(pool.front().state == PoolEntryState::SPENT);
+        BOOST_REQUIRE_MESSAGE(CheckPaymasterCheckpoint(retirement->GetDatabase(), error), error);
+    }
+    RunPeriodicPaymasterMaintenance(retirement_context, now + 6);
+    BOOST_CHECK(!IsPaymasterInputReserved(*retirement, source.outpoint));
+    RemoveWallet(retirement_context, retirement, /*load_on_startup=*/std::nullopt);
+    // The signed alternative recovery shares only the losing client input.
+    // Its provider DGB source remains unspent as well.
+    ExerciseFirstProviderRecoveryCommit(node, recovery, recovery_key, funding.vtx.at(2), recovery_result,
+        now, &setup, nullptr, true);
 }
 
 static void ExerciseDurablePaymentExecutor(TestChain100Setup& chain_setup,
@@ -8666,7 +9207,8 @@ static void ExerciseClientRecoveryResult(ClientRecoveryReadSetup& setup, bool co
                                          bool permanent_provider_loss = false,
                                          bool exercise_payment_executor = false,
                                          bool exercise_background_cleanup = false,
-                                         bool receive_only = false)
+                                         bool receive_only = false,
+                                         bool exercise_provider_conflicts = false)
 {
     auto& m_node = setup.m_node;
     auto& context = setup.context;
@@ -8702,7 +9244,7 @@ static void ExerciseClientRecoveryResult(ClientRecoveryReadSetup& setup, bool co
         builder.Finalize(XOnlyPubKey{key.GetPubKey()});
         return GetScriptForDestination(builder.GetOutput());
     };
-    script_for(user_key);
+    const CScript user_script = script_for(user_key);
     const CScript return_script = script_for(return_key);
     const CScript provider_script = script_for(provider_key);
     constexpr CAmount principal{10000}, collateral{500 * COIN}, network_fee{COIN / 10};
@@ -8712,6 +9254,11 @@ static void ExerciseClientRecoveryResult(ClientRecoveryReadSetup& setup, bool co
     if (confirmed_before_result) {
         funding_transactions.push_back(setup.CreateValidMempoolTransaction(m_coinbase_txns[2], 0, 3,
             coinbaseKey, environment.identity.identity_script, 2 * COIN, false));
+    }
+    if (exercise_provider_conflicts) {
+        for (size_t index : {size_t{3}, size_t{4}})
+            funding_transactions.push_back(setup.CreateValidMempoolTransaction(m_coinbase_txns[index], 0,
+                index + 1, coinbaseKey, user_script, 2 * COIN, false));
     }
     const CBlock funding = setup.CreateAndProcessBlock(funding_transactions, CScript() << OP_TRUE);
     BOOST_REQUIRE(funding.GetHash() == WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Tip()->GetBlockHash()));
@@ -8755,6 +9302,7 @@ static void ExerciseClientRecoveryResult(ClientRecoveryReadSetup& setup, bool co
     session.state = SessionState::PENDING_PROVIDER;
     session.user_inputs = {COutPoint{minted.vtx.at(1)->GetHash(), 1}};
     ProviderAttempt original_attempt{fixture.attempt};
+    std::optional<ProviderQuoteFixture> conflict_original;
     if (confirmed_before_result) {
         // Native observations deliberately require a retained original attempt:
         // a tombstone's txid alone is never a receipt. Keep the actual original
@@ -8834,6 +9382,7 @@ static void ExerciseClientRecoveryResult(ClientRecoveryReadSetup& setup, bool co
         CMutableTransaction unused_final;
         BOOST_REQUIRE_MESSAGE(BuildDurableClientFinalFixture(client, environment, original,
             now, session, unused_result, unused_final, error), error);
+        if (exercise_provider_conflicts) conflict_original = original;
         if (exercise_payment_executor) {
             {
                 LOCK(client.cs_wallet);
@@ -9149,6 +9698,12 @@ static void ExerciseClientRecoveryResult(ClientRecoveryReadSetup& setup, bool co
     BOOST_REQUIRE(provider_key.SignSchnorr(GetPaymasterResultSignatureHash(result.result), result.result.identity_signature, nullptr, uint256{}));
     BOOST_REQUIRE_MESSAGE(ValidateAlternativeRecoveryResult(result, response, recovery.recovery_provider_identity_key,
         parameters.genesis_hash, 1, now, error), error);
+    if (exercise_provider_conflicts) {
+        BOOST_REQUIRE(conflict_original);
+        ExerciseProviderConflictClosures(setup, client, *conflict_original, environment, user_key,
+            funding, mint_height - 1, recovery, provider_key, result.result, now);
+        return;
+    }
     if (!confirmed_before_result) {
         ExerciseFirstProviderRecoveryCommit(m_node, recovery, provider_key, funding.vtx.at(2), result.result, now);
     }
@@ -9584,6 +10139,12 @@ BOOST_FIXTURE_TEST_CASE(client_refresh_accepts_late_payment_without_execution,
                         ClientRecoveryReadSetup)
 {
     ExerciseClientRecoveryResult(*this, true, false, false, false, false, true, false, true);
+}
+
+BOOST_FIXTURE_TEST_CASE(provider_conflict_closure_preserves_budget_locks_and_native_checkpoint_recovery,
+                        ClientRecoveryReadSetup)
+{
+    ExerciseClientRecoveryResult(*this, true, false, false, false, false, false, false, false, true);
 }
 
 BOOST_FIXTURE_TEST_CASE(client_refresh_accepts_late_recovery_without_execution,

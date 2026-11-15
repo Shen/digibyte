@@ -876,6 +876,12 @@ RPC requests. Finance caching and persistence are described in the
 [implementation guide](doc/digidollar-paymaster-implementation.md#derived-indexes-and-finance-storage).
 `paymasterapplication.cpp` owns bounded maintenance-history observation;
 `paymastermaintenancecache.h` exposes only wallet-lifetime cache teardown.
+`paymaster/conflict.h` and `conflict_merkle.cpp` define bounded exact input-conflict
+evidence; `wallet/paymasterconflicts.h` exposes opaque current-chain observations
+and typed native completion. Provider/store/application reconciliation closes
+only mature proved conflicts through existing checkpoint transactions. The
+[implementation guide](doc/digidollar-paymaster-implementation.md) owns the
+record, scan-budget, source disposition and restart contracts.
 `ObservePaymasterProviderHistory` in `paymasterdb.cpp`, declared in
 `paymastersessionindex.h`, shares bounded quota/drain census progress. Committed
 typed writes maintain disposable provider locators; drain decisions reread source

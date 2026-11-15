@@ -19,6 +19,8 @@
 #include <wallet/paymastersessionindex.h>
 #include <wallet/paymasterfinancecache.h>
 #include <wallet/paymastermaintenancecache.h>
+#include <kernel/cs_main.h>
+#include <wallet/paymasterconflicts.h>
 
 #include <array>
 #include <algorithm>
@@ -225,6 +227,7 @@ struct TransactionState {
     bool dirty{false};
     bool failed{false};
     bool capture_failed{false};
+    bool conflict_completion{false};
     DatabaseBatch* batch{nullptr};
     WalletDatabase* database{nullptr};
     std::optional<PaymasterCheckpoint> before;
@@ -1154,8 +1157,13 @@ bool PaymasterCheckpointPrepareCommit(const WalletBatch* owner)
     try {
         std::lock_guard<std::recursive_mutex> file_guard{state.file_state->mutex};
         bool native{false}, initial_native{false};
-        if (!HasBoundNativeJournal(state, native, initial_native) ||
-            (!native && !PrepareMutationJournal(state, initial_native))) return false;
+        if (!HasBoundNativeJournal(state, native, initial_native)) return false;
+        // Only the typed all-leg conflict completion can replace native AFTER
+        // with a different accounting image. Bind that entire image in the
+        // existing durable mutation journal before advancing the file.
+        if (state.conflict_completion && (!native || initial_native || !state.before ||
+            state.before->pending != 1 || state.next.pending != 0)) return false;
+        if ((!native || state.conflict_completion) && !PrepareMutationJournal(state, initial_native)) return false;
         return WriteFile(state.path, state.next);
     } catch (const std::exception&) {
         return false;
@@ -1297,6 +1305,42 @@ bool PaymasterCheckpointOperation::Complete(std::string& error)
         error = "PAYMASTER_PROVIDER_CHECKPOINT_WRITE";
         return false;
     }
+    pending_operations.erase(&m_wallet.GetDatabase());
+    pending_executions.erase(&m_wallet.GetDatabase());
+    m_active = false;
+    return true;
+}
+
+bool PaymasterCheckpointOperation::CompleteConflict(const ValidatedPaymasterConflictCompletion& completion, std::string& error)
+{
+    AssertLockHeld(m_wallet.cs_wallet);
+    if (!m_active || !completion.m_execution || m_execution_hash.IsNull() ||
+        GetPaymasterMaintenanceExecutionHash(*completion.m_execution) != m_execution_hash) return false;
+    if (!completion.PersistConfirmed(m_wallet, error)) return false;
+    LOCK(cs_main);
+    if (!completion.Recheck(m_wallet, error)) return false;
+    WalletBatch batch{m_wallet.GetDatabase()};
+    bool has_binding{false};
+    uint256 native_token;
+    auto raw = m_wallet.GetDatabase().MakeBatch();
+    if (!NativeToken(*raw, *completion.m_execution, native_token, has_binding) || !batch.TxnBegin()) {
+        error = "PAYMASTER_MAINTENANCE_RECOVERY_REVIEW_REQUIRED";
+        return false;
+    }
+    const auto fail = [&] { batch.TxnAbort(); error = "PAYMASTER_PROVIDER_CHECKPOINT_WRITE"; return false; };
+    for (const auto& conflict : completion.m_conflicts)
+        if (!batch.WritePaymasterConflictClosure(conflict.second.Record())) return fail();
+    if (!batch.WritePaymasterProviderPool(completion.m_pool) ||
+        (completion.m_execution->has_ledger && !batch.WritePaymasterMaintenanceLedger(*completion.m_ledger)) ||
+        !batch.ErasePaymasterMaintenanceExecution() || (has_binding && !EraseNativeBinding(batch)) ||
+        !batch.SetPaymasterCheckpointPending(false)) return fail();
+    const auto state = FindTransaction(&batch);
+    if (!state) return fail();
+    {
+        std::lock_guard<std::recursive_mutex> lock{state->mutex};
+        state->conflict_completion = true;
+    }
+    if (!batch.TxnCommit()) return fail();
     pending_operations.erase(&m_wallet.GetDatabase());
     pending_executions.erase(&m_wallet.GetDatabase());
     m_active = false;

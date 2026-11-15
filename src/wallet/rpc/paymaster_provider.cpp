@@ -743,7 +743,7 @@ RPCResult paymaster_rpc::internal::PoolPreparationResultSchema()
             {RPCResult::Type::STR_HEX, "plan_id", "Approved plan"},
             {RPCResult::Type::STR_HEX, "operation_id", "Durable step identity"},
             {RPCResult::Type::STR, "asset", "dgb or dd_carrier"},
-            {RPCResult::Type::STR, "state", "pending_creation, pending_confirmation, complete, conflict or cancelled"},
+            {RPCResult::Type::STR, "state", "pending_creation, pending_confirmation, complete, conflict, conflict_settled or cancelled"},
             {RPCResult::Type::STR, "error", "Last execution diagnostic; empty when complete"},
             {RPCResult::Type::STR, "diagnostic", true, "Fee-check phase and amounts when available"},
             {RPCResult::Type::NUM, "maximum_fee_satoshis", "Approved maximum transaction fee"},
@@ -1437,7 +1437,7 @@ RPCHelpMan getpaymasteroperatorinfo()
             UniValue preparation{UniValue::VARR};
             UniValue active_operations{UniValue::VARR};
             for (const auto& record : readiness.maintenance_ledger.records) {
-                if (record.state == ProviderMaintenanceState::CONFIRMED || record.state == ProviderMaintenanceState::RELEASED) continue;
+                if (record.IsClosed()) continue;
                 UniValue item{UniValue::VOBJ};
                 item.pushKV("plan_id", record.plan_id.GetHex());
                 item.pushKV("operation_id", record.operation_id.GetHex());

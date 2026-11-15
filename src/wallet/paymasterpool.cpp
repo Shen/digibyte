@@ -193,9 +193,10 @@ void ContinuePoolPreparation(CWallet& wallet)
     if (!ReconcileProviderMaintenance(wallet, recovered, error)) throw ApplicationError(ErrorKind::WALLET, error);
     const auto snapshot = ReadPreparationLedger(wallet);
     for (const auto& record : snapshot.records) {
-        if (!record.IsPreparation() || record.state == ProviderMaintenanceState::CONFIRMED || record.state == ProviderMaintenanceState::RELEASED) continue;
+        if (!record.IsPreparation() || record.IsClosed()) continue;
         const bool conflict = std::any_of(snapshot.records.begin(), snapshot.records.end(), [&](const auto& other) {
-            return other.IsPreparation() && other.plan_id == record.plan_id && other.state == ProviderMaintenanceState::FAILED;
+            return other.IsPreparation() && other.plan_id == record.plan_id &&
+                (other.state == ProviderMaintenanceState::FAILED || other.state == ProviderMaintenanceState::CONFLICT_SETTLED);
         });
         error = conflict ? "PAYMASTER_POOL_TRANSACTION_CONFLICT" : ExecutePreparationStep(wallet, record);
         size_t reconciled{0};
@@ -217,8 +218,7 @@ bool HasPendingPoolPreparation(CWallet& wallet)
 {
     const auto ledger = ReadPreparationLedger(wallet);
     return std::any_of(ledger.records.begin(), ledger.records.end(), [](const auto& record) {
-        return record.IsPreparation() && record.state != ProviderMaintenanceState::CONFIRMED &&
-               record.state != ProviderMaintenanceState::RELEASED;
+        return record.IsPreparation() && !record.IsClosed();
     });
 }
 

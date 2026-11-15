@@ -1080,6 +1080,14 @@ std::optional<PaymasterInputConflictProof> ObservePaymasterInputConflict(
     const auto status = WalletBatch{wallet.GetDatabase()}.ReadPaymasterConflictClosureWithStatus(original.GetHash(), saved);
     if (status == DatabaseReadStatus::FOUND) return VerifyPaymasterInputConflict(wallet, original, provider, authority, saved, error);
     if (status != DatabaseReadStatus::NOT_FOUND) { error = "PAYMASTER_CONFLICT_DATABASE_READ"; return std::nullopt; }
+    {
+        LOCK(cs_main);
+        const auto* tip = node->chainman->ActiveChain().Tip();
+        if (!tip || wallet.GetLastBlockHeight() != tip->nHeight || wallet.GetLastBlockHash() != tip->GetBlockHash()) {
+            error = "PAYMASTER_CONFLICT_CHAIN_CHANGED";
+            return std::nullopt;
+        }
+    }
     const auto make_proof = [&](const CBlock& block) -> std::optional<PaymasterInputConflictProof> {
         PaymasterConflictClosure record;
         record.genesis_hash = Params().GenesisBlock().GetHash();

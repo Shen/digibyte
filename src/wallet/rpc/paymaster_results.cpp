@@ -990,7 +990,7 @@ UniValue ToJSON(const std::vector<PreparationSnapshot>& values)
         item.pushKV("plan_id", record.plan_id.GetHex());
         item.pushKV("operation_id", record.operation_id.GetHex());
         item.pushKV("asset", record.kind == ProviderMaintenanceKind::PREPARE_DGB ? "dgb" : "dd_carrier");
-        item.pushKV("state", record.state == ProviderMaintenanceState::CONFIRMED ? "complete" : record.state == ProviderMaintenanceState::FAILED ? "conflict" : record.state == ProviderMaintenanceState::RELEASED ? "cancelled" : record.transaction_id.IsNull() ? "pending_creation" : "pending_confirmation");
+        item.pushKV("state", record.state == ProviderMaintenanceState::CONFIRMED ? "complete" : record.state == ProviderMaintenanceState::CONFLICT_SETTLED ? "conflict_settled" : record.state == ProviderMaintenanceState::FAILED ? "conflict" : record.state == ProviderMaintenanceState::RELEASED ? "cancelled" : record.transaction_id.IsNull() ? "pending_creation" : "pending_confirmation");
         AddPreparationDiagnostic(item, record);
         item.pushKV("maximum_fee_satoshis", record.maximum_fee.value);
         item.pushKV("actual_fee_satoshis", record.actual_fee.value);

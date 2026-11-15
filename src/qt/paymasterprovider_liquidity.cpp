@@ -1800,7 +1800,7 @@ QString ProviderLiquidity::formatPoolPreparation(const UniValue& records, Prepar
     bool waiting_funding{false};
     for (const auto& step : records.getValues()) {
         const QString state = ProviderOverview::activityText(step, "state");
-        if (state == QLatin1String("complete") || state == QLatin1String("cancelled")) continue;
+        if (state == QLatin1String("complete") || state == QLatin1String("cancelled") || state == QLatin1String("conflict_settled")) continue;
         const QString error = ProviderOverview::activityText(step, "error");
         const QString code = error.section(QLatin1Char(':'), 0, 0);
         const QString asset = ProviderOverview::activityText(step, "asset");

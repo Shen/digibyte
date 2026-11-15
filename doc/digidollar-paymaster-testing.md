@@ -996,6 +996,39 @@ the retained signed evidence still occupies disk space.
 
 ### Independent review regressions
 
+For the provider-conflict, late-result, successor and deadline corrections, run
+from the repository root with freshly built current test binaries (isolated
+wallets; seconds to a few minutes; require exit 0):
+
+```powershell
+& ./build_msvc/x64/Release/test_digibyte.exe '--run_test=paymaster_wallet_security_tests/provider_conflict_proof_requires_exact_active_chain_input_and_safety_depth,provider_conflict_closure_preserves_budget_locks_and_native_checkpoint_recovery,client_refresh_accepts_late_payment_without_execution,client_refresh_accepts_late_recovery_without_execution,provider_user_authorization_honors_exact_reserved_safety_binding,provider_confirmed_recovery_archives_only_after_reorg_safety_depth' --report_level=detailed
+if ($LASTEXITCODE -ne 0) { throw 'Paymaster conflict/result/deadline regressions failed' }
+```
+
+The conflict cases cover foreign winning transactions, originals missing from
+mapWallet, exact ancestor dependencies, depth 239/240, disconnect/reconnect,
+immutable authority/witness/Merkle binding, malformed/future/oversized persisted
+proofs, cursor cache eviction and partial indexed-parent progress. Full inventory
+settlement must preserve spent budgets/manual locks and terminal lost-output
+history. Native tests include distinct execution/ledger IDs, a mixed two-leg
+retirement, fair legacy reconciliation and failed intent/final checkpoint commits
+followed by wallet reopen. Pair these with `checkpoint_*`, ordinary DB/lock and
+maintenance/finance tests; a proof-only unit pass does not certify settlement.
+The mined recovery case also verifies reversible invalidation and compacted
+INVALIDATED history repair after exact reconfirmation, including commit rollback.
+
+Late-result cases invoke the real refresh facade after both deadlines, fail the
+receipt commit, pass inbox TTL, retry/reopen and require durable receipt before
+ACK without signing, wallet insertion or broadcast. Quote-boundary tests keep
+capacity valid longer than the quote, reject fresh acceptance exactly at expiry
+and preserve a timely identical receipt's retry. Qt regression functions are
+`paymasterSendControllerClockAndEffects`,
+`paymasterPreparationClockStartsWithFirstReply` and
+`paymasterClientTimeoutKeepsObserving`; also run maintenance cancellation and
+ordinary DGB/DD send/coin-control checks with the selection rules below.
+Complete clean builds, full functional/platform, Tidy and sanitizer profiles
+remain separate operator gates described in this runbook.
+
 From the repository root after a current build, run the narrow native cases with
 the [unit-test selection](#unit-and-qt-selection) syntax:
 

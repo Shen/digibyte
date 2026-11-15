@@ -484,8 +484,10 @@ wallet transactions, rehashes and unnotified insertions invalidate or update
 that observation. Until the scan finishes, `PAYMASTER_MAINTENANCE_RECONCILING`
 prevents new refill signatures and unsigned release; known transaction IDs
 continue to reconcile. Cache matches are checked against the complete journal.
-Conflicted or abandoned maintenance with a saved transaction ID remains open:
-its signatures can become usable again. All maintenance kinds follow that exact
+Conflicted or abandoned maintenance with a saved transaction ID remains open
+until exact active-chain evidence proves an input conflict at the 240-block
+reorg safety depth. A wallet conflict flag or elapsed retry time is insufficient.
+All maintenance kinds follow that exact
 transaction and restore their own invalidated successor outputs atomically on
 its return. Source inputs retain their operation reservation while signatures
 remain unresolved, including failed withdrawals. Refresh, readiness and both
@@ -494,7 +496,8 @@ pool snapshot marked them available; unrelated free slots remain usable.
 Both provider signing paths repeat the same journal check under the signing
 lock, covering quotes created by an older wallet before this protection.
 The known fee, or conservatively the approved maximum when unknown,
-remains in the outstanding budget and is not pruned while unresolved. No new
+remains in the outstanding budget and is not pruned while unresolved. Settled
+conflicts retain conservative rolling spend rather than refund fee authority. No new
 signature or replacement authority is inferred from that recovery.
 RPC maintenance-budget totals and new reservations share
 `SummarizeProviderMaintenanceBudget` at that same time floor. Planned and live
@@ -504,6 +507,33 @@ Canonical wallet history/index checks remain prerequisites. Automatic work
 belongs to the daemon; Qt/CLI control the same persisted state. Restoration
 sets a durable guard before load callbacks, and an independent checkpoint
 helps detect stale wallet copies. See the [threat model](paymaster-threat-model.md).
+
+`paymaster/conflict.h` defines version-1 `pmconflictclosure` evidence (maximum
+4 MiB and 256 exact ancestor hops); the Merkle implementation stays separate
+from the value interface. The wallet verifier binds network, provider, immutable
+commit/maintenance authority, original txid/wtxid, a real shared prevout and the
+winning block's Merkle root and transaction count. Positive evidence requires
+the current wallet tip and active-chain safety depth. A cheap opaque proof must
+be rechecked while holding the chain lock through financial commit.
+Normal provider payments and alternative recoveries atomically close their
+authority, retain spent budget, release only their own reservations and classify
+each source from the actual UTXO set. Lost successors become terminal `released`
+dispositions, including after inventory compaction. Manual locks stay intact.
+Maintenance uses record version 5/state `conflict_settled`; versions 3/4 remain
+readable. Existing readers reject the new state rather than execute it.
+
+Discovery covers finals never inserted into the wallet. Per observation, parent
+index reads and full block reads share limits of 16 reads and 8 MiB; repeated
+parent txids are deduplicated. Version-2 `pmconflictscan` progress survives cache
+eviction/restart, validates chain anchors and resumes partial parent discovery.
+History starts at the oldest verified parent, with bounded genesis fallback
+when unavailable. Provider records and maintenance candidates rotate fairly.
+Missing/pruned evidence, unknown records and uncertain observations retain the
+fence; a derived cursor never grants payment or release authority.
+Ordinary and recovery successor repair share exact output/financial rules.
+An invalidated successor can return through pending to available only after
+exact current-chain reconfirmation; terminal spent/released dispositions and
+settled conflicts cannot be revived.
 
 Direct provider Submit RPCs hold the same work guard as the network dispatcher,
 including during validation, new signing, commit and broadcast. Stop priority
@@ -549,8 +579,12 @@ execution hash only when the binding record is absent; unreadable, future or inv
 bindings never fall back. Stale clones, missing/future/corrupt journals, divergent
 accounting and legacy pending markers without exact signed work remain fenced.
 The checkpoint file layout stays at version 2. Known abandoned, conflicted or
-unrecognized wallet transactions also retain the journal and fence; recovery does
-not change those states to inactive.
+unrecognized wallet transactions retain the journal and fence unless every exact
+leg is independently proved confirmed or defeated by a mature input conflict.
+The typed conflict completion rechecks those observations under the chain lock,
+retains confirmed legs and their history metadata, and commits the complete
+alternative accounting through the existing bound mutation journal. A final DB
+failure after external advancement is recovered before wallet records load.
 Its OS lock, flush and high-water ordering are unchanged.
 Keep a compatible build while native work is pending: earlier builds do not
 implement this journal's recovery or ordinary fee-input protection.

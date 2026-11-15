@@ -137,6 +137,15 @@ retirement retains the identity for a deliberate future setup. Restored-wallet
 recovery can instead permanently retire it after a separate explicit review;
 see [capital release](paymaster-capital-release.md).
 
+A conflicted payment, recovery or maintenance transaction stays protected until
+Core proves that an exact input (or bound ancestor) lost to an active-chain spend
+with 240 confirmations. Status then reports `conflict_settled` for maintenance;
+this closes that work without authorizing replacement signatures or refunding
+spent sponsorship budget. Unspent provider sources return to reserves, while
+manual locks remain. Normal release still needs its explicit preview/confirmation.
+Keep txindex and unpruned history available: missing evidence or an unreadable
+record preserves the protection and may require operator investigation.
+
 ### Finding and understanding configuration
 
 Settings groups operation controls separately from service costs and technical

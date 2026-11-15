@@ -845,8 +845,7 @@ PoolPreparationResult PreparePaymasterPool(WalletContext& context, CWallet& wall
     const uint256 authorization = PoolPreparationAuthorization(*wallet);
     if (authorization.IsNull() && !proposed_policy) throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_IDENTITY_NOT_FOUND");
     const bool pending = std::any_of(ledger.records.begin(), ledger.records.end(), [](const auto& record) {
-        return record.IsPreparation() && record.state != ProviderMaintenanceState::CONFIRMED &&
-               record.state != ProviderMaintenanceState::RELEASED;
+        return record.IsPreparation() && !record.IsClosed();
     });
     // Version 2 binds typed values instead of JSON formatting/key order.
     HashWriter request_hasher = TaggedHash("DigiByte Paymaster Pool Request v2");
@@ -958,8 +957,7 @@ PoolPreparationResult PreparePaymasterPool(WalletContext& context, CWallet& wall
     // Reuse only an outstanding plan with the same request and current
     // authorization; changed targets/policy never inherit its approval.
     const auto pending_match = std::find_if(ledger.records.begin(), ledger.records.end(), [&](const auto& record) {
-        return record.IsPreparation() && record.state != ProviderMaintenanceState::CONFIRMED &&
-               record.state != ProviderMaintenanceState::RELEASED &&
+        return record.IsPreparation() && !record.IsClosed() &&
                record.preparation_request == request_hash && record.preparation_authorization == authorization;
     });
     const bool resume_preview = !execute && !proposed_policy && pending_match != ledger.records.end();
