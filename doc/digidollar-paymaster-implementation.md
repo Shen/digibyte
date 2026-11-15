@@ -498,8 +498,15 @@ after a possible commit retain the conservative fence.
 
 Before native commit, the wallet atomically saves `pmnativeexec` version 1 with
 the exact signed legs, fee/history metadata and complete before/after pool and
-maintenance accounting. Its immutable hash is the external pending-checkpoint
-token. Startup and maintenance reconciliation call
+maintenance accounting. New executions also save `pmnativebinding` version 1;
+its checkpoint token commits the exact execution hash, predecessor checkpoint
+and a nonce. Initial preparation durably saves a version-2 `pmcheckpointjournal`
+before advancing the external checkpoint. This mode permits only those two new
+records, with absent before-images, a nonpending or absent predecessor and no
+restore guard.
+An unresolved intent makes native-execution reads and ordinary coin selection
+fail closed; recovery then protects the exact signed inputs through `pmnativeexec`.
+Startup and maintenance reconciliation call
 `ResumeProviderMaintenanceTransactions`: validate the journal, identity, absence
 of a restore guard, exact accounting snapshot and independent checkpoint, then
 commit/rebroadcast only those bytes without signing. Pool and budget changes are
@@ -510,19 +517,26 @@ Initial commit, journal replay and finite-carrier reconciliation reconstruct the
 same send-history amount, recipient multiplicity and comment from the maintenance
 operation. Retirement uses its immutable execution-leg metadata.
 
-Only the immediately adjacent interrupted checkpoint commit can be repaired,
-with the same journal hash and an exact accounting snapshot. Completion erases
-the journal and clears the pending marker in one wallet transaction. Stale clones,
-missing/future/corrupt journals, divergent accounting and legacy pending markers
-without exact signed work remain fenced. The checkpoint file layout stays at
-version 2. Known abandoned, conflicted or unrecognized wallet transactions also
-retain the journal and fence; recovery does not change those states to inactive.
+Only the immediately adjacent interrupted native checkpoint commit can be repaired,
+with the same execution binding. Resume adopts the already externalized checkpoint
+under its OS lock without advancing the file, so repeated failed repair commits
+cannot widen the gap. An interrupted completion additionally requires the exact
+after-accounting snapshot through the same classifier used by native execution;
+it atomically adopts that checkpoint and erases execution and binding records,
+without repeating financial effects. Normal completion erases both records and
+clears the pending marker in one wallet transaction. Legacy executions use their
+execution hash only when the binding record is absent; unreadable, future or invalid
+bindings never fall back. Stale clones, missing/future/corrupt journals, divergent
+accounting and legacy pending markers without exact signed work remain fenced.
+The checkpoint file layout stays at version 2. Known abandoned, conflicted or
+unrecognized wallet transactions also retain the journal and fence; recovery does
+not change those states to inactive.
 Its OS lock, flush and high-water ordering are unchanged.
 Keep a compatible build while native work is pending: earlier builds do not
 implement this journal's recovery or ordinary fee-input protection.
 
 Ordinary checkpointed provider mutations use a separate versioned
-`pmcheckpointjournal` in the wallet database. Before advancing the external
+`pmcheckpointjournal` version 1 in the wallet database. Before advancing the external
 checkpoint, Core persists the exact raw before/after mutation, including wallet
 flags and lock-owner changes. The external token commits that complete intent;
 keys and transaction metadata never leave the wallet. Wallet loading resolves
@@ -552,10 +566,11 @@ consequences and atomic write of the released budget and source reservations.
 Checkpoint file reads hold the same per-path recursive mutex as atomic file replacement
 for the complete read-handle lifetime. On Windows, a CRT reader otherwise can
 deny replacement and make an unrelated wallet transaction fail its commit.
-Wallet-row reads finish before this file-only lock is acquired; database and
-checkpoint rollback protections still apply independently. A short registry lock
-only locates shared states; it performs no file/database I/O. Paths come from the
-single cached network data directory and the genesis/provider filename, normalized
+Read-only checks finish wallet-row reads before this file-only lock is acquired;
+exact recovery also holds the OS lock across its raw transaction revalidation.
+Database and checkpoint rollback protections still apply independently. A short
+registry lock only locates shared states; it performs no file/database I/O. Paths
+come from the single cached network data directory and the genesis/provider filename, normalized
 before lookup, so wallet clones share the same file lock. The OS lock, flush,
 rename and checkpoint-before-database-commit ordering remain mandatory.
 `WalletBatch` routes successful commit, abort and destruction through

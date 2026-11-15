@@ -44,6 +44,8 @@ const std::string CHECKPOINT_KEY{"pmcheckpoint"};
 constexpr uint64_t CHECKPOINT_MAGIC{0x3150435042474444};
 constexpr size_t CHECKPOINT_FILE_SIZE{149};
 const std::string JOURNAL_KEY{"pmcheckpointjournal"};
+const std::string NATIVE_BINDING_KEY{"pmnativebinding"};
+const std::string NATIVE_EXECUTION_KEY{"pmnativeexec"};
 // A snapshot may replace the full accepted finance history: an old and a new
 // event/time/tx/day row per event. Preserve that domain limit, including a legacy
 // vector ledger, plus separate headroom for payment/native accounting records.
@@ -82,6 +84,7 @@ struct Mutation {
  * external checkpoint token; no key, transaction or metadata leaves the wallet. */
 struct MutationJournal {
     static constexpr uint16_t CURRENT_VERSION{1};
+    static constexpr uint16_t NATIVE_INITIAL_VERSION{2};
     uint16_t version{CURRENT_VERSION};
     uint256 nonce;
     std::optional<PaymasterCheckpoint> before;
@@ -100,7 +103,7 @@ struct MutationJournal {
     {
         if (stream.size() > MAX_JOURNAL_BYTES) throw std::ios_base::failure("checkpoint journal too large");
         stream >> version;
-        if (version != CURRENT_VERSION) throw std::ios_base::failure("unsupported checkpoint journal");
+        if (version != CURRENT_VERSION && version != NATIVE_INITIAL_VERSION) throw std::ios_base::failure("unsupported checkpoint journal");
         stream >> nonce;
         uint8_t present;
         stream >> present;
@@ -136,6 +139,44 @@ struct MutationJournal {
             rows.push_back(std::move(row));
         }
         if (!stream.empty()) throw std::ios_base::failure("checkpoint journal trailing bytes");
+    }
+};
+
+/** Bind a native fence to its exact predecessor, rather than only to the
+ * execution bytes. Keep this checkpoint metadata separate from financial
+ * records; it grants no authority without the matching external token. */
+struct NativeBinding {
+    static constexpr uint16_t CURRENT_VERSION{1};
+    uint16_t version{CURRENT_VERSION};
+    uint256 nonce;
+    uint256 execution_hash;
+    std::optional<PaymasterCheckpoint> before;
+
+    template <typename Stream> void Serialize(Stream& stream) const
+    {
+        stream << version << nonce << execution_hash << bool(before);
+        if (before) stream << *before;
+    }
+    template <typename Stream> void Unserialize(Stream& stream)
+    {
+        stream >> version;
+        if (version != CURRENT_VERSION) throw std::ios_base::failure("unsupported native checkpoint binding");
+        stream >> nonce >> execution_hash;
+        uint8_t present;
+        stream >> present;
+        if (present > 1) throw std::ios_base::failure("invalid native checkpoint predecessor");
+        if (present) { before.emplace(); stream >> *before; }
+        else before.reset();
+        if (!stream.empty()) throw std::ios_base::failure("native checkpoint binding trailing bytes");
+    }
+};
+
+template <typename T> struct StrictNativeRecord {
+    T value;
+    template <typename Stream> void Unserialize(Stream& stream)
+    {
+        stream >> value;
+        if (!stream.empty()) throw std::ios_base::failure("native checkpoint record trailing bytes");
     }
 };
 
@@ -242,6 +283,54 @@ bool Valid(const PaymasterCheckpoint& record, const uint256& provider)
            record.provider_id == provider && !provider.IsNull() &&
            record.generation > 0 && !record.token.IsNull() &&
            record.pending <= (record.version == 1 ? 1 : PaymasterCheckpoint::RETIRED);
+}
+
+uint256 NativeBindingHash(const NativeBinding& binding)
+{
+    return (HashWriter{} << std::string{"DigiByte/PaymasterNativeCheckpoint/v1"} << binding).GetHash();
+}
+
+bool ValidNativeBinding(const NativeBinding& binding, const uint256& execution_hash,
+                        const uint256& provider)
+{
+    return binding.version == NativeBinding::CURRENT_VERSION && !binding.nonce.IsNull() &&
+           !execution_hash.IsNull() && binding.execution_hash == execution_hash &&
+           (!binding.before || (Valid(*binding.before, provider) && binding.before->pending == 0 &&
+                                binding.before->generation < std::numeric_limits<uint64_t>::max()));
+}
+
+/** One token contract for new and historical native operations. Only an absent
+ * binding permits the legacy execution-hash token. Complete can inspect its
+ * captured before-image after atomically erasing both native records. */
+bool NativeToken(DatabaseBatch& batch, const PaymasterMaintenanceExecution& execution,
+                 uint256& token, bool& has_binding,
+                 const std::map<RawBytes, Mutation>* mutations = nullptr)
+{
+    token.SetNull();
+    has_binding = false;
+    if (!ValidatePaymasterMaintenanceExecution(execution)) return false;
+    NativeBinding binding;
+    auto status = batch.ReadWithStatus(NATIVE_BINDING_KEY, binding);
+    if (status == DatabaseReadStatus::NOT_FOUND && mutations) {
+        const auto original = mutations->find(Bytes(NATIVE_BINDING_KEY));
+        if (original != mutations->end() && original->second.before) {
+            try {
+                SpanReader stream{CLIENT_VERSION, *original->second.before};
+                stream >> binding;
+                status = DatabaseReadStatus::FOUND;
+            } catch (const std::exception&) { return false; }
+        }
+    }
+    const auto execution_hash = GetPaymasterMaintenanceExecutionHash(execution);
+    if (status == DatabaseReadStatus::NOT_FOUND) {
+        token = execution_hash;
+        return true;
+    }
+    if (status != DatabaseReadStatus::FOUND ||
+        !ValidNativeBinding(binding, execution_hash, execution.provider_id)) return false;
+    has_binding = true;
+    token = NativeBindingHash(binding);
+    return true;
 }
 
 struct StrictRecord : PaymasterCheckpoint {
@@ -376,23 +465,111 @@ bool ReadCurrent(DatabaseBatch& batch, const uint256& provider,
     return matches;
 }
 
+void LockCheckpointFile(TransactionState& state, const uint256& provider, bool create)
+{
+    state.file_state = FileState(state.path);
+    if (!state.file_state) throw std::runtime_error("invalid checkpoint path");
+    std::lock_guard<std::recursive_mutex> guard{state.file_state->mutex};
+    if (state.file_state->transaction_active) throw std::runtime_error("checkpoint busy");
+    state.file_state->transaction_active = true;
+    state.owns_file = true;
+    if (create) {
+        fs::create_directories(state.path.parent_path());
+        if (!SyncDirectory(state.path.parent_path().parent_path())) throw std::runtime_error("directory sync failed");
+    }
+    const auto lock_path = fs::path{state.path.parent_path()} / fs::PathFromString(provider.GetHex() + ".lock");
+    std::error_code ec;
+    if (fs::is_symlink(fs::symlink_status(lock_path, ec))) throw std::runtime_error("invalid lock file");
+    if (create) {
+        FILE* file = fsbridge::fopen(lock_path, "ab");
+        if (!file || std::fclose(file) != 0) throw std::runtime_error("lock file unavailable");
+    }
+    state.file_lock = std::make_unique<fsbridge::FileLock>(lock_path);
+    if (!state.file_lock->TryLock()) throw std::runtime_error("checkpoint busy");
+}
+
 bool ReadResumableCurrent(DatabaseBatch& batch, const uint256& provider,
-                          const uint256& execution_hash, PaymasterCheckpoint& current)
+                          const uint256& native_token, PaymasterCheckpoint& current)
 {
     PaymasterCheckpoint external;
-    if (execution_hash.IsNull() || ReadCheckpoint(batch, current) != DatabaseReadStatus::FOUND ||
+    if (native_token.IsNull() || ReadCheckpoint(batch, current) != DatabaseReadStatus::FOUND ||
         ReadFile(PaymasterCheckpointPath(Params().GenesisBlock().GetHash(), provider), external) != DatabaseReadStatus::FOUND ||
         !Valid(current, provider) || !Valid(external, provider) || current.pending != 1 ||
-        current.token != execution_hash) return false;
+        current.token != native_token) return false;
     if (current == external) return true;
     // The external high-water mark is written before its wallet commit. Only
     // that immediately adjacent interrupted write may be reconciled. Never
     // accept an arbitrary stale backup, retirement or another operation.
     if (current.generation == std::numeric_limits<uint64_t>::max() ||
         external.generation != current.generation + 1 || external.pending == PaymasterCheckpoint::RETIRED ||
-        (external.pending == 1 && external.token != execution_hash)) return false;
+        (external.pending == 1 && external.token != native_token)) return false;
     current = external;
     return true;
+}
+
+/** Adopt only the already externalized native transition. No new generation
+ * is written to the file, so another failed repair commit cannot widen a gap.
+ * A pending-zero target proves the exact Complete after-image, not permission
+ * to reopen an operation or repeat financial side effects. */
+bool ResumeNativeCheckpoint(WalletDatabase& database, const PaymasterMaintenanceExecution& execution,
+                            uint256& token, bool& completed, std::string& error)
+{
+    completed = false;
+    TransactionState lock_owner;
+    lock_owner.path = PaymasterCheckpointPath(execution.genesis_hash, execution.provider_id);
+    auto batch = database.MakeBatch();
+    const auto fail = [&](const char* code = "PAYMASTER_MAINTENANCE_RECOVERY_CHECKPOINT_CHANGED") {
+        batch->TxnAbort();
+        error = code;
+        return false;
+    };
+    try {
+        LockCheckpointFile(lock_owner, execution.provider_id, /*create=*/false);
+        std::lock_guard<std::recursive_mutex> guard{lock_owner.file_state->mutex};
+        if (!batch->TxnBegin()) return fail();
+        DigiDollar::Paymaster::ProviderIdentityRecord identity, restored;
+        StrictNativeRecord<PaymasterMaintenanceExecution> saved;
+        uint16_t journal_version{0};
+        bool has_binding{false};
+        PaymasterCheckpoint before, current;
+        if (batch->ReadWithStatus(JOURNAL_KEY, journal_version) != DatabaseReadStatus::NOT_FOUND ||
+            batch->ReadWithStatus(DBKeys::PAYMASTER_RESTORE_GUARD, restored) != DatabaseReadStatus::NOT_FOUND ||
+            batch->ReadWithStatus(DBKeys::PAYMASTER_IDENTITY, identity) != DatabaseReadStatus::FOUND ||
+            !DigiDollar::Paymaster::ValidateProviderIdentityRecord(identity) || identity.provider_id != execution.provider_id ||
+            batch->ReadWithStatus(NATIVE_EXECUTION_KEY, saved) != DatabaseReadStatus::FOUND ||
+            Bytes(saved.value) != Bytes(execution) || !NativeToken(*batch, saved.value, token, has_binding) ||
+            ReadCheckpoint(*batch, before) != DatabaseReadStatus::FOUND ||
+            !ReadResumableCurrent(*batch, identity.provider_id, token, current)) return fail();
+        if (before == current) {
+            batch->TxnAbort();
+            return true;
+        }
+        completed = current.pending == 0;
+        if (completed) {
+            StrictNativeRecord<std::vector<DigiDollar::Paymaster::ProviderPoolEntry>> pool;
+            StrictNativeRecord<DigiDollar::Paymaster::ProviderMaintenanceLedger> ledger;
+            std::string validation_error;
+            const auto pool_status = batch->ReadWithStatus(DBKeys::PAYMASTER_PROVIDER_POOL, pool);
+            if ((pool_status != DatabaseReadStatus::FOUND && pool_status != DatabaseReadStatus::NOT_FOUND) ||
+                !DigiDollar::Paymaster::ValidateProviderPoolEntries(pool.value, validation_error) ||
+                (execution.has_ledger && (batch->ReadWithStatus(DBKeys::PAYMASTER_MAINTENANCE_LEDGER, ledger) != DatabaseReadStatus::FOUND ||
+                                         !DigiDollar::Paymaster::ValidateProviderMaintenanceLedger(ledger.value, validation_error))) ||
+                ClassifyPaymasterMaintenanceAccounting(execution, pool_status == DatabaseReadStatus::FOUND, pool.value,
+                    execution.has_ledger ? &ledger.value : nullptr) != PaymasterMaintenanceAccounting::AFTER) {
+                completed = false;
+                return fail("PAYMASTER_MAINTENANCE_RECOVERY_ACCOUNTING_CONFLICT");
+            }
+        }
+        if ((completed && (!batch->Erase(NATIVE_EXECUTION_KEY) || (has_binding && !batch->Erase(NATIVE_BINDING_KEY)))) ||
+            !batch->Write(CHECKPOINT_KEY, current) || !batch->TxnCommit()) {
+            completed = false;
+            return fail();
+        }
+        ForgetPaymasterSessionIndex(database);
+        ForgetPaymasterFinanceCache(database);
+        ForgetPaymasterMaintenanceCache(database);
+        return true;
+    } catch (const std::exception&) { return fail(); }
 }
 } // namespace
 
@@ -401,6 +578,28 @@ bool PaymasterCheckpoint::operator==(const PaymasterCheckpoint& other) const
     return version == other.version && genesis_hash == other.genesis_hash &&
            provider_id == other.provider_id && generation == other.generation &&
            token == other.token && pending == other.pending;
+}
+
+bool PaymasterCheckpointJournalIsAbsent(DatabaseBatch& batch)
+{
+    uint16_t version{0};
+    return batch.ReadWithStatus(JOURNAL_KEY, version) == DatabaseReadStatus::NOT_FOUND;
+}
+
+PaymasterMaintenanceAccounting ClassifyPaymasterMaintenanceAccounting(
+    const PaymasterMaintenanceExecution& execution, bool has_pool,
+    const std::vector<DigiDollar::Paymaster::ProviderPoolEntry>& pool,
+    const DigiDollar::Paymaster::ProviderMaintenanceLedger* ledger)
+{
+    if (execution.has_ledger && !ledger) return PaymasterMaintenanceAccounting::MISMATCH;
+    const auto same = [](const auto& first, const auto& second) {
+        return (HashWriter{} << first).GetHash() == (HashWriter{} << second).GetHash();
+    };
+    if (has_pool && same(pool, execution.after_pool) &&
+        (!execution.has_ledger || same(*ledger, execution.after_ledger))) return PaymasterMaintenanceAccounting::AFTER;
+    if (has_pool == execution.had_pool && same(pool, execution.before_pool) &&
+        (!execution.has_ledger || same(*ledger, execution.before_ledger))) return PaymasterMaintenanceAccounting::BEFORE;
+    return PaymasterMaintenanceAccounting::MISMATCH;
 }
 
 fs::path PaymasterCheckpointPath(const uint256& genesis, const uint256& provider)
@@ -442,9 +641,17 @@ bool CheckPaymasterCheckpoint(WalletDatabase& database, std::string& error)
     }
     PaymasterMaintenanceExecution execution;
     const auto execution_status = WalletBatch{database}.ReadPaymasterMaintenanceExecutionWithStatus(execution);
+    uint256 native_token;
+    bool has_binding{false};
     if (execution_status != DatabaseReadStatus::NOT_FOUND &&
         (execution_status != DatabaseReadStatus::FOUND || !enrolled || current.pending != 1 ||
-         current.token != GetPaymasterMaintenanceExecutionHash(execution))) {
+         !NativeToken(*batch, execution, native_token, has_binding) || current.token != native_token)) {
+        error = "PAYMASTER_MAINTENANCE_RECOVERY_REVIEW_REQUIRED";
+        return false;
+    }
+    NativeBinding orphan;
+    if (execution_status == DatabaseReadStatus::NOT_FOUND &&
+        batch->ReadWithStatus(NATIVE_BINDING_KEY, orphan) != DatabaseReadStatus::NOT_FOUND) {
         error = "PAYMASTER_MAINTENANCE_RECOVERY_REVIEW_REQUIRED";
         return false;
     }
@@ -474,6 +681,11 @@ bool CheckPaymasterCapitalRecoveryCheckpoint(WalletDatabase& database,
         return false;
     }
     auto raw = database.MakeBatch();
+    NativeBinding binding;
+    if (raw->ReadWithStatus(NATIVE_BINDING_KEY, binding) != DatabaseReadStatus::NOT_FOUND) {
+        error = "PAYMASTER_PROVIDER_CHECKPOINT_INCOMPLETE_OPERATION";
+        return false;
+    }
     PaymasterCheckpoint current;
     bool enrolled{false};
     if (!ReadCurrent(*raw, identity.provider_id, current, enrolled) || !enrolled ||
@@ -635,29 +847,16 @@ bool TrackCheckpoint(const WalletBatch* owner, DatabaseBatch& batch, WalletDatab
         const auto guard_status = ReadRaw(batch, MakeByteSpan(Bytes(DBKeys::PAYMASTER_RESTORE_GUARD)), state.restore_guard);
         if (guard_status != DatabaseReadStatus::FOUND && guard_status != DatabaseReadStatus::NOT_FOUND)
             throw std::runtime_error("invalid restore guard");
-        state.file_state = FileState(state.path);
-        if (!state.file_state) throw std::runtime_error("invalid checkpoint path");
+        LockCheckpointFile(state, identity.provider_id, /*create=*/true);
         std::lock_guard<std::recursive_mutex> file_guard{state.file_state->mutex};
-        if (state.file_state->transaction_active) throw std::runtime_error("checkpoint busy");
-        state.file_state->transaction_active = true;
-        state.owns_file = true;
-        fs::create_directories(state.path.parent_path());
-        if (!SyncDirectory(state.path.parent_path().parent_path())) throw std::runtime_error("directory sync failed");
-        const auto lock_path = fs::path{state.path.parent_path()} / fs::PathFromString(identity.provider_id.GetHex() + ".lock");
-        std::error_code ec;
-        if (fs::is_symlink(fs::symlink_status(lock_path, ec))) throw std::runtime_error("invalid lock file");
-        FILE* file = fsbridge::fopen(lock_path, "ab");
-        if (!file || std::fclose(file) != 0) throw std::runtime_error("lock file unavailable");
-        state.file_lock = std::make_unique<fsbridge::FileLock>(lock_path);
-        if (!state.file_lock->TryLock()) throw std::runtime_error("checkpoint busy");
         bool enrolled{false};
         const auto execution = pending_executions.find(&database);
-        const uint256 execution_hash = execution == pending_executions.end() ? uint256{} : execution->second;
-        if (!ReadCurrent(batch, identity.provider_id, state.next, enrolled)) {
-            if (!ReadResumableCurrent(batch, identity.provider_id, execution_hash, state.next))
-                throw std::runtime_error("checkpoint not current");
-            enrolled = true;
-        }
+        const uint256 native_token = execution == pending_executions.end() ? uint256{} : execution->second;
+        // Only ResumeNativeCheckpoint may catch up an interrupted native DB
+        // commit. Advancing again from a mismatched pair could turn one failed
+        // commit into an unrecoverable two-generation gap.
+        if (!ReadCurrent(batch, identity.provider_id, state.next, enrolled))
+            throw std::runtime_error("checkpoint not current");
         if (enrolled) state.before = state.next;
         if (state.next.generation == (std::numeric_limits<uint64_t>::max)()) throw std::runtime_error("checkpoint exhausted");
         if (retirement || adoption) {
@@ -677,7 +876,7 @@ bool TrackCheckpoint(const WalletBatch* owner, DatabaseBatch& batch, WalletDatab
         state.next.genesis_hash = Params().GenesisBlock().GetHash();
         state.next.provider_id = identity.provider_id;
         ++state.next.generation;
-        state.next.token = state.next.pending == 1 && !execution_hash.IsNull() ? execution_hash : GetRandHash();
+        state.next.token = state.next.pending == 1 && !native_token.IsNull() ? native_token : GetRandHash();
         if (!batch.Write(CHECKPOINT_KEY, state.next)) throw std::runtime_error("checkpoint write failed");
         state.dirty = true;
         return true;
@@ -720,11 +919,38 @@ bool WalletBatch::AdoptPaymasterCheckpoint(const uint256& expected_revision)
 }
 
 namespace {
+bool ValidInitialNativeJournal(const MutationJournal& journal)
+{
+    if (journal.restore_guard || journal.next.pending != 1 || journal.rows.size() != 2 ||
+        (journal.before && journal.before->pending != 0)) return false;
+    const auto find = [&](const std::string& key) {
+        return std::find_if(journal.rows.begin(), journal.rows.end(), [&](const auto& row) { return row.key == Bytes(key); });
+    };
+    const auto execution_row = find(NATIVE_EXECUTION_KEY);
+    const auto binding_row = find(NATIVE_BINDING_KEY);
+    if (execution_row == journal.rows.end() || binding_row == journal.rows.end() ||
+        execution_row->before || binding_row->before || !execution_row->after || !binding_row->after) return false;
+    PaymasterMaintenanceExecution execution;
+    NativeBinding binding;
+    try {
+        SpanReader execution_stream{CLIENT_VERSION, *execution_row->after};
+        execution_stream >> execution;
+        SpanReader binding_stream{CLIENT_VERSION, *binding_row->after};
+        binding_stream >> binding;
+        if (!execution_stream.empty() || Bytes(execution) != *execution_row->after || Bytes(binding) != *binding_row->after) return false;
+    } catch (const std::exception&) { return false; }
+    return ValidatePaymasterMaintenanceExecution(execution) &&
+           execution.genesis_hash == journal.next.genesis_hash && execution.provider_id == journal.next.provider_id &&
+           ValidNativeBinding(binding, GetPaymasterMaintenanceExecutionHash(execution), execution.provider_id) &&
+           binding.nonce == journal.nonce && binding.before == journal.before &&
+           journal.next.token == NativeBindingHash(binding);
+}
+
 bool ValidJournal(const MutationJournal& journal)
 {
-    if (journal.version != MutationJournal::CURRENT_VERSION || journal.nonce.IsNull() ||
+    if ((journal.version != MutationJournal::CURRENT_VERSION && journal.version != MutationJournal::NATIVE_INITIAL_VERSION) || journal.nonce.IsNull() ||
         !Valid(journal.next, journal.next.provider_id) ||
-        journal.next.token != JournalHash(journal) || journal.rows.size() > MAX_JOURNAL_ROWS) return false;
+        journal.rows.size() > MAX_JOURNAL_ROWS) return false;
     if (journal.before) {
         if (!Valid(*journal.before, journal.next.provider_id) ||
             journal.before->generation == std::numeric_limits<uint64_t>::max() ||
@@ -742,7 +968,9 @@ bool ValidJournal(const MutationJournal& journal)
         bytes += size;
         previous = row.key;
     }
-    return GetSerializeSize(journal) <= MAX_JOURNAL_BYTES;
+    return GetSerializeSize(journal) <= MAX_JOURNAL_BYTES &&
+           (journal.version == MutationJournal::NATIVE_INITIAL_VERSION ? ValidInitialNativeJournal(journal)
+                                                                     : journal.next.token == JournalHash(journal));
 }
 
 bool MatchesJournalBefore(DatabaseBatch& batch, const MutationJournal& journal)
@@ -787,44 +1015,63 @@ bool ApplyJournalAfter(DatabaseBatch& batch, const MutationJournal& journal)
     return batch.Write(CHECKPOINT_KEY, journal.next) && batch.Erase(JOURNAL_KEY);
 }
 
-bool HasBoundNativeJournal(const TransactionState& state, bool& bound)
+bool HasBoundNativeJournal(const TransactionState& state, bool& bound, bool& initial)
 {
     bound = false;
+    initial = false;
     if (!state.batch || !state.database) return false;
-    PaymasterMaintenanceExecution execution;
-    const auto status = state.batch->ReadWithStatus(std::string{"pmnativeexec"}, execution);
+    StrictNativeRecord<PaymasterMaintenanceExecution> encoded_execution;
+    const auto status = state.batch->ReadWithStatus(NATIVE_EXECUTION_KEY, encoded_execution);
+    PaymasterMaintenanceExecution execution{std::move(encoded_execution.value)};
     if (status != DatabaseReadStatus::FOUND && status != DatabaseReadStatus::NOT_FOUND) return false;
+    const auto original = state.mutations.find(Bytes(NATIVE_EXECUTION_KEY));
     if (status == DatabaseReadStatus::NOT_FOUND) {
-        const auto original = state.mutations.find(Bytes(std::string{"pmnativeexec"}));
-        if (original == state.mutations.end() || !original->second.before) return true;
+        if (original == state.mutations.end() || !original->second.before) {
+            NativeBinding orphan;
+            return state.batch->ReadWithStatus(NATIVE_BINDING_KEY, orphan) == DatabaseReadStatus::NOT_FOUND;
+        }
         try {
             SpanReader stream{CLIENT_VERSION, *original->second.before};
             stream >> execution;
             if (!stream.empty()) return false;
         } catch (const std::exception&) { return false; }
     }
-    if (!ValidatePaymasterMaintenanceExecution(execution)) return false;
-    const auto hash = GetPaymasterMaintenanceExecutionHash(execution);
+    uint256 native_token;
+    bool has_binding{false};
+    if (!NativeToken(*state.batch, execution, native_token, has_binding, &state.mutations)) return false;
     const auto active = pending_executions.find(state.database);
-    const bool target_bound = state.next.pending == 1 && state.next.token == hash;
-    const bool active_bound = active != pending_executions.end() && active->second == hash &&
-        state.before && state.before->pending == 1 && state.before->token == hash;
+    const bool target_bound = state.next.pending == 1 && state.next.token == native_token;
+    const bool active_bound = active != pending_executions.end() && active->second == native_token &&
+        state.before && state.before->pending == 1 && state.before->token == native_token;
+    if (original != state.mutations.end() && !original->second.before && original->second.after) {
+        // The initial execution itself is not durable yet. It must use the
+        // separately committed, predecessor-bound intent before file advance.
+        initial = target_bound && has_binding && !active_bound;
+        return initial;
+    }
     bound = target_bound || active_bound;
     return bound;
 }
 
-bool PrepareMutationJournal(TransactionState& state)
+bool PrepareMutationJournal(TransactionState& state, bool initial_native = false)
 {
     if (!state.batch || state.capture_failed) return false;
     MutationJournal journal;
-    do { journal.nonce = GetRandHash(); } while (journal.nonce.IsNull());
+    if (initial_native) {
+        NativeBinding binding;
+        if (state.batch->ReadWithStatus(NATIVE_BINDING_KEY, binding) != DatabaseReadStatus::FOUND) return false;
+        journal.version = MutationJournal::NATIVE_INITIAL_VERSION;
+        journal.nonce = binding.nonce;
+    } else {
+        do { journal.nonce = GetRandHash(); } while (journal.nonce.IsNull());
+    }
     journal.before = state.before;
     journal.next = state.next;
     journal.restore_guard = state.restore_guard;
     journal.rows.reserve(state.mutations.size());
     for (auto& [key, mutation] : state.mutations) journal.rows.push_back(std::move(mutation));
     state.mutations.clear();
-    journal.next.token = JournalHash(journal);
+    if (!initial_native) journal.next.token = JournalHash(journal);
     if (!ValidJournal(journal)) return false;
     auto& batch = *state.batch;
     // No external authority has advanced yet. Persist just the immutable intent
@@ -906,8 +1153,9 @@ bool PaymasterCheckpointPrepareCommit(const WalletBatch* owner)
     if (!state.dirty) return true;
     try {
         std::lock_guard<std::recursive_mutex> file_guard{state.file_state->mutex};
-        bool native{false};
-        if (!HasBoundNativeJournal(state, native) || (!native && !PrepareMutationJournal(state))) return false;
+        bool native{false}, initial_native{false};
+        if (!HasBoundNativeJournal(state, native, initial_native) ||
+            (!native && !PrepareMutationJournal(state, initial_native))) return false;
         return WriteFile(state.path, state.next);
     } catch (const std::exception&) {
         return false;
@@ -971,6 +1219,40 @@ bool WalletBatch::SetPaymasterCheckpointPending(bool pending, const uint256& exe
     return !own || TxnCommit();
 }
 
+namespace {
+bool WriteInitialNativeBinding(WalletBatch& owner, const PaymasterMaintenanceExecution& execution,
+                               uint256& token)
+{
+    const auto transaction = FindTransaction(&owner);
+    if (!transaction) return false;
+    std::lock_guard<std::recursive_mutex> lock{transaction->mutex};
+    auto& state = *transaction;
+    if (!state.dirty || !state.owns_file || !state.file_lock || !state.batch || state.restore_guard ||
+        (state.before && state.before->pending != 0)) return false;
+    NativeBinding previous;
+    if (state.batch->ReadWithStatus(NATIVE_BINDING_KEY, previous) != DatabaseReadStatus::NOT_FOUND) return false;
+    NativeBinding binding;
+    binding.before = state.before;
+    binding.execution_hash = GetPaymasterMaintenanceExecutionHash(execution);
+    do { binding.nonce = GetRandHash(); } while (binding.nonce.IsNull());
+    if (!ValidNativeBinding(binding, binding.execution_hash, execution.provider_id)) return false;
+    const auto key = Bytes(NATIVE_BINDING_KEY);
+    const auto value = Bytes(binding);
+    if (!WritePaymasterCheckpointRecord(&owner, *state.batch, MakeByteSpan(key), MakeByteSpan(value), false)) return false;
+    token = NativeBindingHash(binding);
+    return true;
+}
+
+bool EraseNativeBinding(WalletBatch& owner)
+{
+    const auto transaction = FindTransaction(&owner);
+    if (!transaction) return false;
+    std::lock_guard<std::recursive_mutex> lock{transaction->mutex};
+    if (!transaction->batch) return false;
+    return ErasePaymasterCheckpointRecord(&owner, *transaction->batch, MakeByteSpan(Bytes(NATIVE_BINDING_KEY)));
+}
+} // namespace
+
 PaymasterCheckpointOperation::~PaymasterCheckpointOperation()
 {
     if (m_active) pending_operations.erase(&m_wallet.GetDatabase());
@@ -995,16 +1277,21 @@ bool PaymasterCheckpointOperation::Complete(std::string& error)
 {
     AssertLockHeld(m_wallet.cs_wallet);
     WalletBatch batch{m_wallet.GetDatabase()};
+    bool has_binding{false};
     if (!m_execution_hash.IsNull()) {
         PaymasterMaintenanceExecution saved;
+        uint256 native_token;
+        auto raw = m_wallet.GetDatabase().MakeBatch();
         if (batch.ReadPaymasterMaintenanceExecutionWithStatus(saved) != DatabaseReadStatus::FOUND ||
-            GetPaymasterMaintenanceExecutionHash(saved) != m_execution_hash) {
+            GetPaymasterMaintenanceExecutionHash(saved) != m_execution_hash ||
+            !NativeToken(*raw, saved, native_token, has_binding)) {
             error = "PAYMASTER_MAINTENANCE_RECOVERY_REVIEW_REQUIRED";
             return false;
         }
     }
     if (!m_active || !batch.TxnBegin() ||
         (!m_execution_hash.IsNull() && !batch.ErasePaymasterMaintenanceExecution()) ||
+        (has_binding && !EraseNativeBinding(batch)) ||
         !batch.SetPaymasterCheckpointPending(false) || !batch.TxnCommit()) {
         batch.TxnAbort();
         error = "PAYMASTER_PROVIDER_CHECKPOINT_WRITE";
@@ -1024,15 +1311,17 @@ bool PaymasterCheckpointOperation::Begin(const PaymasterMaintenanceExecution& ex
         WalletBatch{m_wallet.GetDatabase()}.ReadPaymasterRestoreGuardWithStatus(guard) != DatabaseReadStatus::NOT_FOUND ||
         !ValidatePaymasterMaintenanceExecution(execution) || !CheckPaymasterCheckpoint(m_wallet.GetDatabase(), error)) return false;
     const auto commitment = GetPaymasterMaintenanceExecutionHash(execution);
+    uint256 native_token;
     WalletBatch batch{m_wallet.GetDatabase()};
     if (!batch.TxnBegin() || !batch.WritePaymasterMaintenanceExecution(execution) ||
-        !batch.SetPaymasterCheckpointPending(true, commitment) || !batch.TxnCommit()) {
+        !WriteInitialNativeBinding(batch, execution, native_token) ||
+        !batch.SetPaymasterCheckpointPending(true, native_token) || !batch.TxnCommit()) {
         batch.TxnAbort();
         error = "PAYMASTER_PROVIDER_CHECKPOINT_WRITE";
         return false;
     }
     pending_operations.insert(&m_wallet.GetDatabase());
-    pending_executions[&m_wallet.GetDatabase()] = commitment;
+    pending_executions[&m_wallet.GetDatabase()] = native_token;
     m_execution_hash = commitment;
     m_active = true;
     return true;
@@ -1054,23 +1343,14 @@ bool PaymasterCheckpointOperation::Resume(const PaymasterMaintenanceExecution& e
         return false;
     }
     const auto commitment = GetPaymasterMaintenanceExecutionHash(execution);
-    auto raw = m_wallet.GetDatabase().MakeBatch();
-    PaymasterCheckpoint current;
-    if (!ReadResumableCurrent(*raw, identity.provider_id, commitment, current)) {
-        error = "PAYMASTER_MAINTENANCE_RECOVERY_CHECKPOINT_CHANGED";
-        return false;
-    }
+    uint256 native_token;
+    bool completed{false};
+    if (!ResumeNativeCheckpoint(m_wallet.GetDatabase(), saved, native_token, completed, error)) return false;
+    if (completed) return true;
     pending_operations.insert(&m_wallet.GetDatabase());
-    pending_executions[&m_wallet.GetDatabase()] = commitment;
+    pending_executions[&m_wallet.GetDatabase()] = native_token;
     m_active = true;
     m_execution_hash = commitment;
-    if (!WalletBatch{m_wallet.GetDatabase()}.SetPaymasterCheckpointPending(true, commitment)) {
-        pending_operations.erase(&m_wallet.GetDatabase());
-        pending_executions.erase(&m_wallet.GetDatabase());
-        m_active = false;
-        error = "PAYMASTER_PROVIDER_CHECKPOINT_WRITE";
-        return false;
-    }
     return true;
 }
 } // namespace wallet

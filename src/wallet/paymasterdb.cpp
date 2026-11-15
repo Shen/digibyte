@@ -650,6 +650,11 @@ bool WalletBatch::WritePaymasterMaintenanceExecution(const PaymasterMaintenanceE
 
 DatabaseReadStatus WalletBatch::ReadPaymasterMaintenanceExecutionWithStatus(PaymasterMaintenanceExecution& execution)
 {
+    execution = {};
+    // An initial signed execution can exist only inside the independently
+    // committed checkpoint intent. Until startup resolves it, absence of the
+    // ordinary native row does not establish that fee inputs are unreserved.
+    if (!PaymasterCheckpointJournalIsAbsent(*m_batch)) return DatabaseReadStatus::READ_ERROR;
     struct StrictExecution : PaymasterMaintenanceExecution {
         void Unserialize(DataStream& stream)
         {
@@ -657,7 +662,6 @@ DatabaseReadStatus WalletBatch::ReadPaymasterMaintenanceExecutionWithStatus(Paym
             if (!stream.empty()) throw std::ios_base::failure("maintenance execution trailing bytes");
         }
     } strict;
-    execution = {};
     const auto status = m_batch->ReadWithStatus(std::string{"pmnativeexec"}, strict);
     execution = strict;
     if ((status == DatabaseReadStatus::FOUND || status == DatabaseReadStatus::READ_ERROR) &&

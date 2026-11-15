@@ -13,6 +13,12 @@
 #include <cstdint>
 #include <cstddef>
 #include <string>
+#include <vector>
+
+namespace DigiDollar::Paymaster {
+struct ProviderPoolEntry;
+struct ProviderMaintenanceLedger;
+}
 
 namespace wallet {
 class CWallet;
@@ -21,8 +27,17 @@ class WalletBatch;
 class WalletDatabase;
 struct PaymasterMaintenanceExecution;
 
+enum class PaymasterMaintenanceAccounting { MISMATCH, BEFORE, AFTER };
+/** Classify already validated immutable accounting snapshots. This grants no
+ * signing or execution authority; callers still validate records and identity. */
+PaymasterMaintenanceAccounting ClassifyPaymasterMaintenanceAccounting(
+    const PaymasterMaintenanceExecution& execution, bool has_pool,
+    const std::vector<DigiDollar::Paymaster::ProviderPoolEntry>& pool,
+    const DigiDollar::Paymaster::ProviderMaintenanceLedger* ledger);
+
 /** No keys or transaction contents leave the wallet. Tokens distinguish
- * independently advanced copies; a pending native token commits its journal. */
+ * independently advanced copies; a pending native token binds its exact
+ * execution and predecessor through wallet-only checkpoint metadata. */
 struct PaymasterCheckpoint {
     // Version 2 retains the layout and reads version 1, adding permanent
     // retirement. Older binaries reject the new version rather than resume.
@@ -48,6 +63,9 @@ bool CheckPaymasterCheckpoint(WalletDatabase& database, std::string& error);
  * records/flags/coin-lock owners are loaded into memory. Never a live repair or
  * a stale-backup adoption operation. Unknown or inconsistent intent is retained. */
 bool RecoverPaymasterCheckpointJournal(WalletDatabase& database, std::string& error);
+/** Only a proven absent intent permits interpreting missing native execution
+ * as unused capacity. Unknown/corrupt/unreadable intent retains the fence. */
+bool PaymasterCheckpointJournalIsAbsent(DatabaseBatch& batch);
 
 // Record the complete raw mutation of a WalletBatch transaction, including
 // ordinary flags and coin-lock rows sharing a Paymaster financial transition.
@@ -89,8 +107,10 @@ public:
     bool Active() const { return m_active; }
     bool Begin(std::string& error);
     bool Begin(const PaymasterMaintenanceExecution& execution, std::string& error);
-    /** Resume only this exact immutable journal against its external token.
-     * A one-generation interrupted commit is repaired without rollback. */
+    /** Resume only this exact immutable journal and predecessor binding against its external token.
+     * Repair an adjacent DB gap without advancing the file. Success with
+     * Active()==false means an interrupted Complete was already externalized;
+     * its exact cleanup was committed and financial work must not be repeated. */
     bool Resume(const PaymasterMaintenanceExecution& execution, std::string& error);
     bool Complete(std::string& error);
 private:

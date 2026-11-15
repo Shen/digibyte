@@ -1937,14 +1937,10 @@ bool CheckMaintenanceExecutionState(CWallet& wallet,
             return false;
         }
     }
-    const bool before = (status == DatabaseReadStatus::FOUND) == execution.had_pool &&
-        (HashWriter{} << pool).GetHash() == (HashWriter{} << execution.before_pool).GetHash() &&
-        (!execution.has_ledger || (HashWriter{} << ledger).GetHash() == (HashWriter{} << execution.before_ledger).GetHash());
-    const bool after = status == DatabaseReadStatus::FOUND &&
-        (HashWriter{} << pool).GetHash() == (HashWriter{} << execution.after_pool).GetHash() &&
-        (!execution.has_ledger || (HashWriter{} << ledger).GetHash() == (HashWriter{} << execution.after_ledger).GetHash());
-    if (!before && !after) { error = "PAYMASTER_MAINTENANCE_RECOVERY_ACCOUNTING_CONFLICT"; return false; }
-    if (accounted) *accounted = after;
+    const auto accounting = ClassifyPaymasterMaintenanceAccounting(execution, status == DatabaseReadStatus::FOUND,
+        pool, execution.has_ledger ? &ledger : nullptr);
+    if (accounting == PaymasterMaintenanceAccounting::MISMATCH) { error = "PAYMASTER_MAINTENANCE_RECOVERY_ACCOUNTING_CONFLICT"; return false; }
+    if (accounted) *accounted = accounting == PaymasterMaintenanceAccounting::AFTER;
     return true;
 }
 
@@ -2151,6 +2147,7 @@ bool ResumeProviderMaintenanceTransactions(CWallet& wallet, std::string& error)
         if (!CheckMaintenanceExecutionState(wallet, execution, error)) return false;
         PaymasterCheckpointOperation checkpoint{wallet};
         if (!checkpoint.Resume(execution, error)) return false;
+        if (!checkpoint.Active()) return true; // Exact interrupted Complete was already persisted externally.
         return CommitMaintenanceExecution(wallet, execution, checkpoint, error);
     } catch (const std::exception& exception) {
         // CommitTransaction throws after a failed wallet database write.
