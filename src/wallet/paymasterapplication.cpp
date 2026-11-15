@@ -38,6 +38,7 @@
 #include <wallet/digidollarwallet.h>
 #include <wallet/paymasteridentity.h>
 #include <wallet/paymastercheckpoint.h>
+#include <wallet/paymasterconflicts.h>
 #include <wallet/paymasterprovider.h>
 #include <wallet/paymasterpsbt.h>
 #include <wallet/paymasterstore.h>
@@ -2803,7 +2804,88 @@ ProviderAutomationSnapshot CaptureProviderAutomationStatus(const CWallet& wallet
 
 } // namespace wallet::paymaster_app
 
+namespace wallet::paymaster_store::internal {
+bool ObservePaymasterPoolSuccessorReconfirmation(CWallet& wallet, const CTransaction& transaction)
+{
+    AssertLockHeld(wallet.cs_wallet);
+    const auto* known = wallet.GetWalletTx(transaction.GetHash());
+    if (!known || !known->tx || !known->state<TxStateConfirmed>() ||
+        known->tx->GetWitnessHash() != transaction.GetWitnessHash() ||
+        CanonicalBytes(*known->tx) != CanonicalBytes(transaction)) return false;
+    ExactFinalTransactionPreflight observation;
+    std::string error;
+    return PreflightExactPaymasterFinalTransaction(wallet, known->tx,
+        ExactFinalTxIndexMode::NONBLOCKING, observation, error) &&
+        observation.presence == ExactFinalTransactionPresence::CONFIRMED;
+}
+} // namespace wallet::paymaster_store::internal
+
 namespace wallet {
+bool PreparePaymasterConflictPool(CWallet& wallet, WalletBatch& batch,
+    const CTransaction& original, const std::vector<COutPoint>& sources, const uint256& owner,
+    int64_t now, bool pending_native, std::vector<DigiDollar::Paymaster::ProviderPoolEntry>& pool, std::string& error)
+{
+    using namespace DigiDollar::Paymaster;
+    AssertLockHeld(wallet.cs_wallet);
+    AssertLockHeld(cs_main);
+    using namespace paymaster_store::internal;
+    auto* node = wallet.chain().context();
+    const auto fail = [&] { error = "PAYMASTER_CONFLICT_POOL_BINDING"; return false; };
+    if (!node || !node->chainman || owner.IsNull() || now <= 0 || !ValidateProviderPoolEntries(pool, error)) return fail();
+    const auto original_pool = pool;
+    std::map<COutPoint, ProviderPoolEntry> settled;
+    for (const auto& source : sources) {
+        if (std::none_of(original.vin.begin(), original.vin.end(), [&](const auto& input) { return input.prevout == source; })) return fail();
+        ProviderPoolEntry entry;
+        if (ReadProviderPoolDisposition(batch, original_pool, source, entry) != DatabaseReadStatus::FOUND ||
+            !settled.emplace(source, entry).second ||
+            (!entry.reservation_id.IsNull() && entry.reservation_id != owner) ||
+            (!pending_native && entry.state != PoolEntryState::COMMITTED && entry.state != PoolEntryState::SPENT &&
+             entry.state != PoolEntryState::INVALIDATED && entry.state != PoolEntryState::RELEASED)) return fail();
+        if (entry.state == PoolEntryState::RELEASED) {
+            // A proven-invalid ancestor may already have retired this unborn
+            // source. Never re-enrol it while closing its defeated descendant.
+            settled.erase(source);
+            continue;
+        }
+        const Coin& coin = node->chainman->ActiveChainstate().CoinsTip().AccessCoin(source);
+        if (!coin.IsSpent() && (coin.nHeight == 0 || coin.out.scriptPubKey != entry.script_pub_key ||
+            !(wallet.IsMine(entry.script_pub_key) & ISMINE_SPENDABLE) ||
+            (entry.asset == PoolAsset::DGB && coin.out.nValue != entry.dgb_value.value) ||
+            (entry.asset == PoolAsset::DD_CARRIER && (!wallet.GetDDWallet() ||
+             wallet.GetDDWallet()->GetDDFromUTXO(source) != entry.carrier_value.value)))) return fail();
+        entry.state = coin.IsSpent() ? PoolEntryState::SPENT : PoolEntryState::AVAILABLE;
+        entry.reservation_id.SetNull();
+        entry.confirmation_height = coin.IsSpent() ? 0 : coin.nHeight;
+        entry.updated_at = std::max(entry.updated_at, now);
+        settled[source] = std::move(entry);
+    }
+    for (uint32_t index{0}; index < original.vout.size(); ++index) {
+        const COutPoint outpoint{original.GetHash(), index};
+        ProviderPoolEntry entry;
+        const auto status = ReadProviderPoolDisposition(batch, original_pool, outpoint, entry);
+        if (status == DatabaseReadStatus::NOT_FOUND) continue;
+        if (status != DatabaseReadStatus::FOUND || entry.origin_commit_key != owner) return fail();
+        // These outputs cannot exist on the proven winning chain. Preserve a
+        // terminal disposition so repair cannot resurrect the losing final.
+        SettleProviderPoolSuccessorConflict(entry, now);
+        if (std::any_of(original_pool.begin(), original_pool.end(), [&](const auto& candidate) { return candidate.outpoint == outpoint; }))
+            settled[outpoint] = std::move(entry);
+    }
+    std::set<COutPoint> retained;
+    size_t missing{0};
+    for (const auto& [outpoint, entry] : settled) {
+        if (std::find(sources.begin(), sources.end(), outpoint) != sources.end()) retained.insert(outpoint);
+        const auto found = std::find_if(pool.begin(), pool.end(), [&](const auto& candidate) { return candidate.outpoint == outpoint; });
+        if (found == pool.end()) ++missing;
+        else *found = entry;
+    }
+    if (!MakeProviderPoolRoom(pool, missing, error, retained)) return false;
+    for (const auto& [outpoint, entry] : settled)
+        if (retained.count(outpoint) && std::none_of(pool.begin(), pool.end(), [&](const auto& candidate) { return candidate.outpoint == outpoint; })) pool.push_back(entry);
+    return ValidateProviderPoolEntries(pool, error);
+}
+
 void ForgetPaymasterMaintenanceCache(WalletDatabase& database)
 {
     std::shared_ptr<paymaster_app::MaintenanceHistory> state;

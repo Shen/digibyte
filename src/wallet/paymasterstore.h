@@ -30,6 +30,7 @@ class ExactFinalTransactionProof;
 namespace wallet {
 
 class CWallet;
+class PaymasterInputConflictProof;
 namespace test { class PaymasterLegacyFixtureAccess; }
 
 /** Paymaster reservations are hard safety locks. Unlike ordinary lockunspent
@@ -825,6 +826,8 @@ public:
     /** Prune validated terminal history, retaining signed finals and fees if
      * their current exact wallet observation is below the safety depth. */
     bool PruneFinalSession(const std::string& request_id, std::string& error);
+    bool SettleProviderConflict(const DigiDollar::Paymaster::ProviderCommitRecord& commit,
+        const PaymasterInputConflictProof& proof, int64_t now, std::string& error);
 
 private:
     friend class test::PaymasterLegacyFixtureAccess;
@@ -859,7 +862,8 @@ private:
                       const DigiDollar::Paymaster::AlternativeRecoveryRecord* observed_recovery = nullptr,
                       const DigiDollar::Paymaster::ExactFinalTransactionProof* final_proof = nullptr,
                       const CTransactionRef& observed_transaction = {},
-                      int64_t observation_time = 0);
+                       int64_t observation_time = 0,
+                       const PaymasterInputConflictProof* conflict_proof = nullptr);
     enum class ProviderClosure { CANCEL, EXPIRED, INPUT_UNAVAILABLE };
     bool CloseProviderAttempt(const uint256& attempt_id, ProviderClosure reason, int64_t now,
         const std::optional<DigiDollar::Paymaster::PaymasterResult>& result,

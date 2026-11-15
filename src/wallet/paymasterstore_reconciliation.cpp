@@ -12,6 +12,7 @@
 #include <wallet/digidollarwallet.h>
 #include <wallet/paymasteridentity.h>
 #include <wallet/paymasterprovider.h>
+#include <wallet/paymasterconflicts.h>
 
 #include <chainparams.h>
 #include <digidollar/digidollar.h>
@@ -1100,12 +1101,63 @@ bool PaymasterStore::PruneFinalSession(const std::string& request_id, std::strin
     return PruneSession(request_id, error, /*unsigned_expiry_time=*/0, pruned);
 }
 
+bool PaymasterStore::SettleProviderConflict(const ProviderCommitRecord& candidate,
+    const PaymasterInputConflictProof& proof, int64_t now, std::string& error)
+{
+    LOCK(m_wallet.cs_wallet);
+    if (!CheckPaymasterProviderRestoreGuard(m_wallet, error)) return false;
+    WalletBatch batch{m_wallet.GetDatabase()};
+    ProviderCommitRecord commit;
+    if (batch.ReadPaymasterProviderCommitWithStatus(candidate.commit_key, commit) != DatabaseReadStatus::FOUND ||
+        !SameCommit(commit, candidate)) { error = "PAYMASTER_PROVIDER_COMMIT_CONFLICT"; return false; }
+    uint256 attempt_id;
+    const auto attempt_status = batch.ReadPaymasterTemplateWithStatus(commit.template_commitment, attempt_id);
+    if (attempt_status == DatabaseReadStatus::FOUND) {
+        ProviderAttempt attempt;
+        PaymentSession session;
+        if (!batch.ReadPaymasterAttempt(attempt_id, attempt) || !GetSessionBySessionId(attempt.session_id, session) ||
+            !session.provider_side || attempt.commit_key != commit.commit_key) {
+            error = "PAYMASTER_PROVIDER_COMMIT_ATTEMPT_CONFLICT";
+            return false;
+        }
+        bool pruned{false};
+        return PruneSession(session.request_id, error, 0, pruned, nullptr, nullptr, {}, now, &proof) && pruned;
+    }
+    if (attempt_status != DatabaseReadStatus::NOT_FOUND) { error = "PAYMASTER_TEMPLATE_DATABASE_READ"; return false; }
+    AlternativeRecoveryRecord recovery;
+    ProviderBudgetLedger budget;
+    ProviderIdentityRecord identity;
+    CMutableTransaction transaction;
+    std::vector<COutPoint> sources;
+    if (!batch.ReadPaymasterAlternativeRecovery(commit.quote_id, recovery) ||
+        !batch.ReadPaymasterIdentity(identity) || identity.provider_id != commit.provider_id ||
+        !ValidateProviderAlternativeRecoveryCommitBinding(recovery, commit, transaction, sources, error) ||
+        !ValidatePaymasterResult(recovery.signed_result, Params().GenesisBlock().GetHash(), commit.provider_id,
+            commit.commit_key, identity.identity_key, 1, error) ||
+        !batch.ReadPaymasterProviderBudgetLedger(budget) ||
+        !ValidateRetainedProviderRecoveryBudget(batch, recovery, budget, error)) return false;
+    AlternativeRecoveryParameters parameters;
+    if (!BuildAlternativeRecoveryParametersFromRecord(m_wallet, recovery, parameters, error)) return false;
+    LOCK(cs_main);
+    if (!proof.Recheck(m_wallet, CTransaction{transaction}, commit.provider_id,
+            (HashWriter{} << commit).GetHash(), error)) return false;
+    std::vector<ProviderPoolEntry> pool;
+    if (!batch.ReadPaymasterProviderPool(pool) || !PreparePaymasterConflictPool(m_wallet, batch,
+            CTransaction{transaction}, sources, commit.commit_key, now, false, pool, error)) return false;
+    if (!batch.TxnBegin()) return Abort(batch, error, "PAYMASTER_DATABASE_BEGIN");
+    if (!batch.WritePaymasterConflictClosure(proof.Record()) || !batch.WritePaymasterProviderPool(pool) ||
+        !batch.ArchivePaymasterAlternativeRecovery(recovery)) return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
+    if (!batch.TxnCommit()) return Abort(batch, error, "PAYMASTER_DATABASE_COMMIT");
+    return true;
+}
+
 bool PaymasterStore::PruneSession(const std::string& request_id, std::string& error,
                                  int64_t unsigned_expiry_time, bool& pruned,
                                  const AlternativeRecoveryRecord* observed_recovery,
                                  const ExactFinalTransactionProof* final_proof,
                                  const CTransactionRef& observed_transaction,
-                                 int64_t observation_time)
+                                 int64_t observation_time,
+                                 const PaymasterInputConflictProof* conflict_proof)
 {
     error.clear();
     pruned = false;
@@ -1131,6 +1183,19 @@ bool PaymasterStore::PruneSession(const std::string& request_id, std::string& er
         }
         session.state = SessionState::CANCELED_SAFE;
         session.recovery_txid = observed_transaction->GetHash();
+    }
+    if (conflict_proof) {
+        if (!session.provider_side || session.attempt_ids.size() != 1 || !session.recovery_txid.IsNull() ||
+            session.final_txid != conflict_proof->Record().transaction_id) {
+            error = "PAYMASTER_CONFLICT_SESSION_BINDING";
+            return false;
+        }
+        session.state = SessionState::CONFLICTED;
+        session.pending_phase = PendingPhase::NONE;
+    }
+    if (session.state == SessionState::CONFLICTED && !conflict_proof) {
+        error = "PAYMASTER_CONFLICT_PROOF_REQUIRED";
+        return false;
     }
     if (!IsTerminal(session.state)) {
         error = "PAYMASTER_SESSION_NOT_FINAL";
@@ -1427,6 +1492,7 @@ bool PaymasterStore::PruneSession(const std::string& request_id, std::string& er
         return false;
     }
 
+    std::vector<ProviderPoolEntry> conflict_pool;
     const auto commit_prune = [&]() -> bool {
         ClientFeeLedger settled_fees;
         bool write_settled_fees{false};
@@ -1462,6 +1528,8 @@ bool PaymasterStore::PruneSession(const std::string& request_id, std::string& er
                                        session.subtract_paymaster_fee_from_amount,
                                        session.send_all_spendable_dd};
         if (!batch.TxnBegin()) return Abort(batch, error, "PAYMASTER_DATABASE_BEGIN");
+        if (conflict_proof && (!batch.WritePaymasterConflictClosure(conflict_proof->Record()) ||
+            !batch.WritePaymasterProviderPool(conflict_pool))) return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
         if (write_settled_fees && !batch.WritePaymasterClientFeeLedger(settled_fees)) return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
         // Expired unsigned provider artifacts no longer authorize any spend or
         // valid replay. Keeping a permanent tombstone for each public request
@@ -1536,6 +1604,28 @@ bool PaymasterStore::PruneSession(const std::string& request_id, std::string& er
     // Wallet callbacks can lag the active chain. Keep both authorities stable
     // through the fee/tombstone commit; no index, disk or callback wait belongs
     // in this interval.
+    if (conflict_proof) {
+        LOCK(cs_main);
+        ProviderCommitRecord commit;
+        ProviderCommitArtifacts artifacts;
+        const auto& attempt = attempts.front().attempt;
+        if (batch.ReadPaymasterProviderCommitWithStatus(attempt.commit_key, commit) != DatabaseReadStatus::FOUND ||
+            !ValidateProviderCommitArtifacts(attempt, commit, artifacts, error) ||
+            !ValidateProviderAuthorizationOwnership(m_wallet, attempt.provider_manifest, error) ||
+            !ValidateProviderConflictBudget(m_wallet, batch, attempt, commit, *conflict_proof, error) ||
+            !batch.ReadPaymasterProviderPool(conflict_pool) ||
+            !PreparePaymasterConflictPool(m_wallet, batch, CTransaction{artifacts.final_transaction},
+                commit.provider_inputs, commit.commit_key, observation_time, false, conflict_pool, error)) return false;
+        for (const auto& outpoint : commit.provider_inputs) {
+            InputReservation reservation;
+            const auto status = batch.ReadPaymasterReservationWithStatus(outpoint, reservation);
+            if (status == DatabaseReadStatus::NOT_FOUND) continue;
+            if (status != DatabaseReadStatus::FOUND || reservation.request_id != session.request_id ||
+                reservation.session_id != session.session_id) { error = "PAYMASTER_RESERVATION_SESSION_CONFLICT"; return false; }
+            reservations_to_erase.insert(outpoint);
+        }
+        return commit_prune();
+    }
     if (!prune_unsigned &&
         (session.state == SessionState::CONFIRMED || session.state == SessionState::CANCELED_SAFE)) {
         LOCK(cs_main);

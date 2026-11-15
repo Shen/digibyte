@@ -5,6 +5,7 @@
 /** \file Self-recovery and alternative-provider recovery state. */
 
 #include <wallet/paymasterstore.h>
+#include <wallet/paymasterconflicts.h>
 #include <wallet/paymastersessionindex.h>
 #include <wallet/paymasterstore_internal.h>
 
@@ -1700,6 +1701,7 @@ bool PaymasterStore::CommitProviderAlternativeRecoveryFinal(
 
     LOCK(m_wallet.cs_wallet);
     WalletBatch batch{m_wallet.GetDatabase()};
+    if (!PaymasterConflictClosureIsAbsent(batch, commit.final_txid, error)) return false;
     AlternativeRecoveryRecord current;
     ProviderIdentityRecord identity;
     ProviderBudgetLedger budget_ledger;

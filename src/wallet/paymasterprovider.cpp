@@ -43,6 +43,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <mutex>
 #include <limits>
 #include <map>
 #include <optional>
@@ -1268,6 +1269,61 @@ std::optional<PaymasterInputConflictProof> ObservePaymasterInputConflict(
     return std::nullopt;
 }
 
+bool ReconcilePaymasterProviderConflicts(CWallet& wallet, int64_t now, size_t& closed, std::string& error)
+{
+    closed = 0;
+    error.clear();
+    LOCK(wallet.cs_wallet);
+    WalletBatch batch{wallet.GetDatabase()};
+    ProviderIdentityRecord identity;
+    const auto identity_status = batch.ReadPaymasterIdentityWithStatus(identity);
+    if (identity_status == DatabaseReadStatus::NOT_FOUND) return true;
+    if (identity_status != DatabaseReadStatus::FOUND || !CheckPaymasterProviderRestoreGuard(wallet, error)) return false;
+    PaymasterScanPage page{wallet.GetDatabase(), PaymasterScan::PROVIDER_CONFLICTS};
+    std::vector<ProviderCommitRecord> commits;
+    uint256 next;
+    if (!batch.ListPaymasterProviderCommitsPage(page.after.record, commits, next)) { error = "PAYMASTER_PROVIDER_COMMIT_DATABASE_READ"; return false; }
+    for (const auto& commit : commits) {
+        if (commit.provider_id != identity.provider_id) { error = "PAYMASTER_PROVIDER_COMMIT_IDENTITY_CONFLICT"; return false; }
+        PaymasterConflictClosure closure;
+        const auto closure_status = batch.ReadPaymasterConflictClosureWithStatus(commit.final_txid, closure);
+        if (closure_status != DatabaseReadStatus::FOUND && closure_status != DatabaseReadStatus::NOT_FOUND) {
+            error = "PAYMASTER_CONFLICT_DATABASE_READ";
+            return false;
+        }
+        if (closure_status == DatabaseReadStatus::FOUND) {
+            bool settled{false};
+            if (!ReadSettledPaymasterConflict(wallet, batch, commit.final_txid, commit.provider_id,
+                    (HashWriter{} << commit).GetHash(), settled, error) || !settled) return false;
+            continue;
+        }
+        const auto* known = wallet.GetWalletTx(commit.final_txid);
+        if (known && (wallet.GetTxDepthInMainChain(*known) > 0 || known->InMempool() || wallet.chain().isInStempool(commit.final_txid))) continue;
+        CMutableTransaction decoded;
+        try {
+            SpanReader stream{::PROTOCOL_VERSION, commit.final_transaction};
+            stream >> decoded;
+            if (!stream.empty() || decoded.GetHash() != commit.final_txid ||
+                Hash(commit.final_transaction) != commit.raw_transaction_hash) throw std::ios_base::failure("invalid commit");
+        } catch (const std::exception&) { error = "PAYMASTER_INVALID_PROVIDER_COMMIT"; return false; }
+        const auto proof = ObservePaymasterInputConflict(wallet, CTransaction{decoded}, commit.provider_id,
+            (HashWriter{} << commit).GetHash(), now, error);
+        if (!proof && error == "PAYMASTER_CONFLICT_PROOF_NOT_SETTLED") error.clear();
+        if (!error.empty()) return false;
+        if (proof) {
+            page.Complete(commit.commit_key); // A dependent unresolved commit must not starve independent work.
+            if (!PaymasterStore{wallet}.SettleProviderConflict(commit, *proof, now, error)) return false;
+            ++closed;
+        }
+        // At most one historical disk scan per tick, across this whole wallet.
+        // Completed immutable records above are cheap bounded point reads.
+        page.Complete(commit.commit_key);
+        return true;
+    }
+    page.Complete(next);
+    return true;
+}
+
 DurablePaymasterCommitRecovery RecoverDurablePaymasterCommit(
     CWallet& wallet,
     const ProviderCommitRecord& commit,
@@ -1281,6 +1337,11 @@ DurablePaymasterCommitRecovery RecoverDurablePaymasterCommit(
     }
 
     PaymasterStore store{wallet};
+    {
+        LOCK(wallet.cs_wallet);
+        WalletBatch batch{wallet.GetDatabase()};
+        if (!PaymasterConflictClosureIsAbsent(batch, commit.final_txid, result.error)) return result;
+    }
     ProviderAttempt attempt;
     // A wall-clock rollback cannot revoke an already durable signature.
     const int64_t recovery_now = std::max(now, commit.committed_at);
@@ -2203,15 +2264,22 @@ bool ReleasePaymasterCapital(CWallet& wallet, bool execute, const uint256& expec
     for (const auto& admission : budgets.capacity_admissions)
         if (admission.state == CapacityAdmissionState::RESERVED) return fail("PAYMASTER_CAPITAL_RESERVED");
 
+    std::vector<PaymasterInputConflictProof> conflict_proofs;
     const auto confirmed = [&](const uint256& txid) {
         const auto* tx = wallet.GetWalletTx(txid);
         return tx && wallet.GetTxDepthInMainChain(*tx) > 0;
     };
     std::vector<ProviderCommitRecord> commits;
     if (!batch.ListPaymasterProviderCommits(commits)) return fail("PAYMASTER_CAPITAL_DATABASE_READ");
-    for (const auto& commit : commits)
-        if (commit.provider_id == identity.provider_id && !confirmed(commit.final_txid))
-            return fail("PAYMASTER_CAPITAL_UNCONFIRMED_PAYMENT");
+    for (const auto& commit : commits) {
+        if (commit.provider_id != identity.provider_id || confirmed(commit.final_txid)) continue;
+        bool settled{false};
+        std::optional<PaymasterInputConflictProof> snapshot;
+        if (!ReadSettledPaymasterConflict(wallet, batch, commit.final_txid, identity.provider_id,
+                (HashWriter{} << commit).GetHash(), settled, error, &snapshot)) return false;
+        if (!settled) return fail("PAYMASTER_CAPITAL_UNCONFIRMED_PAYMENT");
+        conflict_proofs.push_back(std::move(*snapshot));
+    }
     ProviderMaintenanceLedger maintenance;
     const auto maintenance_status = batch.ReadPaymasterMaintenanceLedgerWithStatus(maintenance);
     if (maintenance_status != DatabaseReadStatus::FOUND && maintenance_status != DatabaseReadStatus::NOT_FOUND)
@@ -2226,10 +2294,17 @@ bool ReleasePaymasterCapital(CWallet& wallet, bool execute, const uint256& expec
             uncreated_maintenance.push_back(record.operation_id);
             continue;
         }
-        if (record.state != ProviderMaintenanceState::CONFIRMED && record.state != ProviderMaintenanceState::RELEASED)
+        if (!record.IsClosed())
             return fail("PAYMASTER_CAPITAL_OPEN_MAINTENANCE");
-        if (!record.transaction_id.IsNull() && !confirmed(record.transaction_id))
-            return fail("PAYMASTER_CAPITAL_UNCONFIRMED_MAINTENANCE");
+        if (!record.transaction_id.IsNull() && !confirmed(record.transaction_id)) {
+            bool settled{false};
+            std::optional<PaymasterInputConflictProof> snapshot;
+            if (record.state != ProviderMaintenanceState::CONFLICT_SETTLED ||
+                !ReadSettledPaymasterConflict(wallet, batch, record.transaction_id, identity.provider_id,
+                    GetPaymasterMaintenanceConflictAuthority(record), settled, error, &snapshot) || !settled)
+                return error.empty() ? fail("PAYMASTER_CAPITAL_UNCONFIRMED_MAINTENANCE") : false;
+            conflict_proofs.push_back(std::move(*snapshot));
+        }
     }
     ProviderMaintenanceLedger cancelled_maintenance;
     int64_t released_maintenance_fee{0};
@@ -2291,6 +2366,11 @@ bool ReleasePaymasterCapital(CWallet& wallet, bool execute, const uint256& expec
         liquidity.automatic_replenishment = false;
         liquidity.paid_maintenance_approved = false;
         liquidity.updated_at = std::max(now, liquidity.updated_at + 1);
+    }
+    std::unique_lock<RecursiveMutex> chain_lock{cs_main, std::defer_lock};
+    if (!conflict_proofs.empty()) {
+        chain_lock.lock();
+        for (const auto& proof : conflict_proofs) if (!proof.Recheck(wallet, error)) return false;
     }
     if (!batch.TxnBegin()) return fail("PAYMASTER_DATABASE_BEGIN");
     // Recheck the independently retained revision under its OS/in-process

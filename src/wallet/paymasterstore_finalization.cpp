@@ -24,6 +24,7 @@
 #include <util/time.h>
 #include <version.h>
 #include <wallet/paymasterpsbt.h>
+#include <wallet/paymasterconflicts.h>
 #include <wallet/wallet.h>
 #include <wallet/walletdb.h>
 
@@ -256,6 +257,7 @@ bool PaymasterStore::CommitProviderFinalTransaction(
     error.clear();
     LOCK(m_wallet.cs_wallet);
     WalletBatch batch{m_wallet.GetDatabase()};
+    if (!PaymasterConflictClosureIsAbsent(batch, commit.final_txid, error)) return false;
     PaymentSession session;
     ProviderAttempt attempt;
     ProviderIdentityRecord identity;

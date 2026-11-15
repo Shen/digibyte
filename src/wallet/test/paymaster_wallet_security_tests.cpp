@@ -7733,6 +7733,41 @@ static void ExerciseFirstProviderRecoveryCommit(node::NodeContext& node,
     // Reuse real signed recovery evidence and its actually mined final. Only
     // the unrelated history fillers are synthetic; no signature, mempool or
     // consensus validation is bypassed for the completed recovery itself.
+    for (const bool archived_invalidated : {false, true}) {
+        std::vector<ProviderPoolEntry> invalidated;
+        {
+            LOCK(history_wallet.cs_wallet);
+            WalletBatch batch{history_wallet.GetDatabase()};
+            BOOST_REQUIRE(batch.ReadPaymasterProviderPool(invalidated));
+            for (auto& entry : invalidated) if (entry.outpoint.hash == commit.final_txid) {
+                entry.state = PoolEntryState::INVALIDATED;
+                entry.reservation_id.SetNull();
+                entry.confirmation_height = 0;
+            }
+            BOOST_REQUIRE(batch.WritePaymasterProviderPool(invalidated));
+            if (archived_invalidated) {
+                invalidated.erase(std::remove_if(invalidated.begin(), invalidated.end(), [&](const auto& entry) {
+                    return entry.outpoint.hash == commit.final_txid;
+                }), invalidated.end());
+                BOOST_REQUIRE(batch.WritePaymasterProviderPool(invalidated));
+            }
+        }
+        const auto before_reconfirmation = history_database.m_records;
+        history_database.FailCommit();
+        BOOST_CHECK(!history_store.ReconcileProviderPoolSuccessors(repaired_successors, error));
+        history_database.ClearFailureInjection();
+        BOOST_CHECK(history_database.m_records == before_reconfirmation);
+        BOOST_REQUIRE_MESSAGE(history_store.ReconcileProviderPoolSuccessors(repaired_successors, error), error);
+        BOOST_CHECK_EQUAL(repaired_successors, 1U);
+        LOCK(history_wallet.cs_wallet);
+        BOOST_REQUIRE(WalletBatch{history_wallet.GetDatabase()}.ReadPaymasterProviderPool(invalidated));
+        BOOST_REQUIRE_MESSAGE(paymaster_app::RefreshPoolConfirmationHeights(history_wallet, invalidated, error), error);
+        const auto restored = std::find_if(invalidated.begin(), invalidated.end(), [&](const auto& entry) {
+            return entry.outpoint.hash == commit.final_txid;
+        });
+        BOOST_REQUIRE(restored != invalidated.end());
+        BOOST_CHECK(restored->state == PoolEntryState::AVAILABLE);
+    }
     environment.identity_key = provider_key;
     environment.identity = identity;
     environment.policy.maximum_network_fee = DGBSatoshis{COIN};

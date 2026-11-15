@@ -28,6 +28,7 @@
 #include <tinyformat.h>
 #include <util/time.h>
 #include <version.h>
+#include <wallet/paymasterconflicts.h>
 #include <wallet/paymasterpsbt.h>
 #include <wallet/wallet.h>
 #include <wallet/walletdb.h>
@@ -636,17 +637,23 @@ bool MakeProviderPoolRoom(std::vector<ProviderPoolEntry>& entries,
                           size_t additional,
                           std::string& error)
 {
+    return MakeProviderPoolRoom(entries, additional, error, {});
+}
+
+bool MakeProviderPoolRoom(std::vector<ProviderPoolEntry>& entries,
+                          size_t additional, std::string& error,
+                          const std::set<COutPoint>& retained)
+{
     while (entries.size() + additional > 256) {
         const auto oldest = std::min_element(
             entries.begin(), entries.end(),
-            [](const ProviderPoolEntry& lhs, const ProviderPoolEntry& rhs) {
-                if (IsActiveProviderPoolState(lhs.state) !=
-                    IsActiveProviderPoolState(rhs.state)) {
-                    return !IsActiveProviderPoolState(lhs.state);
-                }
+            [&](const ProviderPoolEntry& lhs, const ProviderPoolEntry& rhs) {
+                const bool lhs_protected = IsActiveProviderPoolState(lhs.state) || retained.count(lhs.outpoint);
+                const bool rhs_protected = IsActiveProviderPoolState(rhs.state) || retained.count(rhs.outpoint);
+                if (lhs_protected != rhs_protected) return !lhs_protected;
                 return lhs.updated_at < rhs.updated_at;
             });
-        if (oldest == entries.end() || IsActiveProviderPoolState(oldest->state)) {
+        if (oldest == entries.end() || IsActiveProviderPoolState(oldest->state) || retained.count(oldest->outpoint)) {
             error = "PAYMASTER_POOL_TOO_LARGE";
             return false;
         }
@@ -680,6 +687,10 @@ bool RegisterProviderPoolSuccessors(CWallet& wallet, const ProviderPoolSuccessor
     changed = false;
     AssertLockHeld(wallet.cs_wallet);
     WalletBatch records{wallet.GetDatabase()};
+    PaymasterConflictClosure closure;
+    const auto closure_status = records.ReadPaymasterConflictClosureWithStatus(commit.final_txid, closure);
+    if (closure_status == DatabaseReadStatus::FOUND) return true; // Permanently closed work cannot acquire successors again.
+    if (closure_status != DatabaseReadStatus::NOT_FOUND) { error = "PAYMASTER_CONFLICT_DATABASE_READ"; return false; }
     if (transaction.GetHash() != commit.final_txid || plan.service_fee.value < 0 ||
         plan.service_fee.value > MAX_DD_OUTPUT_CENTS ||
         plan.carrier_input.has_value() != plan.carrier_output.has_value()) {
@@ -758,6 +769,12 @@ bool RegisterProviderPoolSuccessors(CWallet& wallet, const ProviderPoolSuccessor
         }
     }
 
+    std::optional<bool> reconfirmed;
+    const auto exact_reconfirmed = [&] {
+        if (reconfirmed) return *reconfirmed;
+        reconfirmed = ObservePaymasterPoolSuccessorReconfirmation(wallet, transaction);
+        return *reconfirmed;
+    };
     // Neither a consumed successor nor an explicitly released one becomes
     // new capacity when its bounded inventory row has been retired.
     for (auto it = successors.begin(); it != successors.end();) {
@@ -767,7 +784,9 @@ bool RegisterProviderPoolSuccessors(CWallet& wallet, const ProviderPoolSuccessor
             error = "PAYMASTER_POOL_HISTORY_READ";
             return false;
         }
-        if (wallet.IsSpent(it->outpoint) || status == DatabaseReadStatus::FOUND) it = successors.erase(it);
+        if (wallet.IsSpent(it->outpoint) || (status == DatabaseReadStatus::FOUND &&
+            (retired.state != PoolEntryState::INVALIDATED || !retired.reservation_id.IsNull() ||
+             !SamePoolSuccessor(retired, *it) || !exact_reconfirmed()))) it = successors.erase(it);
         else ++it;
     }
     size_t missing{0};
@@ -781,6 +800,13 @@ bool RegisterProviderPoolSuccessors(CWallet& wallet, const ProviderPoolSuccessor
         } else if (!SamePoolSuccessor(*existing, successor)) {
             error = "PAYMASTER_PROVIDER_SUCCESSOR_CONFLICT";
             return false;
+        } else if (existing->state == PoolEntryState::INVALIDATED && existing->reservation_id.IsNull()) {
+            // Reversible observations may recover only against this exact
+            // confirmed final. Released/spent/history rows stay terminal.
+            if (exact_reconfirmed()) {
+                *existing = successor;
+                changed = true;
+            }
         }
     }
     if (!MakeProviderPoolRoom(entries, missing, error)) return false;
@@ -1055,6 +1081,34 @@ bool ValidateRetainedProviderRecoveryBudget(WalletBatch& batch,
     return ValidateProviderAlternativeRecoveryBudgetAuthorizationImpl(recovery,
         nullptr, retained, BudgetReservationState::SPENT,
         /*allow_historical_policy=*/true, error);
+}
+
+bool ValidateProviderConflictBudget(CWallet& wallet, WalletBatch& batch, const ProviderAttempt& attempt,
+    const ProviderCommitRecord& commit, const PaymasterInputConflictProof& proof, std::string& error)
+{
+    ProviderCommitArtifacts artifacts;
+    if (!ValidateProviderCommitArtifacts(attempt, commit, artifacts, error) ||
+        !proof.Recheck(wallet, CTransaction{artifacts.final_transaction}, commit.provider_id,
+            (HashWriter{} << commit).GetHash(), error)) return false;
+    ProviderSafetyPolicy policy;
+    ProviderBudgetLedger ledger;
+    if (!batch.ReadPaymasterProviderSafetyPolicy(policy) || !batch.ReadPaymasterProviderBudgetLedger(ledger)) {
+        error = "PAYMASTER_INVALID_PROVIDER_BUDGET_STATE";
+        return false;
+    }
+    if (ValidateProviderBudgetState(attempt, policy, ledger, BudgetReservationState::SPENT,
+            /*allow_historical_policy=*/true, error)) return true;
+    ProviderCommitRecord aged;
+    if (!ReadAgedProviderCommit(batch, commit.commit_key, ledger, aged, error) || !SameCommit(aged, commit)) return false;
+    ProviderBudgetReservation evidence;
+    evidence.commit_key = commit.commit_key;
+    evidence.funding_model = attempt.provider_manifest.funding_model;
+    evidence.sponsorship_scope = attempt.provider_manifest.sponsorship_scope;
+    evidence.network_fee = attempt.provider_manifest.network_fee;
+    evidence.netgroup_bucket = attempt.provider_netgroup_bucket;
+    evidence.state = BudgetReservationState::SPENT;
+    return ValidateProviderBudgetReservationBinding(attempt.provider_manifest, attempt, evidence, policy,
+        BudgetReservationState::SPENT, /*allow_historical_policy=*/true, error);
 }
 
 // Exact equality helpers make retries idempotent. Reusing an identifier with

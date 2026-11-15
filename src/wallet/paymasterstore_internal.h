@@ -18,6 +18,7 @@
 #include <string_view>
 #include <vector>
 
+namespace wallet { class PaymasterInputConflictProof; }
 namespace wallet::paymaster_store::internal {
 using namespace DigiDollar::Paymaster;
 
@@ -59,6 +60,9 @@ std::string PersistedReadError(DatabaseReadStatus status,
 }
 
 std::string ProviderPoolReadError(const std::vector<ProviderPoolEntry>& entries);
+/** Exact current chain observation; uncertainty cannot revive an invalidated
+ * successor. Does not sign, broadcast or write financial authority. */
+bool ObservePaymasterPoolSuccessorReconfirmation(CWallet& wallet, const CTransaction& transaction);
 bool Abort(WalletBatch& batch, std::string& error, const char* code);
 /** Commit an existing wallet transaction together with the mandatory downgrade
  * fence when spending authority may exist. Publish flags only after success.
@@ -105,6 +109,8 @@ bool CheckIndexedClientAuthorizationEvidence(WalletBatch& batch, const PaymentSe
  * This predicate alone does not establish an active attempt or permit signing. */
 bool HasAcceptedClientManifest(const ProviderAttempt& attempt, int64_t observation_time);
 bool MakeProviderPoolRoom(std::vector<ProviderPoolEntry>& entries, size_t additional, std::string& error);
+bool MakeProviderPoolRoom(std::vector<ProviderPoolEntry>& entries, size_t additional, std::string& error,
+    const std::set<COutPoint>& retained);
 /** Read a disposition from the original inventory or its durable terminal
  * history. Preserve the original snapshot while pruning the working vector. */
 DatabaseReadStatus ReadProviderPoolDisposition(WalletBatch& batch,
@@ -170,6 +176,10 @@ bool ValidateRetainedProviderBudget(WalletBatch& batch,
                                     const ProviderSafetyPolicy& policy,
                                     const ProviderBudgetLedger& ledger,
                                     std::string& error);
+/** Closure-only budget proof; requires a freshly verified mature input
+ * conflict. Does not grant execution authority or change rolling accounting. */
+bool ValidateProviderConflictBudget(CWallet& wallet, WalletBatch& batch, const ProviderAttempt& attempt,
+    const ProviderCommitRecord& commit, const PaymasterInputConflictProof& proof, std::string& error);
 bool ValidateRetainedProviderRecoveryBudget(WalletBatch& batch,
                                             const AlternativeRecoveryRecord& recovery,
                                             const ProviderBudgetLedger& ledger,

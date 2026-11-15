@@ -6,6 +6,7 @@
 
 
 #include <wallet/paymasterintegration.h>
+#include <wallet/paymasterconflicts.h>
 #include <wallet/paymasterapplication_internal.h>
 #include <wallet/paymasterfinance.h>
 #include <paymaster/error.h>
@@ -115,10 +116,14 @@ void InitializePaymasterWallet(CWallet& wallet)
 
 bool ReconcilePaymasterSessionsAtTip(CWallet& wallet, int64_t now, std::string& error)
 {
+    size_t closed_conflicts{0};
+    std::string provider_error;
+    const bool provider_reconciled = ReconcilePaymasterProviderConflicts(wallet, now, closed_conflicts, provider_error);
     std::vector<uint256> closed_clients;
     const bool reconciled = PaymasterStore{wallet}.ReconcileFinalSessionsAtTip(now, closed_clients, error);
     for (const auto& session : closed_clients) ReleaseClosedClientConnections(wallet, session);
-    return reconciled;
+    if (!provider_reconciled) error = provider_error;
+    return reconciled && provider_reconciled;
 }
 
 void RunPeriodicPaymasterMaintenance(WalletContext& context, int64_t now)
@@ -130,14 +135,14 @@ void RunPeriodicPaymasterMaintenance(WalletContext& context, int64_t now)
     for (const std::shared_ptr<CWallet>& wallet : GetWallets(context)) {
         const bool succeeded = RunPaymasterBackgroundWork(context, *wallet, [&] {
             std::string error;
-            if (!DrainPaymasterEquivocationInbox(context, *wallet, error) ||
-                !ReconcilePaymasterSessionsAtTip(*wallet, now, error)) {
-                throw ApplicationError(ErrorKind::WALLET, error);
-            }
             size_t recovered_maintenance{0};
-            if (!ReconcilePaymasterProviderMaintenance(*wallet, recovered_maintenance, error)) {
-                throw ApplicationError(ErrorKind::WALLET, error);
-            }
+            const bool maintenance_ok = ReconcilePaymasterProviderMaintenance(*wallet, recovered_maintenance, error);
+            std::string first_error = error;
+            const bool inbox_ok = DrainPaymasterEquivocationInbox(context, *wallet, error);
+            if (first_error.empty() && !inbox_ok) first_error = error;
+            const bool sessions_ok = ReconcilePaymasterSessionsAtTip(*wallet, now, error);
+            if (first_error.empty() && !sessions_ok) first_error = error;
+            if (!maintenance_ok || !inbox_ok || !sessions_ok) throw ApplicationError(ErrorKind::WALLET, first_error);
             RunPaymasterPoolPreparation(context, *wallet);
         });
         all_equivocation_scans_succeeded &= succeeded;
