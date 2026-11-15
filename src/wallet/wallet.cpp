@@ -1225,7 +1225,7 @@ CWalletTx* CWallet::AddToWallet(CTransactionRef tx, const TxState& state, const 
     wtx.MarkDirty();
 
     // DigiDollar: Check if this is a DD transaction and track it
-    if (fInsertedNew && m_dd_wallet && DigiDollar::HasDigiDollarMarker(*tx)) {
+    if ((fInsertedNew || fUpdated) && m_dd_wallet && DigiDollar::HasDigiDollarMarker(*tx)) {
         if (LogAcceptCategory(BCLog::DIGIDOLLAR, BCLog::Level::Debug)) {
             WalletLogPrintf("DigiDollar: Calling ProcessIncomingTransaction for tx %s\n", hash.ToString());
         }

@@ -612,7 +612,9 @@ tracking before completion, including after a failed first insertion.
 The shared incoming-history callback delegates to a status-bearing operation.
 It writes a new receive row before publishing it in memory and verifies the
 serialized durable row on replay, preserving existing send/change classification,
-timestamps and comments. Exact Paymaster persistence consumes that status; a DD
+timestamps and comments. Ordinary new and updated DD transaction callbacks use
+this same operation, allowing a later native state update to repair a failed
+receive-history write. Exact Paymaster persistence consumes that status; a DD
 history/tracking failure retains the durable final as a retryable local wallet
 failure, with no synthetic payment conflict or successful completion.
 

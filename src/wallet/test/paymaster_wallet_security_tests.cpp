@@ -9269,6 +9269,10 @@ BOOST_AUTO_TEST_CASE(exact_wallet_persistence_requires_durable_receive_history)
     BOOST_CHECK_EQUAL(refused, 2U);
 
     database.m_refuse_write = {};
+    // The ordinary wallet callback also retries history when an existing
+    // transaction changes state; repair cannot depend on Paymaster replay.
+    BOOST_REQUIRE(m_wallet.AddToWallet(transaction, TxStateInactive{}));
+    BOOST_REQUIRE(WalletBatch{database}.ReadDDTransaction(txid, stored));
     BOOST_CHECK_MESSAGE(PersistExactPaymasterWalletTransaction(m_wallet, transaction, error), error);
     BOOST_REQUIRE(WalletBatch{database}.ReadDDTransaction(txid, stored));
     BOOST_CHECK(stored.incoming);
