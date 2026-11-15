@@ -4,6 +4,38 @@ There is **no complete current-revision release certification** in this record.
 The candidate below and historical checkpoints identify actual verification;
 implemented behavior alone does not establish release acceptance.
 
+## Approved Mint availability follow-up (2026-11-15)
+
+Baseline: `c4503a3c31`; operator-approved scope commit: `77f6180dcc`;
+implementation: `4501f09c59`.
+The last ownership-based Mint caller now uses the shared optional DGB
+availability snapshot. Unknown stays unavailable, including the initial form;
+pool/manual locks refresh collateral eligibility without changing ownership.
+Confirmation/unlock revalidation pauses unknown availability before construction.
+The obsolete ownership getter is removed after migrating every caller.
+
+| Actual local check | Result and scope |
+| --- | --- |
+| Qt | **26 distinct selected cases in 16 functions, exit 0**, Windows/Fusion; init/cleanup excluded. Includes pool/manual/zero/unknown balances, privacy, unchanged database/descriptors on refusal, availability loss during accepted unlock with relocking, wallet switching/destruction, Mint limits/tiers, eight unsupported-wallet rows, ordinary DGB sending and DD coin control, AUTO consent/binding and immutable preparation. The final partial link reruns the two extended Mint regressions and Mint privacy; other selections passed before the final initial-label change. |
+| Compilation | **7 changed/generated or layout-dependent translation units freshly compiled** with matching final source/object hashes: Mint, WalletModel, both changed Qt test units, unchanged Tab/Wave19 allocation consumers and regenerated Mint MOC. Both changed production units pass C++17 `/Zs`. MSVC 19.43/toolset 14.43, C++20 objects, Qt 5.15.10 static. Retained dependencies lack complete transitive rebuild provenance. |
+| Local controls | Working-tree dependency/cycle check, six boundary fixtures, change-record JSON and whitespace checks pass. The scope-only commit passes the previous trusted policy; implementation `4501f09c59` passes the trusted policy from approved scope `77f6180dcc`. No dependency, financial-validation or checkpoint rule was relaxed. |
+
+Final Qt partial-link SHA256:
+`539b2f4b83e7b22d701f9416030dd56ea3507f4b76f043ec6bf3aada13f3eea6`.
+Commands, complete failed/passing logs and source/object hashes remain in local
+ignored `.ai/implement-mint-c450/`, including `verification-final.json`.
+Retests exposed two Paymaster fixtures that used unpolled unknown balances as
+zero; they now establish known zero using actual manual locks, retaining all
+request/offer assertions. Corruption tests restore exact original rows, including
+an originally absent pool record, after proving the normal API refuses overwrite.
+
+Repository baseline, Qt/test/translation guidance and the canonical Paymaster
+boundaries/change records governed this extension. Wallet/daemon implementations
+are unchanged; native results below were not rerun. Full daemon/GUI rebuilds, complete suites,
+functional/platform matrices, sanitizers and Tidy were **not run** and remain
+operator/release checks in the
+[runbook](digidollar-paymaster-testing.md#independent-review-regressions).
+
 ## Independent review follow-up (2026-11-15)
 
 Baseline: `027ece20ef158d8034c604b633fb4ad69f4d0fed`; product code through
@@ -38,9 +70,9 @@ The functional cancellation assertion uses the actual provider attempt ID after
 provider signing and checks the shared financial snapshot oracle.
 
 Repository baseline, wallet/Qt/test guidance, translation policy and canonical
-Paymaster boundaries/change records governed the work. The legacy mint-widget
-ownership display is unchanged; mint collateral preflight uses explicit DGB
-availability. Complete daemon/GUI rebuilds, full native/functional/platform
+Paymaster boundaries/change records governed the work. At that checkpoint the
+legacy mint-widget ownership display was unchanged; the approved follow-up above
+migrates it. Complete daemon/GUI rebuilds, full native/functional/platform
 matrices, sanitizers and Tidy were **not run** and remain operator/release checks
 in the [runbook](digidollar-paymaster-testing.md#independent-review-regressions).
 

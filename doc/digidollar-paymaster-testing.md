@@ -1026,6 +1026,26 @@ preserve selected offers, refresh Send eligibility and distinguish unknown funds
 Corruption fixtures restore the exact injected raw row before normal cleanup;
 the normal pool API must still refuse to overwrite unreadable safety state.
 
+The approved Mint follow-up extends `mintValidationUpdatesOnBalanceChange` to
+check initial unknown, protected/manual locks, known zero, corrupt availability,
+wallet switching and model destruction. Ownership remains known; an unknown
+snapshot must pause Mint without changing database rows or descriptor indexes.
+`mintWidgetPreservesEncryptedWalletUnlockFlow` also loses availability during
+accepted unlock after both confirmations and requires relocking without a mint.
+Pair these with `privacyMintMaskTests`, `mintWidgetTests`,
+`mintWidgetUsesChainParamMintLimits`,
+`mintWidgetRejectsUnsupportedWalletBeforeConfirmation`,
+`ddTabRefreshesBalancesOnWalletSignal`, and the tier combo/ratio functions in
+`DigiDollarWave19WidgetTests`. Recompile direct Mint allocation/value consumers
+and its generated MOC after the optional snapshot changes class layout.
+
+For the migrated Paymaster callers, run
+`paymasterClientLiveSendProgressesAcrossAsyncPhases:auto_cancel` and `:auto_prepare`
+and all rows of `paymasterClientOfferSearchRequiresBalance`. The zero-DGB fixtures
+must establish known zero with real manual locks rather than use an unpolled
+unknown snapshot. Releasing fee-coin manual locks during preparation must retain
+the original request.
+
 The operator functional follow-up, using a freshly built changed daemon and CLI,
 is a multi-minute isolated Regtest run:
 
