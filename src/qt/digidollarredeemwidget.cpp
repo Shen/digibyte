@@ -558,9 +558,13 @@ void DigiDollarRedeemWidget::onRedeemClicked()
         return;
     }
 
-    // Get user's current DD balance (in cents)
-    CAmount ddBalanceCents = m_walletModel->getDigiDollarBalance();
-    double ddBalance = ddBalanceCents / 100.0;
+    const auto balances = m_walletModel->getDigiDollarBalanceSummary();
+    if (!balances.availability_known) {
+        Q_EMIT message(tr("Redemption unavailable"),
+            tr("DigiDollar balance is currently unavailable. Refresh the wallet status and retry."), resultMessageStyle(false));
+        return;
+    }
+    const double ddBalance = balances.available / 100.0;
 
     // Calculate required DD burn based on system health (ERR check)
     // Need to query system health to determine if ERR is active
@@ -1023,8 +1027,9 @@ bool DigiDollarRedeemWidget::validateRedeemable() const
     return std::abs(amount - m_redeemableAmount) < tolerance;
 }
 
-bool DigiDollarRedeemWidget::validateDDBalance() const
+bool DigiDollarRedeemWidget::validateDDBalance(QString* error) const
 {
+    if (error) error->clear();
     if (!m_positionFound || !m_walletModel) {
         return false;
     }
@@ -1032,9 +1037,12 @@ bool DigiDollarRedeemWidget::validateDDBalance() const
         return false;
     }
 
-    // Get user's current DD balance (in cents)
-    CAmount ddBalanceCents = m_walletModel->getDigiDollarBalance();
-    double ddBalance = ddBalanceCents / 100.0;
+    const auto balances = m_walletModel->getDigiDollarBalanceSummary();
+    if (!balances.availability_known) {
+        if (error) *error = tr("DigiDollar balance is currently unavailable. Refresh the wallet status and retry.");
+        return false;
+    }
+    const double ddBalance = balances.available / 100.0;
 
     // Calculate required DD burn based on system health
     double requiredDDBurn = m_positionDDMinted; // Default: normal redemption
@@ -1076,7 +1084,9 @@ bool DigiDollarRedeemWidget::validateDDBalance() const
     }
 
     // Check if user has enough DD balance
-    return ddBalance >= requiredDDBurn;
+    if (ddBalance >= requiredDDBurn) return true;
+    if (error) *error = tr("Insufficient DigiDollar balance to burn the required $DD for this redemption.");
+    return false;
 }
 
 bool DigiDollarRedeemWidget::canWalletSignRedemption() const
@@ -1114,9 +1124,8 @@ QString DigiDollarRedeemWidget::redeemDisabledReason() const
     if (!validateRedeemable()) {
         return tr("Amount must match the full redeemable DigiDollar amount for this vault.");
     }
-    if (!validateDDBalance()) {
-        return tr("Insufficient DigiDollar balance to burn the required $DD for this redemption.");
-    }
+    QString balance_error;
+    if (!validateDDBalance(&balance_error) && !balance_error.isEmpty()) return balance_error;
     return tr("This DigiDollar vault cannot be redeemed yet.");
 }
 

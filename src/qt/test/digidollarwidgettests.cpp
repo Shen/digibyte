@@ -651,6 +651,138 @@ void DigiDollarWidgetTests::overviewPaymasterReservationUsesConditionalBalanceBr
     QVERIFY(!balance_error.isEmpty());
 }
 
+void DigiDollarWidgetTests::ordinaryDigiDollarActionsPreserveAvailability()
+{
+    TestChain100Setup test;
+    auto wallet_loader = interfaces::MakeWalletLoader(*test.m_node.chain, *Assert(test.m_node.args));
+    test.m_node.wallet_loader = wallet_loader.get();
+    m_node.setContext(&test.m_node);
+    const auto wallet = SetupDescriptorsWallet(m_node, test, "qt-dd-ordinary-availability");
+    wallet->EnsureDDWallet();
+    auto* const dd_wallet = wallet->GetDDWallet();
+    QVERIFY(dd_wallet != nullptr);
+    if (RPCIsInWarmup(nullptr)) SetRPCWarmupFinished();
+
+    DigiDollarMiniGUI mini_gui(m_node);
+    mini_gui.initModelForWallet(m_node, wallet);
+    ScopedWalletRegistration registration(*m_node.walletLoader().context(), wallet);
+    const QString recipient = mini_gui.walletModel->getNewDigiDollarAddress("availability-test");
+    QVERIFY(!recipient.isEmpty());
+
+    DigiDollarRedeemWidget redeem;
+    redeem.setWalletModel(mini_gui.walletModel.get());
+    redeem.setClientModel(mini_gui.clientModel.get());
+    redeem.m_positionIdEdit->setText(QString::fromStdString(uint256::ONE.GetHex()));
+    redeem.m_positionFound = true;
+    redeem.m_positionBlocksRemaining = 0;
+    redeem.m_positionDDMinted = 100.0;
+    redeem.m_redeemableAmount = 100.0;
+    redeem.m_amountEdit->setText("100.00");
+
+    // A known zero still means insufficient funds. The same result applies
+    // when owned DD is excluded by a manual lock or the protected pool.
+    const auto check_insufficient = [&] {
+        const auto balances = mini_gui.walletModel->getDigiDollarBalanceSummary();
+        QVERIFY(balances.availability_known);
+        QCOMPARE(balances.available, CAmount{0});
+        const auto sent = mini_gui.walletModel->sendDigiDollar(recipient, 10000);
+        QCOMPARE(sent.status, WalletModel::AmountExceedsBalance);
+        QVERIFY(sent.reasonFailed.contains("Insufficient", Qt::CaseInsensitive));
+        QString error;
+        QVERIFY(!redeem.validateDDBalance(&error));
+        QVERIFY(error.contains("Insufficient", Qt::CaseInsensitive));
+        QVERIFY(redeem.redeemDisabledReason().contains("Insufficient", Qt::CaseInsensitive));
+    };
+    check_insufficient();
+
+    const COutPoint input{uint256::ONE, 1};
+    constexpr CAmount owned{100000};
+    dd_wallet->AddDDUTXO(input, owned);
+    QVERIFY(redeem.validateDDBalance());
+    {
+        LOCK(wallet->cs_wallet);
+        QVERIFY(wallet->LockCoin(input));
+    }
+    check_insufficient();
+    {
+        LOCK(wallet->cs_wallet);
+        QVERIFY(wallet->UnlockCoin(input));
+    }
+
+    DigiDollar::Paymaster::ProviderPoolEntry entry;
+    entry.outpoint = input;
+    entry.purpose = DigiDollar::Paymaster::PoolPurpose::OPERATIONAL;
+    entry.asset = DigiDollar::Paymaster::PoolAsset::DD_CARRIER;
+    entry.state = DigiDollar::Paymaster::PoolEntryState::AVAILABLE;
+    entry.carrier_value = DigiDollar::Paymaster::DDCents{owned};
+    TaprootBuilder builder;
+    builder.Finalize(XOnlyPubKey{test.coinbaseKey.GetPubKey()});
+    entry.script_pub_key = GetScriptForDestination(builder.GetOutput());
+    entry.confirmation_height = 1;
+    entry.updated_at = 1;
+    QVERIFY(wallet::WalletBatch{wallet->GetDatabase()}.WritePaymasterProviderPool({entry}));
+    check_insufficient();
+    const auto reserved = mini_gui.walletModel->getDigiDollarBalanceSummary();
+    QCOMPARE(reserved.confirmed_total, owned);
+    QCOMPARE(reserved.paymaster_reserved, owned);
+
+    // Corrupt safety classification preserves ownership without claiming a
+    // zero balance, prompting funding, opening confirmation or requesting keys.
+    entry.version = DigiDollar::Paymaster::ProviderPoolEntry::CURRENT_VERSION + 1;
+    QVERIFY(wallet->GetDatabase().MakeBatch()->Write(
+        wallet::DBKeys::PAYMASTER_PROVIDER_POOL,
+        std::vector<DigiDollar::Paymaster::ProviderPoolEntry>{entry}));
+    const auto unavailable = mini_gui.walletModel->getDigiDollarBalanceSummary();
+    QVERIFY(!unavailable.availability_known);
+    QCOMPARE(unavailable.confirmed_total, owned);
+    const auto transaction_count = WITH_LOCK(wallet->cs_wallet, return wallet->mapWallet.size());
+    const auto sent = mini_gui.walletModel->sendDigiDollar(recipient, 10000);
+    QCOMPARE(sent.status, WalletModel::TransactionCreationFailed);
+    QVERIFY(sent.reasonFailed.contains("unavailable", Qt::CaseInsensitive));
+    QVERIFY(!sent.reasonFailed.contains("Insufficient", Qt::CaseInsensitive));
+    QString error;
+    QVERIFY(!redeem.validateDDBalance(&error));
+    QVERIFY(error.contains("unavailable", Qt::CaseInsensitive));
+    QVERIFY(!redeem.redeemDisabledReason().contains("Insufficient", Qt::CaseInsensitive));
+    SecureString passphrase{"qt-dd-unavailable-redemption"};
+    QVERIFY(wallet->EncryptWallet(passphrase));
+    QVERIFY(wallet->IsLocked());
+    mini_gui.walletModel->updateStatus();
+    QSignalSpy unlocks(mini_gui.walletModel.get(), &WalletModel::requireUnlock);
+    QSignalSpy messages(&redeem, &DigiDollarRedeemWidget::message);
+    QSignalSpy completions(&redeem, &DigiDollarRedeemWidget::redemptionCompleted);
+    redeem.m_redeemButton->setEnabled(true); // Simulate an older available observation.
+    redeem.m_redeemButton->click();
+    QCOMPARE(messages.count(), 1);
+    QCOMPARE(messages.at(0).at(0).toString(), QString("Redemption unavailable"));
+    QVERIFY(messages.at(0).at(1).toString().contains("unavailable", Qt::CaseInsensitive));
+    QCOMPARE(unlocks.count(), 0);
+    QVERIFY(wallet->IsLocked());
+    QCOMPARE(completions.count(), 0);
+    QCOMPARE(WITH_LOCK(wallet->cs_wallet, return wallet->mapWallet.size()), transaction_count);
+    redeem.updateRedeemButtons();
+    QVERIFY(!redeem.m_redeemButton->isEnabled());
+    QVERIFY(redeem.m_redeemButton->toolTip().contains("unavailable", Qt::CaseInsensitive));
+    QVERIFY(mini_gui.walletModel->setWalletLocked(false, passphrase));
+    mini_gui.walletModel->updateStatus();
+    QVERIFY(!wallet->IsLocked());
+
+    // A fresh read after repair distinguishes reserved zero from spendable DD
+    // again; the UI does not retain an unavailable observation indefinitely.
+    entry.version = DigiDollar::Paymaster::ProviderPoolEntry::CURRENT_VERSION;
+    QVERIFY(wallet->GetDatabase().MakeBatch()->Write(
+        wallet::DBKeys::PAYMASTER_PROVIDER_POOL,
+        std::vector<DigiDollar::Paymaster::ProviderPoolEntry>{entry}));
+    check_insufficient();
+    QVERIFY(wallet::WalletBatch{wallet->GetDatabase()}.WritePaymasterProviderPool({}));
+    const auto available = mini_gui.walletModel->getDigiDollarBalanceSummary();
+    QVERIFY(available.availability_known);
+    QCOMPARE(available.available, owned);
+    QVERIFY(redeem.validateDDBalance());
+    redeem.updateRedeemButtons();
+    QVERIFY(redeem.m_redeemButton->isEnabled());
+}
+
 void DigiDollarWidgetTests::watchOnlyDigiDollarBalanceHiddenInWalletModel()
 {
 #ifdef Q_OS_MACOS
@@ -686,7 +818,9 @@ void DigiDollarWidgetTests::watchOnlyDigiDollarBalanceHiddenInWalletModel()
 
     DigiDollarMiniGUI mini_gui(m_node);
     mini_gui.initModelForWallet(m_node, wallet);
-    QCOMPARE(mini_gui.walletModel->getDigiDollarBalance(), 0);
+    const auto balances = mini_gui.walletModel->getDigiDollarBalanceSummary();
+    QVERIFY(balances.availability_known);
+    QCOMPARE(balances.available, CAmount{0});
     QCOMPARE(mini_gui.walletModel->getPendingDigiDollarBalance(), 0);
 }
 
@@ -2171,7 +2305,9 @@ void DigiDollarWidgetTests::redeemWidgetRefreshesWhenWalletUnlocks()
     QCoreApplication::processEvents();
 
     QCOMPARE(redeemWidget.m_positionBlocksRemaining, int64_t{0});
-    QCOMPARE(mini_gui.walletModel->getDigiDollarBalance(), CAmount{100000000});
+    const auto balances = mini_gui.walletModel->getDigiDollarBalanceSummary();
+    QVERIFY(balances.availability_known);
+    QCOMPARE(balances.available, CAmount{100000000});
     QVERIFY2(redeemWidget.validateAmount(), "unlock-refresh amount should validate");
     QVERIFY2(redeemWidget.validateRedeemable(), "unlock-refresh position should be redeemable");
     QVERIFY2(redeemWidget.validateDDBalance(), "unlock-refresh DD balance should cover redemption");
@@ -2429,14 +2565,18 @@ void DigiDollarWidgetTests::redeemWidgetCanonicalHealthDoesNotRequireCirculating
         ~RemoveTestWallet() { RemoveWallet(context, wallet, std::nullopt); }
     } remove_wallet{context, wallet};
 
+    if (RPCIsInWarmup(nullptr)) SetRPCWarmupFinished();
     const UniValue params(UniValue::VARR);
     bool supply_unavailable{false};
+    std::string supply_diagnostic{"Legacy token change must leave circulating supply unavailable; "};
     try {
-        mini_gui.walletModel->executeRpc("getdigidollarstats", params);
+        const UniValue stats = mini_gui.walletModel->executeRpc("getdigidollarstats", params);
+        supply_diagnostic += "RPC result: " + stats.write();
     } catch (const UniValue& error) {
         supply_unavailable = error["message"].get_str().find("invalid creating token metadata") != std::string::npos;
+        supply_diagnostic += "RPC error: " + error.write();
     }
-    QVERIFY2(supply_unavailable, "Legacy token change must leave circulating supply unavailable");
+    QVERIFY2(supply_unavailable, supply_diagnostic.c_str());
     const auto protection = mini_gui.walletModel->executeRpc("getprotectionstatus", params);
     QVERIFY(protection["next_block_health"]["ready"].get_bool());
     QVERIFY(protection["next_block_health"]["health_percentage"].getInt<int>() >= 100);

@@ -110,7 +110,7 @@ private:
     bool validatePositionId() const;
     bool validateAmount() const;
     bool validateRedeemable() const;
-    bool validateDDBalance() const;
+    bool validateDDBalance(QString* error = nullptr) const;
     bool canWalletSignRedemption() const;
     QString redeemDisabledReason() const;
 

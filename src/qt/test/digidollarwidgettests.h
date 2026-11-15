@@ -28,6 +28,7 @@ private Q_SLOTS:
     void overviewRpcErrorsKeepWaitingState();
     void overviewMalformedHealthDoesNotReuseSnapshot();
     void overviewPaymasterReservationUsesConditionalBalanceBreakdown();
+    void ordinaryDigiDollarActionsPreserveAvailability();
     void watchOnlyDigiDollarBalanceHiddenInWalletModel();
     void privateKeyDisabledWalletCannotGenerateDigiDollarAddress();
     void mintWidgetTests();

@@ -227,15 +227,13 @@ public:
         bool availability_known{true};
     };
 
-    // Get confirmed DigiDollar currently spendable by ordinary wallet actions.
-    CAmount getDigiDollarBalance() const;
-
     /** Read spendable DD away from Qt's event thread, retaining the wallet
      * until the read finishes. The callback runs on this model's thread. */
     using DigiDollarBalanceCallback = std::function<void(CAmount balance, QString error)>;
     void getDigiDollarBalanceAsync(DigiDollarBalanceCallback callback);
 
-    // Get a consistent balance breakdown for overview display.
+    // Get a consistent balance breakdown for ordinary wallet actions and display.
+    // Availability must be known before comparing the available amount with a payment.
     DigiDollarBalanceSummary getDigiDollarBalanceSummary() const;
 
     /** Read the Paymaster-aware balance breakdown and collateral off the GUI

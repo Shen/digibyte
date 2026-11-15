@@ -819,12 +819,15 @@ WalletModel::DigiDollarSendResult WalletModel::sendDigiDollar(const QString& add
         return DigiDollarSendResult(InvalidAmount, "", "Send amount must be positive");
     }
 
-    // Check if we have sufficient DigiDollar balance
-    CAmount currentBalance = getDigiDollarBalance();
-    if (amount > currentBalance) {
+    const auto balances = getDigiDollarBalanceSummary();
+    if (!balances.availability_known) {
+        return DigiDollarSendResult(TransactionCreationFailed, "",
+            tr("DigiDollar balance is currently unavailable. Refresh the wallet status and retry."));
+    }
+    if (amount > balances.available) {
         return DigiDollarSendResult(AmountExceedsBalance, "",
             QString("Insufficient DigiDollar balance. Available: %1, Requested: %2")
-                .arg(QString::number(currentBalance / 100.0, 'f', 2))
+                .arg(QString::number(balances.available / 100.0, 'f', 2))
                 .arg(QString::number(amount / 100.0, 'f', 2)));
     }
 
@@ -1366,29 +1369,6 @@ WalletModel::DigiDollarRedeemResult WalletModel::redeemDigiDollar(const QString&
 
     } catch (const std::exception& e) {
         return DigiDollarRedeemResult(TransactionCreationFailed, "", QString::fromStdString(e.what()));
-    }
-}
-
-CAmount WalletModel::getDigiDollarBalance() const
-{
-    // Query actual DigiDollar balance from wallet
-    // DD balance is tracked separately from regular DGB balance
-    // Balance is stored in cents (e.g., 10000 = $100.00 DD)
-
-    try {
-        if (m_wallet->privateKeysDisabled()) {
-            LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Qt: getDigiDollarBalance returning 0 for private-key-disabled wallet\n");
-            return 0;
-        }
-
-        const CAmount balance = getDigiDollarBalanceSummary().available;
-
-        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar Qt: getDigiDollarBalance returning %d cents\n", balance);
-        return balance;
-
-    } catch (const std::exception& e) {
-        LogPrintf("DigiDollar Qt: getDigiDollarBalance exception - %s\n", e.what());
-        return 0;
     }
 }
 
