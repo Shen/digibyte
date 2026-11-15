@@ -959,11 +959,18 @@ bool PaymasterStore::CompleteClientConfirmedFinal(const std::string& request_id,
     return PruneSession(request_id, error, 0, completed, &recovery, &*preflight.final_proof, transaction, now);
 }
 
+bool PaymasterStore::ReconcileFinalSessionsAtTip(int64_t now, std::string& error)
+{
+    std::vector<uint256> closed_clients;
+    return ReconcileFinalSessionsAtTip(now, closed_clients, error);
+}
+
 bool PaymasterStore::ReconcileFinalSessionsAtTip(int64_t now,
-                                                 std::string& error)
+    std::vector<uint256>& closed_clients, std::string& error)
 {
     LOG_TIME_MILLIS_WITH_CATEGORY("Paymaster session reconciliation", BCLog::BENCH);
     error.clear();
+    closed_clients.clear();
     if (now <= 0) {
         error = "PAYMASTER_INVALID_TRANSACTION_OBSERVATION";
         return false;
@@ -980,6 +987,7 @@ bool PaymasterStore::ReconcileFinalSessionsAtTip(int64_t now,
         return false;
     }
 
+    std::map<std::string, uint256> client_requests;
     std::vector<CTransactionRef> candidates;
     std::vector<std::string> pending_observations;
     std::set<uint256> scheduled_wtxids;
@@ -996,6 +1004,11 @@ bool PaymasterStore::ReconcileFinalSessionsAtTip(int64_t now,
             return false;
         }
         for (const PaymentSession& session : sessions) {
+            if (!session.provider_side && (session.state == SessionState::CONFIRMED ||
+                                          session.state == SessionState::CANCELED_SAFE)) {
+                client_requests.emplace(session.request_id, session.session_id);
+                closed_clients.push_back(session.session_id);
+            }
             if (session.provider_side && session.state == SessionState::FAILED &&
                 TimeDeltaExceeds(now, session.updated_at, CAPACITY_REPLAY_RETENTION_SECONDS) &&
                 pruned_unsigned < MAX_PROVIDER_SESSION_PRUNES_PER_PASS) {
@@ -1013,11 +1026,13 @@ bool PaymasterStore::ReconcileFinalSessionsAtTip(int64_t now,
                   (session.state == SessionState::CANCELED_SAFE ||
                    session.state == SessionState::CONFLICTED)))) {
                 pending_observations.push_back(session.request_id);
+                client_requests.emplace(session.request_id, session.session_id);
             }
             if (session.state == SessionState::FAILED ||
                 (session.final_txid.IsNull() && session.recovery_txid.IsNull())) {
                 continue;
             }
+            if (!session.provider_side) client_requests.emplace(session.request_id, session.session_id);
             ExactFinalArtifact payment_artifact;
             ExactFinalArtifact recovery_artifact;
             std::optional<ProviderAttempt> observed_attempt;
@@ -1043,12 +1058,29 @@ bool PaymasterStore::ReconcileFinalSessionsAtTip(int64_t now,
     for (const auto& request : pending_observations) {
         bool completed{false};
         if (!CompleteClientConfirmedFinal(request, now, completed, error)) return false;
+        if (completed) closed_clients.push_back(client_requests.at(request));
     }
     for (const CTransactionRef& candidate : candidates) {
         if (!ReconcileCurrentFinalTransaction(*candidate, true, now, error)) {
             return false;
         }
     }
+    // Include newly closed canonical records after observation and pruning.
+    // Transport consumers need no retained attempts or recovery IDs.
+    {
+        LOCK(m_wallet.cs_wallet);
+        for (const auto& [request_id, session_id] : client_requests) {
+            PaymentSession session;
+            if (!GetSessionByRequestId(request_id, session)) {
+                error = "PAYMASTER_SESSION_DATABASE_READ";
+                return false;
+            }
+            if (!session.provider_side && (session.state == SessionState::CONFIRMED ||
+                session.state == SessionState::CANCELED_SAFE)) closed_clients.push_back(session_id);
+        }
+    }
+    std::sort(closed_clients.begin(), closed_clients.end());
+    closed_clients.erase(std::unique(closed_clients.begin(), closed_clients.end()), closed_clients.end());
     page.Complete(next);
     return true;
 }

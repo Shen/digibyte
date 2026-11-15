@@ -113,6 +113,14 @@ void InitializePaymasterWallet(CWallet& wallet)
     }
 }
 
+bool ReconcilePaymasterSessionsAtTip(CWallet& wallet, int64_t now, std::string& error)
+{
+    std::vector<uint256> closed_clients;
+    const bool reconciled = PaymasterStore{wallet}.ReconcileFinalSessionsAtTip(now, closed_clients, error);
+    for (const auto& session : closed_clients) ReleaseClosedClientConnections(wallet, session);
+    return reconciled;
+}
+
 void RunPeriodicPaymasterMaintenance(WalletContext& context, int64_t now)
 {
     // Reconcile durable observations and continue explicitly authorized finite
@@ -123,7 +131,7 @@ void RunPeriodicPaymasterMaintenance(WalletContext& context, int64_t now)
         const bool succeeded = RunPaymasterBackgroundWork(context, *wallet, [&] {
             std::string error;
             if (!DrainPaymasterEquivocationInbox(context, *wallet, error) ||
-                !PaymasterStore{*wallet}.ReconcileFinalSessionsAtTip(now, error)) {
+                !ReconcilePaymasterSessionsAtTip(*wallet, now, error)) {
                 throw ApplicationError(ErrorKind::WALLET, error);
             }
             size_t recovered_maintenance{0};

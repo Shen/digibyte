@@ -143,6 +143,14 @@ struct ProviderCommitRecoveryResult {
 DigiDollar::Paymaster::DirectKey PaymentChannelKey(
     const CWallet& wallet, const DigiDollar::Paymaster::PaymentSession& session,
     const DigiDollar::Paymaster::PaymasterId& provider);
+DigiDollar::Paymaster::DirectKey RecoveryChannelKey(
+    const CWallet& wallet, const DigiDollar::Paymaster::AlternativeRecoveryRecord& recovery);
+/** Transport only: call after canonical client closure; no financial release. */
+void ReleaseClosedClientConnections(CWallet& wallet,
+    const DigiDollar::Paymaster::PaymentSession& session);
+void ReleaseClosedClientConnections(CWallet& wallet, const uint256& closed_session_id);
+bool CompleteClientConfirmedFinal(CWallet& wallet, PaymasterStore& store,
+    const std::string& request_id, int64_t now, bool& completed, std::string& error);
 const char* PaymasterTransportError(DigiDollar::Paymaster::DirectState state);
 std::optional<std::string> DigiDollarAddressForScript(const CScript& script);
 std::vector<unsigned char> SerializeQuoteRequest(

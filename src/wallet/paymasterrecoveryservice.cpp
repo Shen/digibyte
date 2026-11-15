@@ -600,8 +600,7 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
         if (!CheckPaymasterRecoveryServiceFee(wallet, recovery.recovery_response.manifest, error)) {
             throw ApplicationError(ErrorKind::WALLET, error);
         }
-        node->connman->ReleasePaymasterConnection({wallet.m_paymaster_transport_owner.GetHex(),
-            "recovery:" + recovery.recovery_id.GetHex(), true, recovery.recovery_provider_id});
+        node->connman->ReleasePaymasterConnection(RecoveryChannelKey(wallet, recovery));
         AlternativeRecoveryParameters parameters;
         AlternativeRecoveryTemplate trusted;
         PartiallySignedTransaction unsigned_psbt;
@@ -866,8 +865,7 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
                 throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_DIRECT_INBOX_ACK_CONFLICT");
             }
 
-            node->connman->ReleasePaymasterConnection({wallet.m_paymaster_transport_owner.GetHex(),
-                "recovery:" + recovery.recovery_id.GetHex(), true, recovery.recovery_provider_id});
+            node->connman->ReleasePaymasterConnection(RecoveryChannelKey(wallet, recovery));
 
             ExecuteDurableClientFinal(wallet, final_ref->GetHash(), now, context.paymaster);
             return make_result(recovery, RecoveryQueueState{}, true);
@@ -875,7 +873,7 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
         // Process/retain a received signed result before local completion can
         // fail. Without a result, deep local evidence replaces transport retry.
         bool completed{false};
-        if (!store.CompleteClientConfirmedFinal(session.request_id, now, completed, error))
+        if (!CompleteClientConfirmedFinal(wallet, store, session.request_id, now, completed, error))
             throw ApplicationError(ErrorKind::WALLET, error);
         if (completed) {
             if (!store.GetSessionByRequestId(session.request_id, session))
@@ -953,7 +951,7 @@ ClientRecoveryResult ResolvePaymasterSession(WalletContext& context, CWallet& ta
     if (action == "refresh") {
         bool locally_completed{false};
         std::string completion_error;
-        if (!store.CompleteClientConfirmedFinal(session.request_id, GetTime(), locally_completed, completion_error))
+        if (!CompleteClientConfirmedFinal(*wallet, store, session.request_id, GetTime(), locally_completed, completion_error))
             throw ApplicationError(ErrorKind::WALLET, completion_error);
         if (locally_completed && !store.GetSessionByRequestId(session.request_id, session))
             throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SESSION_DATABASE_READ");
@@ -1019,8 +1017,7 @@ ClientRecoveryResult ResolvePaymasterSession(WalletContext& context, CWallet& ta
             DigiDollar::Paymaster::AlternativeRecoveryRecord recovery;
             if (const auto* node = wallet->chain().context(); node && node->connman &&
                 store.GetAlternativeRecovery(session.request_id, recovery)) {
-                node->connman->RetryPaymasterConnection({wallet->m_paymaster_transport_owner.GetHex(),
-                    "recovery:" + recovery.recovery_id.GetHex(), true, recovery.recovery_provider_id});
+                node->connman->RetryPaymasterConnection(RecoveryChannelKey(*wallet, recovery));
             }
         }
         return ResolveAlternativePaymasterRecovery(

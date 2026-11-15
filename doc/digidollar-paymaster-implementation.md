@@ -541,6 +541,12 @@ bounded before element allocation (one capacity slot, 64 DGB/input proofs,
 four offers, three admission slots and 64-byte signatures); PSBT blobs use the
 existing 900 KiB envelope limit. Supported V5/V6 bytes and hashes are unchanged.
 
+`ApplyProviderFinanceContribution` in `paymaster/finance.cpp` is the common
+classification and checked-addition rule for v2 totals and legacy daily rebuilds.
+The legacy validator/upsert/rebuild implementation lives beside it, preserving
+its public API and binding/duplicate checks without a provider-to-finance include
+cycle. Recovery costs remain distinct from transfer and maintenance counts.
+
 Finance v2 stores immutable event identities individually, with transaction/time
 indexes, checked daily contributions and versioned totals/revision metadata in the
 existing wallet database. Wallet keys, balances and signed artifacts are not
@@ -603,6 +609,13 @@ when absent or different. A failed native write can leave memory behind; neither
 that entry nor its Paymaster marker establishes durability. Unreadable native
 rows retain retryable failure. Initialized DD wallets also repeat idempotent DD
 tracking before completion, including after a failed first insertion.
+The shared incoming-history callback delegates to a status-bearing operation.
+It writes a new receive row before publishing it in memory and verifies the
+serialized durable row on replay, preserving existing send/change classification,
+timestamps and comments. Exact Paymaster persistence consumes that status; a DD
+history/tracking failure retains the durable final as a retryable local wallet
+failure, with no synthetic payment conflict or successful completion.
+
 Historical execution uses the recorded acceptance time if the local clock has
 rolled back; fresh authorization keeps its current-time gate. Typed local mempool
 policy failures remain retryable for durable finals. A failed broadcast gets a
@@ -617,6 +630,18 @@ restores actions. Reputation get/clear adapters distinguish absent history from
 unreadable or unsupported persisted history; only absence returns an empty result.
 Typed finalization classification preserves the narrower pre-commit retry set
 and the additional retryable storage/observation failures for durable results.
+
+Client payment and alternative-recovery transport keys share the prefix
+`<session_id>:` under the wallet's existing transport owner. Canonical completion
+retires both channels and their retained outcomes through that prefix. Recovery
+completion captures the session identity before atomic detail pruning, so cleanup
+does not depend on a fallible post-commit artifact read. Tip/startup/periodic
+reconciliation emits closed client identities to the application adapter; the
+store has no connection-manager dependency. Pending authority and unrelated
+wallet/session outcomes remain retained. This cleanup changes transport capacity
+only; financial locks, fee accounting, safety-depth pruning and reorg validation
+remain governed by the store. Pruned client views expose the local dismissal
+contract in the [integration guide](digidollar-paymaster-integration.md).
 
 Client quote/payment entry points coordinate named call-local phases for saved
 authorization, offer selection, reservation, capacity, quote exchange and exact

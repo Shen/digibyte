@@ -151,6 +151,9 @@ DurablePaymasterCommitRecovery RecoverDurablePaymasterCommit(
     const DigiDollar::Paymaster::ProviderCommitRecord& commit,
     int64_t now);
 
+/** Reconcile canonical state, then retire transport for the closed clients. */
+bool ReconcilePaymasterSessionsAtTip(CWallet& wallet, int64_t now, std::string& error);
+
 /** Best-effort wallet-load recovery for every durable provider commit and for
  * each exact V14 PROVIDER_SIGNED attempt whose atomic commit was interrupted.
  * Promotion consumes only the already identity-signed private result envelope

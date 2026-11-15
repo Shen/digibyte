@@ -1939,7 +1939,7 @@ void CWallet::updatedBlockTip()
     }
 
     std::string paymaster_error;
-    if (!PaymasterStore{*this}.ReconcileFinalSessionsAtTip(
+    if (!ReconcilePaymasterSessionsAtTip(*this,
             GetTime(), paymaster_error)) {
         WalletLogPrintf(
             "Paymaster tip reconciliation failed: %s\n", paymaster_error);
@@ -3974,7 +3974,7 @@ void CWallet::postInitProcess()
             static_cast<unsigned int>(paymaster_recovery.errors.size()));
     }
     std::string paymaster_reconcile_error;
-    if (!PaymasterStore{*this}.ReconcileFinalSessionsAtTip(
+    if (!ReconcilePaymasterSessionsAtTip(*this,
             GetTime(), paymaster_reconcile_error)) {
         WalletLogPrintf(
             "Paymaster startup reconciliation failed: %s\n",

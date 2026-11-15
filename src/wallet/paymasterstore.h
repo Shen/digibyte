@@ -824,6 +824,11 @@ public:
      * the current wallet view. Intended for startup and updated-tip hooks so
      * reorg handling does not depend on notification order. */
     bool ReconcileFinalSessionsAtTip(int64_t now, std::string& error);
+    /** Canonical closure notifications for application transport cleanup.
+     * Partial notifications survive a later read failure; they grant no
+     * financial authority and delivery is idempotent. */
+    bool ReconcileFinalSessionsAtTip(int64_t now,
+        std::vector<uint256>& closed_clients, std::string& error);
 
     /** Prune validated terminal history, retaining signed finals and fees if
      * their current exact wallet observation is below the safety depth. */

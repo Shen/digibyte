@@ -878,7 +878,16 @@ RPC requests. Finance caching and persistence are described in the
 exact transaction APIs in `paymasterprovider.h`, shares durable client payment and
 recovery execution across result intake, retries and startup. The store's common
 broadcast validator remains the financial authority. Tip reconciliation schedules
-identities and rechecks current wallet observations at mutation and pruning.
+identities and rechecks current wallet observations at mutation and pruning. It
+also emits canonical closed-client identities to `ReconcilePaymasterSessionsAtTip`;
+the application retires payment/recovery transport under their common session
+prefix. `RecoveryChannelKey` and `PaymentChannelKey` share that owner/prefix.
+`IsPrunedClientSession` verifies a compacted closure before `LoadClientSessionView`
+exposes `pruned_session`/`dismiss`; it never reconstructs payment proof.
+`paymaster/finance.cpp` owns legacy finance validation/upsert/daily rebuilds as
+well as the common `ApplyProviderFinanceContribution` rule. Material carrier-slot
+release uses `WritePaymasterProviderBackupReminder` from `paymasteridentity.cpp`
+in the same pool/policy transaction.
 Inbound processing uses `ValidateAlternativeRecoverySubmitPayload` in
 `src/paymaster/recovery.cpp` after reconstructing trusted local state; the full
 validator retains chainstate checks. Permanent peer rejection and retained local

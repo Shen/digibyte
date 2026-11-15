@@ -169,6 +169,44 @@ DigiDollar::Paymaster::DirectKey PaymentChannelKey(
             session.session_id.GetHex() + ":" + provider.GetHex(), false, provider};
 }
 
+DigiDollar::Paymaster::DirectKey RecoveryChannelKey(
+    const CWallet& wallet, const AlternativeRecoveryRecord& recovery)
+{
+    return {wallet.m_paymaster_transport_owner.GetHex(),
+            recovery.session_id.GetHex() + ":recovery:" + recovery.recovery_id.GetHex(),
+            true, recovery.recovery_provider_id};
+}
+
+void ReleaseClosedClientConnections(CWallet& wallet, const uint256& closed_session_id)
+{
+    if (closed_session_id.IsNull()) return;
+    if (const auto* node = wallet.chain().context(); node && node->connman)
+        node->connman->CancelPaymasterOperation(wallet.m_paymaster_transport_owner.GetHex(), closed_session_id.GetHex() + ":");
+}
+
+void ReleaseClosedClientConnections(CWallet& wallet, const PaymentSession& session)
+{
+    if (!session.provider_side && (session.state == SessionState::CONFIRMED ||
+        session.state == SessionState::CANCELED_SAFE)) ReleaseClosedClientConnections(wallet, session.session_id);
+}
+
+bool CompleteClientConfirmedFinal(CWallet& wallet, PaymasterStore& store,
+    const std::string& request_id, int64_t now, bool& completed, std::string& error)
+{
+    completed = false;
+    PaymentSession session;
+    if (!store.GetSessionByRequestId(request_id, session)) {
+        error = "PAYMASTER_SESSION_DATABASE_READ";
+        return false;
+    }
+    if (!store.CompleteClientConfirmedFinal(request_id, now, completed, error)) return false;
+    // Capture identity before atomic pruning. No fallible post-commit reread
+    // may prevent transport retirement after canonical completion succeeded.
+    if (completed) ReleaseClosedClientConnections(wallet, session.session_id);
+    else if (store.GetSessionByRequestId(request_id, session)) ReleaseClosedClientConnections(wallet, session);
+    return true;
+}
+
 const char* PaymasterTransportError(DigiDollar::Paymaster::DirectState state)
 {
     using DigiDollar::Paymaster::DirectState;
@@ -197,6 +235,7 @@ std::optional<std::string> DigiDollarAddressForScript(const CScript& script)
 bool ReconcileConfirmedClientPayment(
     CWallet& wallet, PaymentSession& session, ProviderAttempt& attempt)
 {
+    ReleaseClosedClientConnections(wallet, session);
     if (session.provider_side || session.attempt_ids.empty() ||
         session.attempt_ids.back() != attempt.attempt_id ||
         attempt.user_signed_psbt.empty() || !attempt.final_transaction.empty() ||
@@ -267,8 +306,7 @@ bool ReconcileConfirmedClientPayment(
             std::string history_error;
             if (!store.ReconcileClientPaymentHistory(session.request_id, history_error))
                 wallet.WalletLogPrintf("Paymaster observed payment history update deferred: %s\n", history_error);
-            if (const auto* node = wallet.chain().context(); node && node->connman)
-                node->connman->ReleasePaymasterConnection(PaymentChannelKey(wallet, session, attempt.provider_id));
+            ReleaseClosedClientConnections(wallet, session);
             return true;
         }
     }
@@ -1018,8 +1056,7 @@ bool QueueRecoveryMessage(WalletContext& context,
         error = "PAYMASTER_NODE_CONTEXT_UNAVAILABLE";
         return false;
     }
-    const DirectKey channel{wallet.m_paymaster_transport_owner.GetHex(),
-                            "recovery:" + recovery.recovery_id.GetHex(), true, recovery.recovery_provider_id};
+    const DirectKey channel = RecoveryChannelKey(wallet, recovery);
     const auto transport = node->connman->RequestPaymasterConnection(
         channel, endpoint, recovery.privacy_profile == PrivacyProfile::HIGH);
     state.connection_pending = transport.Pending();
@@ -1655,6 +1692,7 @@ ClientFinalExecutionResult ExecuteDurableClientFinal(
             observation.presence == ExactFinalTransactionPresence::MEMPOOL, now, error)) {
         throw ApplicationError(ErrorKind::WALLET, error);
     }
+    if (store.GetSessionByRequestId(session.request_id, session)) ReleaseClosedClientConnections(wallet, session);
     result.already_confirmed = observation.presence == ExactFinalTransactionPresence::CONFIRMED;
     return result;
 }

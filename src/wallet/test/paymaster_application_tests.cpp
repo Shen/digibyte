@@ -18,6 +18,9 @@
 #include <index/txindex.h>
 #include <key.h>
 #include <netbase.h>
+#include <net.h>
+#include <net_processing.h>
+#include <test/util/net.h>
 #include <paymaster/directory.h>
 #include <script/standard.h>
 #include <streams.h>
@@ -1695,6 +1698,54 @@ BOOST_FIXTURE_TEST_CASE(withdrawal_preview_replacement_preserves_independent_sig
     BOOST_REQUIRE(batch.ReadPaymasterProviderPool(pool));
     BOOST_CHECK(pool.front().state == PoolEntryState::AVAILABLE);
     BOOST_CHECK(pool.front().reservation_id.IsNull());
+}
+
+BOOST_FIXTURE_TEST_CASE(closed_client_transport_retires_payment_and_recovery_without_capacity_leak, WalletTestingSetup)
+{
+    auto& connman = static_cast<ConnmanTestMsg&>(*m_node.connman);
+    CConnman::Options options;
+    options.m_msgproc = m_node.peerman.get();
+    options.nLocalServices = ServiceFlags{NODE_NETWORK | NODE_P2P_V2};
+    options.nMaxConnections = 3;
+    options.m_max_outbound_full_relay = 1;
+    options.paymaster_outbound = 1;
+    connman.Init(options);
+    const auto endpoint = LookupNumeric("8.8.8.8", 12025);
+    PaymentSession unresolved;
+    unresolved.session_id = uint256S("f00");
+    unresolved.state = SessionState::PENDING_PROVIDER;
+    const auto retained = PaymentChannelKey(m_wallet, unresolved, uint256::ONE);
+    BOOST_REQUIRE(connman.RequestPaymasterConnection(retained, endpoint, false).state == DirectState::QUEUED);
+    const DirectKey other_wallet{"other-wallet", retained.operation, false, retained.provider_id};
+    BOOST_REQUIRE(connman.RequestPaymasterConnection(other_wallet, endpoint, false).state == DirectState::QUEUED);
+    BOOST_CHECK(!connman.ClaimPaymasterTestConnection(DirectNow() + DIRECT_WAIT_MS + 1));
+    const auto before = GetMockableDatabase(m_wallet).m_records;
+    for (unsigned index = 1; index <= 300; ++index) {
+        PaymentSession session;
+        session.session_id = uint256S(strprintf("%064x", index));
+        session.state = SessionState::PENDING_PROVIDER;
+        AlternativeRecoveryRecord recovery;
+        recovery.session_id = session.session_id;
+        recovery.recovery_id = uint256S(strprintf("%064x", index + 1000));
+        recovery.recovery_provider_id = uint256::ONE;
+        const auto payment = PaymentChannelKey(m_wallet, session, uint256::ONE);
+        const auto recovery_key = RecoveryChannelKey(m_wallet, recovery);
+        BOOST_REQUIRE(connman.RequestPaymasterConnection(payment, endpoint, false).state == DirectState::QUEUED);
+        BOOST_REQUIRE(connman.RequestPaymasterConnection(recovery_key, endpoint, false).state == DirectState::QUEUED);
+        BOOST_CHECK(!connman.ClaimPaymasterTestConnection(DirectNow() + DIRECT_WAIT_MS + 1));
+        ReleaseClosedClientConnections(m_wallet, session);
+        BOOST_CHECK(connman.RequestPaymasterConnection(payment, endpoint, false).state == DirectState::EXPIRED);
+        BOOST_CHECK(connman.RequestPaymasterConnection(recovery_key, endpoint, false).state == DirectState::EXPIRED);
+        session.state = index % 2 ? SessionState::CONFIRMED : SessionState::CANCELED_SAFE;
+        ReleaseClosedClientConnections(m_wallet, session);
+        ReleaseClosedClientConnections(m_wallet, session); // Idempotent terminal delivery.
+        BOOST_REQUIRE(connman.RequestPaymasterConnection(payment, endpoint, false).state == DirectState::QUEUED);
+        BOOST_REQUIRE(connman.RequestPaymasterConnection(recovery_key, endpoint, false).state == DirectState::QUEUED);
+        ReleaseClosedClientConnections(m_wallet, session);
+    }
+    BOOST_CHECK(connman.RequestPaymasterConnection(retained, endpoint, false).state == DirectState::EXPIRED);
+    BOOST_CHECK(connman.RequestPaymasterConnection(other_wallet, endpoint, false).state == DirectState::EXPIRED);
+    BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == before); // No financial side effects.
 }
 
 BOOST_AUTO_TEST_SUITE_END()

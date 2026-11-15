@@ -35,6 +35,8 @@
 #include <script/standard.h>
 #include <streams.h>
 #include <test/util/index.h>
+#include <test/util/net.h>
+#include <wallet/paymasterintegration.h>
 #include <test/util/mining.h>
 #include <txmempool.h>
 #include <util/readwritefile.h>
@@ -7536,7 +7538,8 @@ static void ExerciseClientRecoveryResult(ClientRecoveryReadSetup& setup, bool co
                                          bool exercise_quote_intake = false,
                                          bool observe_without_result = false,
                                          bool permanent_provider_loss = false,
-                                         bool exercise_payment_executor = false)
+                                         bool exercise_payment_executor = false,
+                                         bool exercise_background_cleanup = false)
 {
     auto& m_node = setup.m_node;
     auto& context = setup.context;
@@ -8083,6 +8086,23 @@ static void ExerciseClientRecoveryResult(ClientRecoveryReadSetup& setup, bool co
     }
     if (permanent_provider_loss) {
         BOOST_REQUIRE(confirmed_before_result);
+        auto& connman = static_cast<ConnmanTestMsg&>(*m_node.connman);
+        CConnman::Options transport_options;
+        transport_options.m_msgproc = m_node.peerman.get();
+        transport_options.nLocalServices = ServiceFlags{NODE_NETWORK | NODE_P2P_V2};
+        transport_options.nMaxConnections = 3;
+        transport_options.m_max_outbound_full_relay = 1;
+        transport_options.paymaster_outbound = 1;
+        connman.Init(transport_options);
+        const auto endpoint = LookupNumeric("8.8.8.8", 12025);
+        const auto payment_key = paymaster_app::PaymentChannelKey(client, session, original_attempt.provider_id);
+        const auto recovery_key = paymaster_app::RecoveryChannelKey(client, recovery);
+        BOOST_REQUIRE(connman.RequestPaymasterConnection(payment_key, endpoint, false).state == DirectState::QUEUED);
+        const auto existing_transport = connman.RequestPaymasterConnection(recovery_key, endpoint, false).state;
+        BOOST_REQUIRE_MESSAGE(existing_transport == DirectState::QUEUED || existing_transport == DirectState::EXPIRED ||
+                              existing_transport == DirectState::FAILED,
+                              "unexpected recovery transport state " << int(existing_transport));
+        BOOST_CHECK(!connman.ClaimPaymasterTestConnection(DirectNow() + DIRECT_WAIT_MS + 1));
         const auto reserved_input = session.user_inputs.front();
         const auto recovery_fee_key = response.recovery_commit_key;
         bool completed{false};
@@ -8099,6 +8119,9 @@ static void ExerciseClientRecoveryResult(ClientRecoveryReadSetup& setup, bool co
         update_client_tip();
         BOOST_REQUIRE_MESSAGE(store.CompleteClientConfirmedFinal(session.request_id, GetTime(), completed, error), error);
         BOOST_CHECK(!completed); // 239 confirmations still retain every artifact.
+        BOOST_REQUIRE_MESSAGE(ReconcilePaymasterSessionsAtTip(client, GetTime(), error), error);
+        BOOST_CHECK(connman.RequestPaymasterConnection(payment_key, endpoint, false).state == DirectState::EXPIRED);
+        BOOST_CHECK(connman.RequestPaymasterConnection(recovery_key, endpoint, false).state == DirectState::EXPIRED);
         auto& chainstate = m_node.chainman->ActiveChainstate();
         auto* tip_before_reorg = WITH_LOCK(cs_main, return chainstate.m_chain.Tip());
         BlockValidationState disconnected;
@@ -8142,10 +8165,17 @@ static void ExerciseClientRecoveryResult(ClientRecoveryReadSetup& setup, bool co
             ++chain_locked_writes;
             if (previous_write_hook) previous_write_hook(key);
         };
+        if (exercise_background_cleanup)
+            BOOST_REQUIRE_MESSAGE(ReconcilePaymasterSessionsAtTip(client, GetTime(), error), error);
         const auto refreshed = paymaster_app::ResolvePaymasterSession(context, client,
             paymaster_app::ClientSessionLookup{session.request_id}, "refresh", {});
         failed_database.m_on_write = previous_write_hook;
         BOOST_CHECK_EQUAL(chain_locked_writes, 2U);
+        BOOST_CHECK(connman.RequestPaymasterConnection(payment_key, endpoint, false).state == DirectState::QUEUED);
+        BOOST_CHECK(connman.RequestPaymasterConnection(recovery_key, endpoint, false).state == DirectState::QUEUED);
+        connman.CancelPaymasterOperation(client.m_paymaster_transport_owner.GetHex(), session.session_id.GetHex() + ":");
+        BOOST_CHECK_EQUAL(refreshed.view.artifact, "pruned_session");
+        BOOST_CHECK(refreshed.view.allowed_actions == std::vector<std::string>({"refresh", "dismiss"}));
         BOOST_REQUIRE(refreshed.session.session);
         BOOST_CHECK(refreshed.session.session->session.state == SessionState::CANCELED_SAFE);
         BOOST_REQUIRE(store.GetSessionByRequestId(session.request_id, session));
@@ -8422,6 +8452,12 @@ BOOST_FIXTURE_TEST_CASE(client_recovery_permanent_provider_loss_settles_only_aft
                         ClientRecoveryReadSetup)
 {
     ExerciseClientRecoveryResult(*this, true, false, false, false, true);
+}
+
+BOOST_FIXTURE_TEST_CASE(client_recovery_background_completion_retires_both_transport_channels,
+                        ClientRecoveryReadSetup)
+{
+    ExerciseClientRecoveryResult(*this, true, false, false, false, true, false, true);
 }
 
 BOOST_FIXTURE_TEST_CASE(provider_confirmed_recovery_archives_only_after_reorg_safety_depth,
