@@ -2891,7 +2891,8 @@ PaymentResult AuthorizePaymasterPSBT(WalletContext& context, CWallet& target, Pa
             attempt, authorized_intent, authorized_quote,
             authorized_template, error) ||
         attempt.client_manifest.manifest_id.IsNull() ||
-        now > attempt.client_manifest.expires_at ||
+        (attempt.state == AttemptState::QUOTED &&
+         !IsPaymasterAuthorizationCurrent(attempt.client_manifest.expires_at, now)) ||
         !ValidateClientAuthorizationManifest(
             attempt.client_manifest, authorized_intent, authorized_quote,
             attempt.capacity_snapshot, authorized_template, error)) {
@@ -2960,7 +2961,7 @@ PaymentResult AuthorizePaymasterPSBT(WalletContext& context, CWallet& target, Pa
         } else {
             throw ApplicationError(ErrorKind::WALLET, "Paymaster attempt is not awaiting a user signature");
         }
-    } else if (operation_now > attempt.quote_expires_at) {
+    } else if (!IsPaymasterAuthorizationCurrent(attempt.quote_expires_at, operation_now)) {
         throw ApplicationError(ErrorKind::WALLET, "Paymaster quote expired");
     }
 
@@ -3020,8 +3021,8 @@ PaymentResult AuthorizePaymasterPSBT(WalletContext& context, CWallet& target, Pa
             signing_attempt.accepted_client_manifest_id !=
                 signing_attempt.client_manifest.manifest_id ||
             signing_attempt.client_manifest_accepted_at <= 0 ||
-            std::max(operation_now, signing_attempt.updated_at) >
-                signing_attempt.client_manifest.expires_at ||
+            !IsPaymasterAuthorizationCurrent(signing_attempt.client_manifest.expires_at,
+                std::max(operation_now, signing_attempt.updated_at)) ||
             !LoadAttemptAuthorizationArtifacts(
                 signing_attempt, signing_intent, signing_quote,
                 signing_template, error) ||
@@ -3112,8 +3113,10 @@ PaymentResult AuthorizePaymasterPSBT(WalletContext& context, CWallet& target, Pa
                     attempt.client_manifest.service_fee, error) ||
                 !SignCollaborativePSBTForParty(*wallet, candidate, signing_template,
                     DigiDollar::Paymaster::SigningParty::USER,
+                    // The signer accepts an inclusive last-valid second.
+                    // All three fresh authority deadlines are exclusive.
                     std::min({attempt.quote_expires_at, attempt.client_manifest.expires_at,
-                              signing_capacity_proof.expires_at - 1}), error)) {
+                              signing_capacity_proof.expires_at}) - 1, error)) {
                 throw ApplicationError(ErrorKind::WALLET,
                     error.empty() ? "PAYMASTER_CLIENT_AUTHORIZATION_STATE" : error);
             }

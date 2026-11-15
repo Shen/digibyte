@@ -3238,11 +3238,13 @@ BOOST_AUTO_TEST_CASE(client_attempt_artifacts_and_authorization_are_append_only_
         request_id, quoted.attempt_id, uint256S("16"), 106, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_AUTHORIZATION_COMMITMENT_MISMATCH");
     BOOST_CHECK(database.m_records == before_client_acceptance);
-    BOOST_CHECK(!store.AcceptClientAuthorization(
-        request_id, quoted.attempt_id, quoted.client_manifest.manifest_id,
-        121, error));
-    BOOST_CHECK_EQUAL(error, "PAYMASTER_CLIENT_AUTHORIZATION_EXPIRED");
-    BOOST_CHECK(database.m_records == before_client_acceptance);
+    for (const int64_t expired_at : {int64_t{120}, int64_t{121}}) {
+        BOOST_CHECK(!store.AcceptClientAuthorization(
+            request_id, quoted.attempt_id, quoted.client_manifest.manifest_id,
+            expired_at, error));
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_CLIENT_AUTHORIZATION_EXPIRED");
+        BOOST_CHECK(database.m_records == before_client_acceptance);
+    }
 
     ClientFeeLedger orphan_fee_ledger{quote_client_ledger};
     orphan_fee_ledger.reservations.push_back(

@@ -1165,12 +1165,9 @@ bool PaymasterStore::AcceptClientAuthorization(
 
     const int64_t effective_now =
         std::max(now, std::max(session.updated_at, attempt.updated_at));
-    if (attempt.quote_expires_at <= 0 ||
-        attempt.client_manifest.expires_at <= 0 ||
-        attempt.capacity_snapshot.expires_at <= 0 ||
-        effective_now > attempt.quote_expires_at ||
-        effective_now > attempt.client_manifest.expires_at ||
-        effective_now > attempt.capacity_snapshot.expires_at) {
+    if (!IsPaymasterAuthorizationCurrent(attempt.quote_expires_at, effective_now) ||
+        !IsPaymasterAuthorizationCurrent(attempt.client_manifest.expires_at, effective_now) ||
+        !IsPaymasterAuthorizationCurrent(attempt.capacity_snapshot.expires_at, effective_now)) {
         error = "PAYMASTER_CLIENT_AUTHORIZATION_EXPIRED";
         return false;
     }

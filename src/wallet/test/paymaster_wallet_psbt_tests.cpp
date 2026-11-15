@@ -167,6 +167,16 @@ BOOST_AUTO_TEST_CASE(wallet_with_both_keys_signs_only_requested_role)
     }
 
     PartiallySignedTransaction psbt{trusted.psbt};
+    // A caller passes the last valid second to this inclusive signer. Fresh
+    // quotes must therefore subtract one from their exclusive expiry, even
+    // while a longer Capacity proof remains current.
+    {
+        const int64_t quote_expiry{GetTime()};
+        BOOST_CHECK(!SignCollaborativePSBTForParty(m_wallet, psbt, trusted,
+            SigningParty::USER, quote_expiry - 1, error));
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_SIGNING_AUTHORIZATION_EXPIRED");
+        BOOST_CHECK(SerializePaymasterTestArtifact(psbt) == SerializePaymasterTestArtifact(trusted.psbt));
+    }
     {
         const auto unchanged = SerializePaymasterTestArtifact(psbt);
         BOOST_CHECK(!SignCollaborativePSBTForParty(m_wallet, psbt, trusted,

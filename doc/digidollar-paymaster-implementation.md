@@ -211,6 +211,11 @@ wallet lock. Local persisted authority and fee policy are reloaded there;
 client signatures are persisted before releasing that lock. Chainstate/index
 validation stays outside it. The role-limited signer checks the supplied
 deadline again immediately before `FillPSBT`.
+Fresh client acceptance and signatures use an exclusive quote/manifest expiry:
+the expiry second cannot create new authority. The role-limited signer's
+inclusive last-valid-second argument is derived from that same boundary.
+Historical artifact validation and exact signed replay remain independent of
+fresh quote expiry.
 
 For normal provider payments, the first durable USER acceptance must precede
 capacity expiry and be within the quote deadline. An exact accepted retry uses

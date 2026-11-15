@@ -615,7 +615,7 @@ API: [RPC groups](doc/digidollar-paymaster.md) and [client contract](doc/digidol
 
 | Source | Responsibility |
 |---|---|
-| `src/paymaster/types.*`, `protocol.*`, `wire.*` | Records, commitments and bounded serialization. |
+| `src/paymaster/types.*`, `protocol.*`, `wire.*` | Records, commitments and bounded serialization. `IsPaymasterAuthorizationCurrent` owns the exclusive fresh-authorization expiry; historical artifact verification remains separate. |
 | `src/paymaster/txbuilder.*`, `psbt.*` | Collaborative transfer, exact manifest checks and the shared persisted provider-signature envelope decoder. `protocol.*` shares input/output arrangement and quote binding/resource/signature phases between provider and client trust boundaries. |
 | `src/paymaster/provider.*`, `provider_policy.*`, `reservation.*`, `sponsorship.*` | Admission, policies, slots and budgets. |
 | `src/paymaster/directory.*`, `validation.*`, `client.*`, `reputation.*`, `recovery.*` | Verified discovery, selection, retries and recovery. |

@@ -126,6 +126,14 @@ constexpr int64_t SaturatingAddSeconds(int64_t timestamp, int64_t seconds)
     return timestamp + seconds;
 }
 
+/** Fresh payment authority expires at the deadline, not one second later.
+ * Historical artifact verification and exact signed replay do not use this
+ * predicate: their authenticity survives expiry. */
+constexpr bool IsPaymasterAuthorizationCurrent(int64_t expires_at, int64_t now)
+{
+    return now > 0 && now < expires_at;
+}
+
 struct DDCents {
     int64_t value{0};
     SERIALIZE_METHODS(DDCents, obj) { READWRITE(obj.value); }

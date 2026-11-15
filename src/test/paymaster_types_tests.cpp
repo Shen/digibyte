@@ -17,6 +17,19 @@ using namespace DigiDollar::Paymaster;
 
 BOOST_AUTO_TEST_SUITE(paymaster_types_tests)
 
+BOOST_AUTO_TEST_CASE(fresh_authorization_deadlines_are_exclusive)
+{
+    for (const int64_t expiry : {int64_t{2}, int64_t{105}, std::numeric_limits<int64_t>::max()}) {
+        BOOST_CHECK(IsPaymasterAuthorizationCurrent(expiry, expiry - 1));
+        BOOST_CHECK(!IsPaymasterAuthorizationCurrent(expiry, expiry));
+        if (expiry < std::numeric_limits<int64_t>::max())
+            BOOST_CHECK(!IsPaymasterAuthorizationCurrent(expiry, expiry + 1));
+    }
+    BOOST_CHECK(!IsPaymasterAuthorizationCurrent(0, 1));
+    BOOST_CHECK(!IsPaymasterAuthorizationCurrent(10, 0));
+    BOOST_CHECK(!IsPaymasterAuthorizationCurrent(10, -1));
+}
+
 BOOST_AUTO_TEST_CASE(direct_endpoints_require_supported_network_and_explicit_port)
 {
     BOOST_CHECK(IsSupportedPaymasterEndpoint(LookupNumeric("8.8.8.8", 12025)));
