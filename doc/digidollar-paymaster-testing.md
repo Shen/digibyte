@@ -1001,7 +1001,7 @@ from the repository root with freshly built current test binaries (isolated
 wallets; seconds to a few minutes; require exit 0):
 
 ```powershell
-& ./build_msvc/x64/Release/test_digibyte.exe '--run_test=paymaster_wallet_security_tests/provider_conflict_proof_requires_exact_active_chain_input_and_safety_depth,provider_conflict_closure_preserves_budget_locks_and_native_checkpoint_recovery,client_refresh_accepts_late_payment_without_execution,client_refresh_accepts_late_recovery_without_execution,provider_user_authorization_honors_exact_reserved_safety_binding,provider_confirmed_recovery_archives_only_after_reorg_safety_depth' --report_level=detailed
+& ./build_msvc/x64/Release/test_digibyte.exe '--run_test=paymaster_wallet_security_tests/provider_conflict_proof_requires_exact_active_chain_input_and_safety_depth,provider_conflict_closure_preserves_budget_locks_and_native_checkpoint_recovery,client_refresh_accepts_late_payment_without_execution,client_refresh_accepts_late_recovery_without_execution,provider_user_authorization_honors_exact_reserved_safety_binding,provider_first_acceptance_obeys_exclusive_capacity_deadline,provider_confirmed_recovery_archives_only_after_reorg_safety_depth' --report_level=detailed
 if ($LASTEXITCODE -ne 0) { throw 'Paymaster conflict/result/deadline regressions failed' }
 ```
 
@@ -1021,7 +1021,9 @@ Late-result cases invoke the real refresh facade after both deadlines, fail the
 receipt commit, pass inbox TTL, retry/reopen and require durable receipt before
 ACK without signing, wallet insertion or broadcast. Quote-boundary tests keep
 capacity valid longer than the quote, reject fresh acceptance exactly at expiry
-and preserve a timely identical receipt's retry. Qt regression functions are
+and preserve a timely identical receipt's retry. The separate capacity-deadline
+case reverses those deadlines to retain independent capacity boundary coverage.
+Qt regression functions are
 `paymasterSendControllerClockAndEffects`,
 `paymasterPreparationClockStartsWithFirstReply` and
 `paymasterClientTimeoutKeepsObserving`; also run maintenance cancellation and

@@ -4,6 +4,41 @@ There is **no complete current-revision release certification** in this record.
 The candidate below and historical checkpoints identify actual verification;
 implemented behavior alone does not establish release acceptance.
 
+## Provider conflict and late-result corrections (2026-11-15)
+
+Review baseline: `69de9b63846109fd449ec22fc134115dc6139d87`; product/test
+corrections through `f630a773b2`, with independent capacity-boundary coverage in
+`db91d3b39b`. The five work packages implement mature
+provider/native conflict settlement, receipt-only late-result refresh, shared
+normal/recovery successor rules, exclusive fresh-approval deadlines and one Qt
+send-clock/effect policy. Conflict completion retains conservative budgets,
+manual locks and the exact independent checkpoint/mutation-journal guarantees.
+
+| Actual local check | Result and scope |
+| --- | --- |
+| Native, final partial link | **54 distinct selected cases / 14,067 assertions, exit 0**, in two nonoverlapping selections on the same executable. Includes exact foreign input/ancestor proofs at depth 239/240, reorg, corrupt/future/oversized evidence, persistent cursor eviction/parent continuation, full inventory/history, payment/recovery closure, mixed two-leg retirement and its confirmed fee, failed native intent/final commit and reopen, legacy reversal, late inbox receipt/TTL/reopen, independent quote/capacity deadline boundaries, finance and ordinary DB/lock regressions. Unselected cases were not run. |
+| Qt, final partial link | **Eight distinct selected functions / 15 test rows, exit 0**, excluding init/cleanup. Shared clock/effect policy, first-reply deadline, observation after timeout, maintenance cancellation, ordinary DGB send/balance/validation and DD coin control; Windows/Fusion. The existing QSignalSpy balance-metatype warning remains; assertions pass. |
+| Compilation | **23 changed production translation units freshly compiled and all 23 pass C++17 `/Zs` with current headers**, plus six modified test units and three direct inline-record consumers. Final source/object fingerprints match. MSVC 19.43/toolset 14.43, C++20 objects, static Qt 5.15.10. These are isolated partial links; retained dependencies lack complete transitive rebuild provenance. |
+| Architecture and records | Dependency/cycle checks, six positive/negative fixtures, shared change-record JSON and whitespace checks pass. Changed-path/shared-Core checks pass against trusted task baseline `69de9b6384`. No dependency policy, validation, test assertion or checkpoint guarantee was relaxed. |
+
+Final SHA256: native
+`2f4547f9b8e081d60723175173e955fc2afa21d14b318d6623a9cddc77304214`;
+Qt `a6a180844ec113b9b90e0cac22465640af4f9c1b99e3274fdb453e3f5e98c48d`.
+Commands, complete passing/failing logs, source/object and link provenance are
+retained locally in ignored `.ai/implement-review69/`, including `runs.jsonl`
+and `verification-final.json`. The runs use isolated wallets, short `TEMP`/`TMP`
+and `RANDOM_CTX_SEED=0000000000000000000000000000000000000000000000000000000000000001`.
+Broader retests exposed incomplete historical ownership/output fixtures and a
+cursor mutation before rejected native recovery; corrected fixtures preserve
+all financial assertions, and discovery now follows exact checkpoint binding.
+Unsynchronized legacy observations defer closure while retaining protection.
+
+Repository baseline, current DD architecture, wallet/Qt/test guidance and the
+canonical Paymaster boundaries governed the changes. Complete clean product
+builds, full functional/platform suites, Tidy and sanitizers were **not run**;
+they remain operator gates with commands/prerequisites/runtime criteria in the
+[runbook](digidollar-paymaster-testing.md#independent-review-regressions).
+
 ## Native intent, client retention and ordinary DD actions (2026-11-15)
 
 Review baseline: `fb28e17dc7`. Approved shared-adapter scope: `2c3ffe8656`.
