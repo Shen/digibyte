@@ -33,6 +33,7 @@ static constexpr uint8_t FUNDING_MODEL_USER_PAID{1U << static_cast<uint8_t>(Fund
 static constexpr uint8_t FUNDING_MODEL_SPONSORED{1U << static_cast<uint8_t>(FundingModel::SPONSORED)};
 static constexpr uint8_t FUNDING_MODEL_ALL{FUNDING_MODEL_USER_PAID | FUNDING_MODEL_SPONSORED};
 static constexpr int64_t MAX_QUOTE_TTL_SECONDS{60};
+inline constexpr int MAX_PROVIDER_POOL_TARGET_SLOTS{16};
 /** Rolling expenditure window, not the lifetime of a signed authorization. */
 inline constexpr int64_t PROVIDER_BUDGET_WINDOW_SECONDS{24 * 60 * 60};
 
@@ -799,6 +800,20 @@ bool PolicyAllowsFundingModel(const ProviderPolicy& policy, FundingModel model);
  */
 bool CheckNewSponsorshipScope(SponsorshipScope scope, std::string& error);
 bool ValidateProviderPolicy(const ProviderPolicy& policy, std::string& error);
+/** Requested pool counts, before conversion to persisted unsigned fields. */
+struct ProviderPoolTargets {
+    int admission{0};
+    int operational{0};
+    int admission_carriers{0};
+    int operational_carriers{0};
+};
+/** Structural limits also apply to retirement of a previously reviewed pool. */
+bool ValidateProviderPoolTargets(const ProviderPoolTargets& targets, std::string& error);
+/** New funding additionally requires complete resources for the offered model.
+ * Exact saved-target retirement and DGB-only release use structural limits:
+ * removing capital neither enables service nor promises payment readiness. */
+bool ValidateProviderPoolFundingTargets(const ProviderPoolTargets& targets,
+                                       const ProviderPolicy& policy, std::string& error);
 /** Pure validators shared by setup and provider admission; no wallet/node access. */
 bool ValidateProviderFundingSafetyLimits(const FundingSafetyLimits& limits, bool required,
                                         DGBSatoshis advertised_maximum, std::string& error);

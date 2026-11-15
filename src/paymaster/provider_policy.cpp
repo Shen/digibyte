@@ -159,6 +159,37 @@ std::optional<DGBSatoshis> GetProviderNetworkFee(DGBSatoshis maximum_network_fee
     return DGBSatoshis{MIN_PAYMASTER_TX_FEE};
 }
 
+bool ValidateProviderPoolTargets(const ProviderPoolTargets& targets, std::string& error)
+{
+    error.clear();
+    if (targets.admission < static_cast<int>(REQUIRED_ADMISSION_SLOTS) ||
+        targets.admission > MAX_PROVIDER_POOL_TARGET_SLOTS ||
+        targets.operational < 1 || targets.operational > MAX_PROVIDER_POOL_TARGET_SLOTS ||
+        targets.admission_carriers < 0 || targets.admission_carriers > MAX_PROVIDER_POOL_TARGET_SLOTS ||
+        targets.operational_carriers < 0 || targets.operational_carriers > MAX_PROVIDER_POOL_TARGET_SLOTS) {
+        error = "PAYMASTER_INVALID_POOL_TARGET";
+        return false;
+    }
+    return true;
+}
+
+bool ValidateProviderPoolFundingTargets(const ProviderPoolTargets& targets,
+                                       const ProviderPolicy& policy, std::string& error)
+{
+    if (!ValidateProviderPoolTargets(targets, error)) return false;
+    if (PolicyAllowsFundingModel(policy, FundingModel::USER_PAID)) {
+        if (targets.admission_carriers < static_cast<int>(REQUIRED_ADMISSION_SLOTS) ||
+            targets.operational_carriers < 1) {
+            error = "PAYMASTER_USER_PAID_REQUIRES_CARRIER_POOL";
+            return false;
+        }
+    } else if (targets.admission_carriers != 0 || targets.operational_carriers != 0) {
+        error = "PAYMASTER_SPONSORED_POOL_HAS_CARRIERS";
+        return false;
+    }
+    return true;
+}
+
 bool ValidateProviderSafetyPolicy(const ProviderSafetyPolicy& safety,
                                   const ProviderPolicy& advertised,
                                   std::string& error)
@@ -194,8 +225,10 @@ bool ValidateProviderLiquidityPolicy(const ProviderLiquidityPolicy& policy,
     const bool carrier_targets_valid =
         (policy.target_admission_carriers == 0
              ? policy.target_operational_carriers == 0
-             : policy.target_admission_carriers >= 3) &&
-        policy.target_operational_carriers <= 16;
+             : policy.target_admission_carriers >= REQUIRED_ADMISSION_SLOTS);
+    const bool pool_targets_valid = ValidateProviderPoolTargets(
+        {policy.target_admission_dgb, policy.target_operational_dgb,
+         policy.target_admission_carriers, policy.target_operational_carriers}, error);
     const bool finite_limits =
         policy.maximum_maintenance_fee_per_transaction.value > 0 &&
         policy.maximum_maintenance_fee_per_hour.value >=
@@ -204,12 +237,7 @@ bool ValidateProviderLiquidityPolicy(const ProviderLiquidityPolicy& policy,
             policy.maximum_maintenance_fee_per_hour.value;
     if (policy.version != ProviderLiquidityPolicy::CURRENT_VERSION ||
         policy.updated_at <= 0 ||
-        policy.target_admission_dgb < 3 ||
-        policy.target_operational_dgb < 1 ||
-        policy.target_admission_dgb > 16 ||
-        policy.target_operational_dgb > 16 ||
-        policy.target_admission_carriers > 16 ||
-        policy.target_operational_carriers > 16 ||
+        !pool_targets_valid ||
         !carrier_targets_valid ||
         !MoneyRange(policy.maximum_maintenance_fee_per_transaction.value) ||
         !MoneyRange(policy.maximum_maintenance_fee_per_hour.value) ||

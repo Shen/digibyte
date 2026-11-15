@@ -107,8 +107,10 @@ std::optional<SetupCapital> CalculateSetupCapital(int64_t maximum_network_fee_sa
     int64_t admission_carriers, int64_t operational_carriers)
 {
     if (maximum_network_fee_satoshis <= 0 || !MoneyRange(maximum_network_fee_satoshis) ||
-        admission_dgb < 0 || admission_dgb > 16 || operational_dgb < 1 || operational_dgb > 16 ||
-        admission_carriers < 0 || admission_carriers > 16 || operational_carriers < 0 || operational_carriers > 16) return std::nullopt;
+        admission_dgb < 0 || admission_dgb > MAX_PROVIDER_POOL_TARGET_SLOTS ||
+        operational_dgb < 1 || operational_dgb > MAX_PROVIDER_POOL_TARGET_SLOTS ||
+        admission_carriers < 0 || admission_carriers > MAX_PROVIDER_POOL_TARGET_SLOTS ||
+        operational_carriers < 0 || operational_carriers > MAX_PROVIDER_POOL_TARGET_SLOTS) return std::nullopt;
     const int64_t admission = MIN_ADMISSION_DGB_SATOSHIS * admission_dgb;
     const int64_t payment = std::max(MIN_ADMISSION_DGB_SATOSHIS, maximum_network_fee_satoshis);
     if (payment > (MAX_MONEY - admission) / operational_dgb) return std::nullopt;
@@ -192,10 +194,10 @@ const std::vector<SetupField>& SetupFields()
         {"maximum_active_quotes_per_netgroup", "Offers per customer network group", "Limits one network group's share of offers. Must not exceed the total offer limit.", "offers", 0, 1, 8192},
         {"maximum_active_quotes_per_recipient", "Offers per recipient", "Limits simultaneous offers paying the same recipient. Must not exceed the total offer limit.", "offers", 0, 1, 8192},
         {"maximum_quote_requests_per_netgroup_per_minute", "Offer requests per network group per minute", "Rate limit against repeated requests. Raising it can increase provider workload.", "requests", 0, 1, 8192},
-        {"target_admission_dgb", "DGB capacity-check reserves", "Separate outputs used to prove capacity before accepting payments. Keep 3 for a small provider; these funds remain wallet-owned.", "reserves", 0, 3, 16},
-        {"target_operational_dgb", "DGB payment reserves", "Prepared DGB outputs for actual payments. Start with 1; more can support additional concurrent payments but tie up more capital.", "reserves", 0, 1, 16},
-        {"target_admission_carriers", "DD capacity-check reserves", "Needed for customer-paid service fees. Use at least 3 with customer-paid offers; sponsored-only providers can use 0.", "reserves", 0, 0, 16},
-        {"target_operational_carriers", "DD payment reserves", "DD reserves to receive service fees. With customer-paid offers, match the DGB payment count for complete payment capacity. Sponsored-only providers can use 0.", "reserves", 0, 0, 16},
+        {"target_admission_dgb", "DGB capacity-check reserves", "Separate outputs used to prove capacity before accepting payments. Keep 3 for a small provider; these funds remain wallet-owned.", "reserves", 0, REQUIRED_ADMISSION_SLOTS, MAX_PROVIDER_POOL_TARGET_SLOTS},
+        {"target_operational_dgb", "DGB payment reserves", "Prepared DGB outputs for actual payments. Start with 1; more can support additional concurrent payments but tie up more capital.", "reserves", 0, 1, MAX_PROVIDER_POOL_TARGET_SLOTS},
+        {"target_admission_carriers", "DD capacity-check reserves", "Needed for customer-paid service fees. Use at least 3 with customer-paid offers; sponsored-only providers can use 0.", "reserves", 0, 0, MAX_PROVIDER_POOL_TARGET_SLOTS},
+        {"target_operational_carriers", "DD payment reserves", "DD reserves to receive service fees. With customer-paid offers, match the DGB payment count for complete payment capacity. Sponsored-only providers can use 0.", "reserves", 0, 0, MAX_PROVIDER_POOL_TARGET_SLOTS},
         {"maximum_maintenance_fee_per_transaction_satoshis", "Maximum fee per refill transaction", "DGB ceiling for rebuilding reserves when confirmed change cannot be reused. This is separate from customer-payment fees.", "DGB", 8, 0, MAX_MONEY},
         {"maximum_maintenance_fee_per_hour_satoshis", "Refill fees per rolling hour", "Maximum DGB for automatic reserve maintenance over 60 minutes. Must cover the per-transaction ceiling when paid refill is enabled.", "DGB", 8, 0, MAX_MONEY},
         {"maximum_maintenance_fee_per_day_satoshis", "Refill fees per rolling day", "Maximum DGB for automatic maintenance over 24 hours. This allowance is additional to the customer-payment budget.", "DGB", 8, 0, MAX_MONEY},
@@ -921,13 +923,8 @@ void CheckSetupChoices(const SetupChoices& choices)
     const int operational = choices.pool.find_value("operational_dgb_slots").getInt<int>();
     const int carriers = choices.pool.find_value("admission_carrier_slots").getInt<int>();
     const int operational_carriers = choices.pool.find_value("operational_carrier_slots").getInt<int>();
-    if (admission < 3 || admission > 16 || operational < 1 || operational > 16 || carriers < 0 || carriers > 16 || operational_carriers < 0 || operational_carriers > 16)
-        throw std::runtime_error("PAYMASTER_INVALID_POOL_TARGET");
-    if (PolicyAllowsFundingModel(policy, FundingModel::USER_PAID)) {
-        if (carriers < 3 || operational_carriers < 1) throw std::runtime_error("PAYMASTER_USER_PAID_REQUIRES_CARRIER_POOL");
-    } else if (carriers || operational_carriers) {
-        throw std::runtime_error("PAYMASTER_SPONSORED_POOL_HAS_CARRIERS");
-    }
+    if (!ValidateProviderPoolFundingTargets({admission, operational, carriers, operational_carriers}, policy, error))
+        throw std::runtime_error(error);
     if (!choices.pool.find_value("maximum_fee_satoshis").isNull()) {
         const auto fee = choices.pool.find_value("maximum_fee_satoshis").getInt<int64_t>();
         if (fee <= 0 || fee > MAX_MONEY / 2) throw std::runtime_error("PAYMASTER_POOL_INVALID_FEE_LIMIT");

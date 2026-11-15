@@ -743,11 +743,10 @@ PoolPreparationResult PreparePaymasterPool(WalletContext& context, CWallet& wall
     const int admission_carriers = parameters.admission_carriers;
     const int operational_carriers = parameters.operational_carriers;
     const bool execute = parameters.execute;
-    if (admission < static_cast<int>(REQUIRED_ADMISSION_SLOTS) || admission > 16 ||
-        operational < 1 || operational > 16 || admission_carriers < 0 ||
-        admission_carriers > 16 || operational_carriers < 0 || operational_carriers > 16) {
-        throw ApplicationError(ErrorKind::INVALID_INPUT, "PAYMASTER_INVALID_POOL_TARGET");
-    }
+    const ProviderPoolTargets targets{admission, operational, admission_carriers, operational_carriers};
+    std::string target_error;
+    if (!ValidateProviderPoolTargets(targets, target_error))
+        throw ApplicationError(ErrorKind::INVALID_INPUT, target_error);
     const int64_t fee_limit = parameters.maximum_fee;
     if (fee_limit <= 0 || !MoneyRange(fee_limit) || fee_limit > MAX_MONEY / 2) {
         throw ApplicationError(ErrorKind::INVALID_INPUT, "PAYMASTER_POOL_INVALID_FEE_LIMIT");
@@ -764,14 +763,8 @@ PoolPreparationResult PreparePaymasterPool(WalletContext& context, CWallet& wall
     } else if (!GetPaymasterProviderPolicy(*wallet, policy)) {
         throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_POLICY_NOT_FOUND");
     }
-    const bool user_paid = PolicyAllowsFundingModel(policy, FundingModel::USER_PAID);
-    if (user_paid && (admission_carriers < static_cast<int>(REQUIRED_ADMISSION_SLOTS) ||
-                      operational_carriers < 1)) {
-        throw ApplicationError(ErrorKind::INVALID_INPUT, "PAYMASTER_USER_PAID_REQUIRES_CARRIER_POOL");
-    }
-    if (!user_paid && (admission_carriers != 0 || operational_carriers != 0)) {
-        throw ApplicationError(ErrorKind::INVALID_INPUT, "PAYMASTER_SPONSORED_POOL_HAS_CARRIERS");
-    }
+    if (!ValidateProviderPoolFundingTargets(targets, policy, target_error))
+        throw ApplicationError(ErrorKind::INVALID_INPUT, target_error);
     std::vector<ProviderPoolEntry> existing;
     std::string refresh_error;
     {
@@ -1177,26 +1170,19 @@ PoolRebalanceResult RebalancePaymasterPool(WalletContext& context, CWallet& wall
             saved.target_admission_carriers != admission_carriers || saved.target_operational_carriers != operational_carriers)
             throw ApplicationError(ErrorKind::INVALID_INPUT, "PAYMASTER_LIQUIDITY_POLICY_CHANGED");
     }
-    if (admission < static_cast<int>(REQUIRED_ADMISSION_SLOTS) || admission > 16 ||
-        operational < 1 || operational > 16 || admission_carriers < 0 ||
-        admission_carriers > 16 || operational_carriers < 0 || operational_carriers > 16) {
-        throw ApplicationError(ErrorKind::INVALID_INPUT, "PAYMASTER_INVALID_POOL_TARGET");
-    }
+    const ProviderPoolTargets targets{admission, operational, admission_carriers, operational_carriers};
+    std::string target_error;
+    if (!ValidateProviderPoolTargets(targets, target_error))
+        throw ApplicationError(ErrorKind::INVALID_INPUT, target_error);
     ProviderPolicy policy;
     if (!GetPaymasterProviderPolicy(*wallet, policy)) {
         throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_POLICY_NOT_FOUND");
     }
-    const bool user_paid = PolicyAllowsFundingModel(policy, FundingModel::USER_PAID);
     // An exact saved target may deliberately retain fewer carriers
     // after a slot release/model change. Releasing excess neither
     // enables the provider nor establishes payment readiness.
-    if (!expected_revision && !dgb_only && user_paid && (admission_carriers < static_cast<int>(REQUIRED_ADMISSION_SLOTS) ||
-                      operational_carriers < 1)) {
-        throw ApplicationError(ErrorKind::INVALID_INPUT, "PAYMASTER_USER_PAID_REQUIRES_CARRIER_POOL");
-    }
-    if (!expected_revision && !dgb_only && !user_paid && (admission_carriers != 0 || operational_carriers != 0)) {
-        throw ApplicationError(ErrorKind::INVALID_INPUT, "PAYMASTER_SPONSORED_POOL_HAS_CARRIERS");
-    }
+    if (!expected_revision && !dgb_only && !ValidateProviderPoolFundingTargets(targets, policy, target_error))
+        throw ApplicationError(ErrorKind::INVALID_INPUT, target_error);
     std::vector<ProviderPoolEntry> entries;
     if (!GetPaymasterProviderPoolEntries(*wallet, entries)) {
         throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_POOLS_NOT_PREPARED");

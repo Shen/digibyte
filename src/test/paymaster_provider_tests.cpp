@@ -36,6 +36,36 @@ ProviderPolicy UserPaidPolicy(uint32_t rate_bps)
     return policy;
 }
 
+BOOST_AUTO_TEST_CASE(pool_targets_separate_new_funding_from_reviewed_retirement)
+{
+    std::string error;
+    auto paid = UserPaidPolicy(100);
+    auto sponsored = paid;
+    sponsored.funding_models = FUNDING_MODEL_SPONSORED;
+    sponsored.fee_rate_bps = 0;
+    const ProviderPoolTargets complete{3, 1, 3, 1};
+    BOOST_REQUIRE(ValidateProviderPoolFundingTargets(complete, paid, error));
+    BOOST_CHECK(!ValidateProviderPoolFundingTargets(complete, sponsored, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_SPONSORED_POOL_HAS_CARRIERS");
+    const ProviderPoolTargets without_carriers{3, 1, 0, 0};
+    BOOST_REQUIRE(ValidateProviderPoolTargets(without_carriers, error));
+    BOOST_REQUIRE(ValidateProviderPoolFundingTargets(without_carriers, sponsored, error));
+    BOOST_CHECK(!ValidateProviderPoolFundingTargets(without_carriers, paid, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_USER_PAID_REQUIRES_CARRIER_POOL");
+    const ProviderPoolTargets released_last_carrier{3, 1, 3, 0};
+    BOOST_CHECK(ValidateProviderPoolTargets(released_last_carrier, error));
+    BOOST_CHECK(!ValidateProviderPoolFundingTargets(released_last_carrier, paid, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_USER_PAID_REQUIRES_CARRIER_POOL");
+    BOOST_CHECK(ValidateProviderPoolFundingTargets({16, 16, 16, 16}, paid, error));
+    for (const auto targets : {ProviderPoolTargets{2, 1, 3, 1}, {3, 0, 3, 1},
+             {3, 1, -1, 1}, {3, 1, 3, -1}, {17, 1, 3, 1}, {3, 17, 3, 1}, {3, 1, 17, 1}, {3, 1, 3, 17}}) {
+        BOOST_CHECK(!ValidateProviderPoolTargets(targets, error));
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_INVALID_POOL_TARGET");
+        BOOST_CHECK(!ValidateProviderPoolFundingTargets(targets, paid, error));
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_INVALID_POOL_TARGET");
+    }
+}
+
 BOOST_AUTO_TEST_CASE(restricted_new_service_disabled_legacy_policy_valid)
 {
     std::string error;

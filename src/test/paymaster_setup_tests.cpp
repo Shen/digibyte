@@ -846,6 +846,13 @@ BOOST_AUTO_TEST_CASE(setup_checks_core_policy_budgets_and_pool_before_writes)
     bad = good;
     bad.pool.pushKV("operational_dgb_slots", 17);
     rejects(bad, "PAYMASTER_INVALID_POOL_TARGET");
+    for (const auto* field : {"admission_dgb_slots", "operational_dgb_slots", "admission_carrier_slots", "operational_carrier_slots"}) {
+        for (const int count : {-1, 17}) {
+            bad = good;
+            bad.pool.pushKV(field, count);
+            rejects(bad, "PAYMASTER_INVALID_POOL_TARGET");
+        }
+    }
     bad = good;
     UniValue sponsored{UniValue::VARR}; sponsored.push_back("sponsored");
     bad.policy.pushKV("funding_models", sponsored);
