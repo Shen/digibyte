@@ -622,6 +622,7 @@ bool PaymasterStore::ReconcileProviderPoolSuccessors(size_t& recovered,
 {
     recovered = 0;
     error.clear();
+    if (!ReconcileProviderRecoveryPoolSuccessors(recovered, error, bounded)) return false;
     LOCK(m_wallet.cs_wallet);
     WalletBatch batch{m_wallet.GetDatabase()};
     std::vector<ProviderPoolEntry> pool_entries;
@@ -690,6 +691,7 @@ bool PaymasterStore::ReconcileProviderPoolSuccessors(size_t& recovered,
         }
     }
 
+    const auto source_entries = pool_entries;
     bool changed{false};
     for (const ProviderCommitRecord& commit : commits) {
         const auto found = attempts_by_commit.find(commit.commit_key);
@@ -702,10 +704,8 @@ bool PaymasterStore::ReconcileProviderPoolSuccessors(size_t& recovered,
             continue;
         }
         const auto source_present = [&](const COutPoint& outpoint) {
-            return std::any_of(pool_entries.begin(), pool_entries.end(),
-                               [&](const ProviderPoolEntry& entry) {
-                                   return entry.outpoint == outpoint;
-                               });
+            ProviderPoolEntry source;
+            return ReadProviderPoolDisposition(batch, source_entries, outpoint, source) == DatabaseReadStatus::FOUND;
         };
         if ((!attempt.provider_manifest.provider_carrier_inputs.empty() &&
              !std::all_of(attempt.provider_manifest.provider_carrier_inputs.begin(),
@@ -731,7 +731,7 @@ bool PaymasterStore::ReconcileProviderPoolSuccessors(size_t& recovered,
         std::string commit_error;
         if (!RegisterProviderPoolSuccessors(
                 m_wallet, attempt, commit, CTransaction{mutable_transaction},
-                successor_policy, pool_entries, commit_changed, commit_error)) {
+                successor_policy, pool_entries, commit_changed, commit_error, &source_entries)) {
             // A malformed historical record is isolated from independent
             // valid commits. Exact outpoint conflicts remain fail-closed.
             if (commit_error == "PAYMASTER_PROVIDER_SUCCESSOR_CONFLICT") {

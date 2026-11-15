@@ -1592,6 +1592,92 @@ bool PaymasterStore::ValidateProviderAlternativeRecoveryPreSignatureAuthorizatio
     return true;
 }
 
+bool paymaster_store::internal::RegisterProviderRecoveryPoolSuccessors(
+    CWallet& wallet, const AlternativeRecoveryRecord& recovery,
+    const ProviderCommitRecord& commit, const std::optional<ProviderPolicy>& policy,
+    std::vector<ProviderPoolEntry>& entries, bool& changed, std::string& error,
+    const std::vector<ProviderPoolEntry>* source_entries)
+{
+    CMutableTransaction transaction;
+    std::vector<COutPoint> inputs;
+    if (!ValidateProviderAlternativeRecoveryCommitBinding(recovery, commit, transaction, inputs, error)) return false;
+    const auto& manifest = recovery.recovery_response.manifest;
+    ProviderPoolSuccessorPlan plan;
+    plan.service_fee = manifest.service_fee;
+    plan.maximum_network_fee = recovery.provider_maximum_network_fee;
+    // The authenticated recovery builder fixes output order. In particular a
+    // carrier and a >=1-DD fee can share one script but are distinct outputs.
+    uint32_t index = manifest.wallet_returns.size();
+    if (!manifest.recovery_provider_carrier_inputs.empty()) {
+        if (manifest.recovery_provider_carrier_inputs.size() != 1 ||
+            manifest.recovery_provider_dd_scripts.size() != 1 || index >= transaction.vout.size() ||
+            transaction.vout[index].scriptPubKey != manifest.recovery_provider_dd_scripts.front()) {
+            error = "PAYMASTER_INVALID_PROVIDER_CARRIER_SUCCESSOR";
+            return false;
+        }
+        plan.carrier_input = manifest.recovery_provider_carrier_inputs.front();
+        plan.carrier_output = index++;
+    }
+    if (manifest.service_fee.value >= 100) ++index;
+    if (!manifest.recovery_provider_dgb_change_scripts.empty()) {
+        if (manifest.recovery_provider_dgb_change_scripts.size() != 1 || index >= transaction.vout.size() ||
+            transaction.vout[index].scriptPubKey != manifest.recovery_provider_dgb_change_scripts.front()) {
+            error = "PAYMASTER_INVALID_PROVIDER_DGB_SUCCESSOR";
+            return false;
+        }
+        plan.dgb_change_output = index;
+    }
+    return RegisterProviderPoolSuccessors(wallet, plan, commit, CTransaction{transaction}, policy, entries, changed, error, source_entries);
+}
+
+bool PaymasterStore::ReconcileProviderRecoveryPoolSuccessors(size_t& recovered, std::string& error, bool bounded)
+{
+    recovered = 0;
+    LOCK(m_wallet.cs_wallet);
+    WalletBatch batch{m_wallet.GetDatabase()};
+    std::vector<ProviderPoolEntry> entries;
+    const auto pool_status = batch.ReadPaymasterProviderPoolWithStatus(entries);
+    if (pool_status == DatabaseReadStatus::NOT_FOUND) return true;
+    if (pool_status != DatabaseReadStatus::FOUND) { error = ProviderPoolReadError(entries); return false; }
+    ProviderPolicy policy;
+    const auto policy_status = batch.ReadPaymasterPolicyWithStatus(policy);
+    if (policy_status != DatabaseReadStatus::FOUND && policy_status != DatabaseReadStatus::NOT_FOUND) {
+        error = "PAYMASTER_INVALID_PROVIDER_POLICY";
+        return false;
+    }
+    const auto successor_policy = policy_status == DatabaseReadStatus::FOUND ? std::optional<ProviderPolicy>{policy} : std::nullopt;
+    PaymasterScanPage page{m_wallet.GetDatabase(), PaymasterScan::RECOVERY_POOL_SUCCESSORS};
+    std::vector<ProviderCommitRecord> commits;
+    uint256 next;
+    if (!(bounded ? batch.ListPaymasterProviderCommitsPage(page.after.record, commits, next)
+                  : batch.ListPaymasterProviderCommits(commits))) {
+        error = "PAYMASTER_POOL_RECONCILIATION_READ_FAILED";
+        return false;
+    }
+    const auto source_entries = entries; // Preserve before-images through pool compaction.
+    for (const auto& commit : commits) {
+        AlternativeRecoveryRecord recovery;
+        const auto status = batch.ReadPaymasterAlternativeRecoveryWithStatus(commit.quote_id, recovery);
+        if (status == DatabaseReadStatus::NOT_FOUND) continue; // A normal payment commit.
+        if (status != DatabaseReadStatus::FOUND) { error = "PAYMASTER_RECOVERY_DATABASE_READ"; return false; }
+        if (!recovery.provider_side || recovery.recovery_provider_id != commit.provider_id ||
+            recovery.recovery_response.recovery_commit_key != commit.commit_key) {
+            error = "PAYMASTER_ALTERNATIVE_RECOVERY_COMMIT_CONFLICT";
+            return false;
+        }
+        bool changed{false};
+        if (!RegisterProviderRecoveryPoolSuccessors(m_wallet, recovery, commit, successor_policy, entries, changed, error, &source_entries)) return false;
+        if (changed) ++recovered;
+    }
+    if (recovered) {
+        if (!batch.TxnBegin()) return Abort(batch, error, "PAYMASTER_DATABASE_BEGIN");
+        if (!batch.WritePaymasterProviderPool(entries)) return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
+        if (!batch.TxnCommit()) { error = "PAYMASTER_DATABASE_COMMIT"; return false; }
+    }
+    if (bounded) page.Complete(next);
+    return true;
+}
+
 bool PaymasterStore::CommitProviderAlternativeRecoveryFinal(
     const AlternativeRecoveryRecord& recovery,
     const ProviderCommitRecord& commit,
@@ -1660,8 +1746,19 @@ bool PaymasterStore::CommitProviderAlternativeRecoveryFinal(
             SameResult(existing_result, result) &&
             SameAlternativeRecoveryRecord(current, recovery) &&
             ValidateRetainedProviderRecoveryBudget(batch, current, budget_ledger, error)) {
-            if (!finance_changed && m_wallet.IsWalletFlagSet(WALLET_FLAG_PAYMASTER_AUTHORIZATION)) return true;
+            ProviderPolicy policy;
+            const auto policy_status = batch.ReadPaymasterPolicyWithStatus(policy);
+            if (policy_status != DatabaseReadStatus::FOUND && policy_status != DatabaseReadStatus::NOT_FOUND) {
+                error = "PAYMASTER_INVALID_PROVIDER_POLICY";
+                return false;
+            }
+            bool pool_changed{false};
+            if (!RegisterProviderRecoveryPoolSuccessors(m_wallet, recovery, commit,
+                    policy_status == DatabaseReadStatus::FOUND ? std::optional<ProviderPolicy>{policy} : std::nullopt,
+                    pool, pool_changed, error)) return false;
+            if (!finance_changed && !pool_changed && m_wallet.IsWalletFlagSet(WALLET_FLAG_PAYMASTER_AUTHORIZATION)) return true;
             if (!batch.TxnBegin()) return Abort(batch, error, "PAYMASTER_DATABASE_BEGIN");
+            if (pool_changed && !batch.WritePaymasterProviderPool(pool)) return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
             if (finance_changed && !batch.WritePaymasterFinanceEvents(finance, {finance_event}, error))
                 return Abort(batch, error, "PAYMASTER_DATABASE_WRITE");
             return CommitWithPaymasterAuthorizationProtection(m_wallet, batch, true, error);
@@ -1714,6 +1811,17 @@ bool PaymasterStore::CommitProviderAlternativeRecoveryFinal(
             /*allow_historical_policy=*/true, error)) {
         return false;
     }
+
+    ProviderPolicy policy;
+    const auto policy_status = batch.ReadPaymasterPolicyWithStatus(policy);
+    if (policy_status != DatabaseReadStatus::FOUND && policy_status != DatabaseReadStatus::NOT_FOUND) {
+        error = "PAYMASTER_INVALID_PROVIDER_POLICY";
+        return false;
+    }
+    bool pool_changed{false};
+    if (!RegisterProviderRecoveryPoolSuccessors(m_wallet, recovery, commit,
+            policy_status == DatabaseReadStatus::FOUND ? std::optional<ProviderPolicy>{policy} : std::nullopt,
+            pool, pool_changed, error)) return false;
 
     if (!batch.TxnBegin()) return Abort(batch, error, "PAYMASTER_DATABASE_BEGIN");
     if (!batch.WritePaymasterAlternativeRecovery(recovery, true) ||

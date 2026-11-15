@@ -326,8 +326,14 @@ already bound by the authoritative commit's `quote_id`; they revalidate that
 binding. The marker grants no authority, and missing/corrupt/unsupported archived
 evidence fails closed. Signed, ambiguous and protected history is not discarded
 to admit new work. Archival bounds active work, not total on-disk history.
-Periodic pool-successor repair pages live provider sessions and point-reads only
-their commits. Generic wallet rebroadcast excludes Paymaster finals through a
+Payment and alternative-recovery finals share a validated output-role plan and
+one pool-registration rule. Carrier principal and a separate fee output remain
+distinct even when they use the same script. Initial commit, exact replay and
+historical repair register usable returns atomically; existing terminal history
+prevents resurrection. Repair retains its original source snapshot while
+compacting the working pool. Periodic repair pages normal sessions and recovery
+commit locators independently, including archived recovery evidence.
+Generic wallet rebroadcast excludes Paymaster finals through a
 derived transaction-to-commit lookup, reconstructed once and updated after
 commit. Warm candidate checks do not decode the recovery archive; read failures
 skip the rebroadcast pass. Startup reconstruction remains complete.

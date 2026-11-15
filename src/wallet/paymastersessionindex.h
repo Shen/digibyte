@@ -18,7 +18,7 @@ class WalletDatabase;
 /** Disposable scheduling progress, never financial authority. Independent
  * scans must not advance one another. Wallet unload discards all progress. */
 enum class PaymasterScan { QUOTE_EXPIRY, RECONCILIATION, CLIENT_FINALS, CAPACITY_SNAPSHOTS, RECOVERIES, PROVIDER_COMMITS, SIGNED_ATTEMPTS, POOL_SUCCESSORS,
-                          RELAY_PROVIDER_COMMITS, RELAY_SIGNED_ATTEMPTS, RELAY_CLIENT_FINALS };
+                          RELAY_PROVIDER_COMMITS, RELAY_SIGNED_ATTEMPTS, RELAY_CLIENT_FINALS, RECOVERY_POOL_SUCCESSORS };
 struct PaymasterScanPosition {
     std::string request;
     uint256 record;

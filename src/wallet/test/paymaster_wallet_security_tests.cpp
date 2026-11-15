@@ -7649,9 +7649,43 @@ static void ExerciseFirstProviderRecoveryCommit(node::NodeContext& node,
     BOOST_REQUIRE_MESSAGE(store.CommitProviderAlternativeRecoveryFinal(recovery, commit, result,
         result.genesis_hash, error), error);
     BOOST_CHECK(provider.IsWalletFlagSet(WALLET_FLAG_PAYMASTER_AUTHORIZATION));
+    {
+        LOCK(provider.cs_wallet);
+        std::vector<ProviderPoolEntry> committed_pool;
+        BOOST_REQUIRE(WalletBatch{provider.GetDatabase()}.ReadPaymasterProviderPool(committed_pool));
+        const uint32_t change_index = manifest.wallet_returns.size() +
+            manifest.recovery_provider_carrier_inputs.size() + (manifest.service_fee.value >= 100 ? 1 : 0);
+        const auto successor = std::find_if(committed_pool.begin(), committed_pool.end(), [&](const auto& entry) {
+            return entry.outpoint == COutPoint{commit.final_txid, change_index};
+        });
+        BOOST_REQUIRE(successor != committed_pool.end());
+        BOOST_CHECK(successor->state == PoolEntryState::PENDING_SUCCESSOR);
+        BOOST_CHECK(successor->asset == PoolAsset::DGB);
+        BOOST_CHECK_EQUAL(successor->dgb_value.value, result.final_transaction->vout[change_index].nValue);
+        BOOST_CHECK_EQUAL(successor->origin_commit_key, commit.commit_key);
+    }
     uint64_t flags{0};
     BOOST_REQUIRE(database.MakeBatch()->Read(DBKeys::FLAGS, flags));
     BOOST_CHECK((flags & WALLET_FLAG_PAYMASTER_AUTHORIZATION) != 0);
+    // Reproduce the historical implementation: its signed recovery and budget
+    // were durable, but its pool contained only consumed sources. Bypass the
+    // current pool writer solely to construct that old persisted state (the
+    // writer would correctly retain a removed protected successor in history).
+    {
+        LOCK(provider.cs_wallet);
+        std::vector<ProviderPoolEntry> legacy;
+        BOOST_REQUIRE(WalletBatch{provider.GetDatabase()}.ReadPaymasterProviderPool(legacy));
+        legacy.erase(std::remove_if(legacy.begin(), legacy.end(), [&](const auto& entry) {
+            return entry.outpoint.hash == commit.final_txid;
+        }), legacy.end());
+        BOOST_REQUIRE(provider.GetDatabase().MakeBatch()->Write(DBKeys::PAYMASTER_PROVIDER_POOL, legacy));
+    }
+    AlignSecurityFixtureCheckpoint(database);
+    size_t repaired_successors{0};
+    BOOST_REQUIRE_MESSAGE(store.ReconcileProviderPoolSuccessors(repaired_successors, error), error);
+    BOOST_CHECK_EQUAL(repaired_successors, 1U);
+    BOOST_REQUIRE_MESSAGE(store.ReconcileProviderPoolSuccessors(repaired_successors, error), error);
+    BOOST_CHECK_EQUAL(repaired_successors, 0U);
     const auto committed = database.m_records;
     database.FailWriteAt(0);
     BOOST_REQUIRE_MESSAGE(store.CommitProviderAlternativeRecoveryFinal(recovery, commit, result,

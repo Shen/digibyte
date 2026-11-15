@@ -547,6 +547,7 @@ public:
      * was atomic. */
     bool ReconcileProviderPoolSuccessors(size_t& recovered, std::string& error);
     bool ReconcileProviderPoolSuccessors(size_t& recovered, std::string& error, bool bounded);
+    bool ReconcileProviderRecoveryPoolSuccessors(size_t& recovered, std::string& error, bool bounded);
     /** List provider-side attempts whose complete provider signature and
      * private signed-result envelope are durable but whose atomic commit was
      * interrupted. Malformed individual entries are skipped fail-closed so
