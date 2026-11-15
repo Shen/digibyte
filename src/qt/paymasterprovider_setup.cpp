@@ -2234,15 +2234,15 @@ private:
     void fail(const QString& error)
     {
         if (!current()) return;
-        if (m_step < static_cast<size_t>(m_progress.progress_steps.size())) {
-            auto* label = m_progress.progress_steps.at(static_cast<int>(m_step));
+        if (stepIndex() < static_cast<size_t>(m_progress.progress_steps.size())) {
+            auto* label = m_progress.progress_steps.at(static_cast<int>(stepIndex()));
             const auto method = label->property("setupMethod");
             label->setText(QStringLiteral("%1 %2 — %3").arg(QStringLiteral("✕"), tr("Failed"),
-                method.isValid() ? method.toString() : m_progress.progress_names.at(static_cast<int>(m_step))));
+                method.isValid() ? method.toString() : m_progress.progress_names.at(static_cast<int>(stepIndex()))));
         }
         m_progress.progress_result->setText(tr(
             "Setup stopped at this step: %1\n\nCompleted earlier steps remain saved. Correct the problem and retry; no completed step needs to be repeated manually.%2")
-            .arg(error, m_needs_quiesce && m_step > 1
+            .arg(error, m_needs_quiesce && stepIndex() > 1
                 ? tr(" The existing provider was placed safely offline before configuration changed and remains disabled until the final enabled-state step succeeds.")
                 : QString{}));
         m_progress.setup_retry->setEnabled(true);
@@ -2282,6 +2282,7 @@ private:
         QTimer::singleShot(0, m_progress.progress_page, [self = shared_from_this()] {
             if (!self->current() || self->m_running) return;
             self->m_progress.setup_retry->setEnabled(true);
+            if (self->m_workflow) self->m_workflow->Retry();
             self->advance();
         });
     }
@@ -2300,138 +2301,88 @@ private:
         }
         setRunning(true);
         m_progress.setup_retry->setVisible(false);
-        m_owner->m_panel.call("getpaymasteroperatorinfo", {}, false, nullptr,
-            [self = shared_from_this()](const UniValue& snapshot) { self->observe(snapshot); },
-            false, failure());
+        if (!m_workflow) {
+            m_owner->m_panel.call("getpaymasteroperatorinfo", {}, false, nullptr,
+                [self = shared_from_this()](const UniValue& snapshot) { self->observe(snapshot); },
+                false, failure());
+            return;
+        }
+        dispatch();
     }
+
+    size_t stepIndex() const { return m_workflow ? m_workflow->StepIndex() : 0; }
 
     void observe(const UniValue& snapshot)
     {
-        using namespace DigiDollar::Paymaster;
         if (!current()) return;
         try {
-            if (m_snapshot.isNull()) {
-                m_steps = BuildSetupPlan(snapshot, *m_choices);
+            if (!m_workflow) {
+                m_workflow.emplace(snapshot, *m_choices, *m_context.reviewed_pool);
                 m_needs_quiesce = snapshot.find_value("provider").find_value("enabled").isTrue();
-            } else {
-                CheckSetupContext(m_snapshot, snapshot);
-                if (m_step > 0) CheckSetupSaved(m_steps.at(m_step - 1), snapshot);
             }
-            m_snapshot = snapshot;
+            m_workflow->Observe(snapshot);
         } catch (const std::exception& error) {
             fail(QString::fromUtf8(error.what()));
             return;
         }
-        showProgress();
-        if (m_step == m_steps.size()) finish();
-        else executeStep();
+        advance();
     }
 
     void showProgress()
     {
+        const auto& steps = m_workflow->Steps();
         for (int index{0}; index < m_progress.progress_steps.size(); ++index) {
             auto* label = m_progress.progress_steps.at(index);
             const auto step = static_cast<size_t>(index);
-            label->setVisible(step < m_steps.size());
-            if (step >= m_steps.size()) continue;
-            const auto name = setupStepLabel(m_steps.at(step).method);
+            label->setVisible(step < steps.size());
+            if (step >= steps.size()) continue;
+            const auto name = setupStepLabel(steps.at(step).method);
             label->setProperty("setupMethod", name);
             label->setText(QStringLiteral("%1 %2").arg(
-                step < m_step ? QStringLiteral("✓") : QStringLiteral("○"), name));
+                step < stepIndex() ? QStringLiteral("✓") : QStringLiteral("○"), name));
         }
     }
 
-    void executeStep()
+    void dispatch()
     {
-        const auto& step = m_steps.at(m_step);
-        if (step.method == "preparepaymasterpool") {
-            m_owner->m_panel.call(step.method, step.params, false, nullptr,
-                [self = shared_from_this()](const UniValue& preview) { self->reviewFunding(preview); },
-                false, failure());
-        } else {
-            m_owner->m_panel.call(step.method, step.params, step.unlock, nullptr,
-                [self = shared_from_this()](const UniValue& result) { self->acceptStep(result); },
-                false, failure());
-        }
-    }
-
-    void acceptStep(const UniValue& result)
-    {
-        if (!current()) return;
-        try {
-            const auto& step = m_steps.at(m_step);
-            DigiDollar::Paymaster::CheckSetupReply(step, result);
-            if (step.method == "createpaymasteridentity") {
-                auto provider = m_snapshot.find_value("provider");
-                provider.pushKV("provider_id", result.find_value("provider_id"));
-                m_snapshot.pushKV("provider", std::move(provider));
-            }
-        } catch (const std::exception& error) {
-            fail(QString::fromUtf8(error.what()));
-            return;
-        }
-        completeStep();
-    }
-
-    void reviewFunding(const UniValue& preview)
-    {
-        if (!current()) return;
-        if (!IsCompletePoolPreparationResult(preview)) {
-            fail(tr("Core returned an incomplete funding preview."));
-            return;
-        }
-        try {
-            if (!DigiDollar::Paymaster::SetupPoolNeeded(preview)) {
-                completeStep();
-                return;
-            }
-        } catch (const std::exception& error) {
-            fail(QString::fromUtf8(error.what()));
-            return;
-        }
-        if (!PaymasterOperationController::fundingWithinApproval(*m_context.reviewed_pool, preview)) {
+        using Kind = DigiDollar::Paymaster::SetupWorkflow::EffectKind;
+        const auto effect = m_workflow->Next();
+        showProgress();
+        if (effect.kind == Kind::COMPLETE) { finish(); return; }
+        if (effect.kind == Kind::REVIEW_FUNDING) {
             const auto answer = PaymasterWidgetImpl::askPlainTextQuestion(m_wizard, tr("Funding requirement changed"),
                 tr("Review the updated capital and fee limits before continuing.\n\n%1")
-                    .arg(m_owner->m_panel.liquidity().formatPoolResult("preparepaymasterpool", preview)));
+                    .arg(m_owner->m_panel.liquidity().formatPoolResult("preparepaymasterpool", effect.funding)));
             if (!current()) return;
-            if (answer != QMessageBox::Yes) {
-                fail(tr("The changed funding requirement was not approved. No additional funding was authorized."));
+            try {
+                m_workflow->ReviewFunding(answer == QMessageBox::Yes);
+            } catch (const std::exception& error) {
+                fail(QString::fromUtf8(error.what()));
                 return;
             }
-            *m_context.reviewed_pool = preview;
-        }
-        auto options = m_steps.at(m_step).params[0];
-        options.pushKV("execute", true);
-        options.pushKV("plan_id", preview.find_value("plan_id"));
-        UniValue params{UniValue::VARR};
-        params.push_back(std::move(options));
-        m_owner->m_panel.call("preparepaymasterpool", params, true, nullptr,
-            [self = shared_from_this(), preview](const UniValue& result) { self->acceptFunding(preview, result); },
-            false, failure());
-    }
-
-    void acceptFunding(const UniValue& preview, const UniValue& result)
-    {
-        if (!current()) return;
-        if (!result.find_value("accepted").isTrue() ||
-            !DigiDollar::Paymaster::SetupMatches(preview.find_value("plan_id"), result.find_value("plan_id"))) {
-            fail(tr("Core did not confirm the exact funding approval."));
+            advance();
             return;
         }
-        completeStep();
-    }
-
-    void completeStep()
-    {
-        ++m_step;
-        advance();
+        m_owner->m_panel.call(effect.call.method, effect.call.params, effect.call.unlock, nullptr,
+            [self = shared_from_this(), kind = effect.kind](const UniValue& reply) {
+                if (!self->current()) return;
+                try {
+                    if (kind == Kind::OBSERVE) { self->observe(reply); return; }
+                    if (kind == Kind::PREVIEW_FUNDING) self->m_workflow->AcceptFundingPreview(reply);
+                    else self->m_workflow->AcceptReply(reply);
+                } catch (const std::exception& error) {
+                    self->fail(QString::fromUtf8(error.what()));
+                    return;
+                }
+                self->advance();
+            }, false, failure());
     }
 
     void finish()
     {
         auto& panel = m_owner->m_panel;
         *m_completed = true;
-        const auto& provider = m_snapshot.find_value("provider");
+        const auto& provider = m_workflow->Snapshot().find_value("provider");
         panel.overview().applySetupServiceState(m_choices->enabled, provider.find_value("running").isTrue());
         panel.configuration().observeRuntime(provider);
         m_owner->m_setup_waiting_for_confirmations = !provider.find_value("pool_ready").isTrue();
@@ -2445,7 +2396,7 @@ private:
         requestStart();
         if (!current()) return;
         try {
-            m_owner->renderSetupStatus(m_progress.setup_funding, m_snapshot, m_snapshot);
+            m_owner->renderSetupStatus(m_progress.setup_funding, m_workflow->Snapshot(), m_workflow->Snapshot());
         } catch (const std::exception&) {
             text += tr("\nCurrent funding and readiness are unavailable. Check again before acting.");
         }
@@ -2461,7 +2412,7 @@ private:
     void requestStart()
     {
         if (!*m_context.setup_start_requested) return;
-        if (m_snapshot.find_value("encrypted").isTrue()) {
+        if (m_workflow->Snapshot().find_value("encrypted").isTrue()) {
             m_owner->m_panel.overview().unlockOperatorWallet([self = shared_from_this()] {
                 if (self->current()) self->m_owner->m_panel.overview().requestReviewedStart();
             });
@@ -2484,7 +2435,7 @@ private:
     {
         if (!current()) return;
         try {
-            m_owner->renderSetupStatus(m_progress.setup_funding, m_snapshot, snapshot);
+            m_owner->renderSetupStatus(m_progress.setup_funding, m_workflow->Snapshot(), snapshot);
         } catch (const std::exception&) {
             statusUnavailable();
             return;
@@ -2509,10 +2460,8 @@ private:
     const SetupProgressControls m_progress;
     std::shared_ptr<bool> m_completed{std::make_shared<bool>(false)};
     std::optional<DigiDollar::Paymaster::SetupChoices> m_choices;
-    std::vector<DigiDollar::Paymaster::SetupStep> m_steps;
-    UniValue m_snapshot;
+    std::optional<DigiDollar::Paymaster::SetupWorkflow> m_workflow;
     QTimer* m_status_timer{nullptr};
-    size_t m_step{0};
     bool m_open{true};
     bool m_started{false};
     bool m_running{false};

@@ -974,7 +974,7 @@ std::vector<SetupStep> BuildSetupPlan(const UniValue& snapshot, const SetupChoic
     add("setpaymasterpolicy", choices.policy, choices.policy);
     add("setpaymastersafetypolicy", choices.safety, choices.safety);
     add("setpaymasterliquiditypolicy", choices.liquidity, choices.liquidity);
-    // The caller inserts exact preview/approval/execution before these final steps.
+    // SetupWorkflow inserts exact preview/approval/execution before these final steps.
     SetupStep pool;
     pool.method = "preparepaymasterpool";
     auto pool_options = choices.pool;
@@ -989,5 +989,199 @@ std::vector<SetupStep> BuildSetupPlan(const UniValue& snapshot, const SetupChoic
     enabled.pushKV("enabled", choices.enabled);
     add("setpaymasterenabled", UniValue{choices.enabled}, enabled);
     return steps;
+}
+
+bool SetupFundingWithinApproval(const UniValue& approved, const UniValue& current)
+{
+    try {
+        for (const char* key : {"admission_dgb_satoshis_each", "operational_dgb_satoshis_each", "carrier_cents_each", "maximum_fee_satoshis",
+                               "admission_dgb_slots", "operational_dgb_slots", "admission_carrier_slots", "operational_carrier_slots"}) {
+            if (!approved.find_value(key).isNum() || approved.find_value(key).getInt<int64_t>() != current.find_value(key).getInt<int64_t>()) return false;
+        }
+        for (const char* key : {"total_output_satoshis", "total_carrier_cents", "maximum_total_fee_satoshis",
+                               "missing_admission_dgb_slots", "missing_operational_dgb_slots", "missing_admission_carrier_slots", "missing_operational_carrier_slots"}) {
+            const auto actual = current.find_value(key).getInt<int64_t>();
+            if (actual < 0 || actual > approved.find_value(key).getInt<int64_t>()) return false;
+        }
+        return true;
+    } catch (const std::exception&) { return false; }
+}
+
+namespace {
+bool SetupHash(const UniValue& value)
+{
+    return value.isStr() && value.get_str().size() == 64 &&
+        value.get_str() != std::string(64, '0') &&
+        std::all_of(value.get_str().begin(), value.get_str().end(), [](char c) {
+            return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+        });
+}
+
+void CheckWorkflowFundingPreview(const UniValue& preview)
+{
+    if (!preview.isObject() || !SetupHash(preview.find_value("plan_id")) ||
+        !preview.find_value("executed").isFalse() || !preview.find_value("accepted").isFalse() ||
+        !preview.find_value("cancelled").isFalse() || !preview.find_value("preparation").isArray())
+        throw std::runtime_error("PAYMASTER_SETUP_POOL_PREVIEW_INCOMPLETE");
+    for (const char* key : {"maximum_fee_satoshis", "maximum_total_fee_satoshis",
+                           "admission_dgb_slots", "operational_dgb_slots", "admission_carrier_slots", "operational_carrier_slots",
+                           "missing_admission_dgb_slots", "missing_operational_dgb_slots", "missing_admission_carrier_slots", "missing_operational_carrier_slots",
+                           "admission_dgb_satoshis_each", "operational_dgb_satoshis_each", "carrier_cents_each", "total_output_satoshis", "total_carrier_cents"}) {
+        if (!preview.find_value(key).isNum() || preview.find_value(key).getInt<int64_t>() < 0)
+            throw std::runtime_error("PAYMASTER_SETUP_POOL_PREVIEW_INCOMPLETE");
+    }
+}
+} // namespace
+
+SetupWorkflow::SetupWorkflow(const UniValue& snapshot, const SetupChoices& choices, UniValue reviewed_funding)
+    : m_steps(BuildSetupPlan(snapshot, choices)), m_snapshot(snapshot),
+      m_approved_funding(std::move(reviewed_funding))
+{
+}
+
+void SetupWorkflow::RequirePhase(Phase phase) const
+{
+    if (m_phase != phase) throw std::runtime_error("PAYMASTER_SETUP_UNEXPECTED_EFFECT");
+}
+
+SetupWorkflow::Effect SetupWorkflow::Next() const
+{
+    if (m_phase == Phase::COMPLETE) return {EffectKind::COMPLETE, {}, {}};
+    if (m_phase == Phase::OBSERVE) {
+        SetupStep call;
+        call.method = "getpaymasteroperatorinfo";
+        return {EffectKind::OBSERVE, std::move(call), {}};
+    }
+    auto call = m_steps.at(m_step);
+    if (m_phase == Phase::REVIEW) return {EffectKind::REVIEW_FUNDING, {}, m_funding};
+    if (m_phase == Phase::PREVIEW) return {EffectKind::PREVIEW_FUNDING, std::move(call), {}};
+    if (m_phase == Phase::FUNDING) {
+        auto options = call.params[0];
+        options.pushKV("execute", true);
+        options.pushKV("plan_id", m_funding.find_value("plan_id"));
+        call.params = UniValue{UniValue::VARR};
+        call.params.push_back(std::move(options));
+        call.unlock = true;
+    }
+    return {EffectKind::CALL, std::move(call), {}};
+}
+
+void SetupWorkflow::VerifyStep(const UniValue& snapshot) const
+{
+    const auto& step = m_steps.at(m_step);
+    if (step.method == "createpaymasteridentity") {
+        const auto& provider = snapshot.find_value("provider");
+        if (!SetupHash(provider.find_value("provider_id")) ||
+            !SetupMatches(step.expected.find_value("display_name"), provider.find_value("display_name")))
+            throw std::runtime_error("PAYMASTER_SETUP_IDENTITY_CHANGED");
+    } else {
+        CheckSetupSaved(step, snapshot);
+    }
+}
+
+bool SetupWorkflow::StepAlreadySaved(const UniValue& snapshot) const
+{
+    try {
+        VerifyStep(snapshot);
+        return true;
+    } catch (const std::exception&) { return false; }
+}
+
+void SetupWorkflow::Observe(const UniValue& snapshot)
+{
+    RequirePhase(Phase::OBSERVE);
+    CheckSetupContext(m_snapshot, snapshot);
+    if (m_step > 0) CheckSetupSaved(m_steps.at(m_step - 1), snapshot);
+    const bool reconciled = m_reconcile_call && StepAlreadySaved(snapshot);
+    if (m_verify_reply) VerifyStep(snapshot);
+    m_snapshot = snapshot;
+    if (m_verify_reply || reconciled) ++m_step;
+    m_verify_reply = m_reconcile_call = false;
+    m_phase = m_step == m_steps.size() ? Phase::COMPLETE :
+        m_steps.at(m_step).method == "preparepaymasterpool" ? Phase::PREVIEW : Phase::CALL;
+}
+
+void SetupWorkflow::AcceptReply(const UniValue& reply)
+{
+    if (m_phase == Phase::FUNDING) {
+        if (!reply.find_value("accepted").isTrue() ||
+            !SetupMatches(m_funding.find_value("plan_id"), reply.find_value("plan_id")))
+            throw std::runtime_error("PAYMASTER_SETUP_FUNDING_REPLY_MISMATCH");
+        m_uncertain_funding = {};
+    } else {
+        RequirePhase(Phase::CALL);
+        const auto& step = m_steps.at(m_step);
+        CheckSetupReply(step, reply);
+        if (step.method == "createpaymasteridentity") {
+            auto provider = m_snapshot.find_value("provider");
+            provider.pushKV("provider_id", reply.find_value("provider_id"));
+            m_snapshot.pushKV("provider", std::move(provider));
+        }
+    }
+    m_verify_reply = true;
+    m_phase = Phase::OBSERVE;
+}
+
+bool SetupWorkflow::FundingAlreadySaved(const UniValue& preview) const
+{
+    if (!m_uncertain_funding.isObject()) return false;
+    bool dgb = m_uncertain_funding.find_value("total_output_satoshis").getInt<int64_t>() == 0;
+    bool dd = m_uncertain_funding.find_value("total_carrier_cents").getInt<int64_t>() == 0;
+    for (const auto& record : preview.find_value("preparation").getValues()) {
+        if (!SetupMatches(m_uncertain_funding.find_value("plan_id"), record.find_value("plan_id"))) continue;
+        const auto& state = record.find_value("state");
+        if (!state.isStr() || (state.get_str() != "pending_creation" && state.get_str() != "pending_confirmation" &&
+            state.get_str() != "complete" && state.get_str() != "conflict") ||
+            !SetupMatches(m_uncertain_funding.find_value("maximum_fee_satoshis"), record.find_value("maximum_fee_satoshis")))
+            throw std::runtime_error("PAYMASTER_SETUP_FUNDING_STATE_CHANGED");
+        const auto& asset = record.find_value("asset");
+        if (!asset.isStr()) throw std::runtime_error("PAYMASTER_SETUP_FUNDING_STATE_CHANGED");
+        if (asset.get_str() == "dgb") dgb = true;
+        else if (asset.get_str() == "dd_carrier") dd = true;
+        else throw std::runtime_error("PAYMASTER_SETUP_FUNDING_STATE_CHANGED");
+    }
+    return dgb && dd;
+}
+
+void SetupWorkflow::AcceptFundingPreview(const UniValue& preview)
+{
+    RequirePhase(Phase::PREVIEW);
+    CheckWorkflowFundingPreview(preview);
+    if (!SetupPoolNeeded(preview) || FundingAlreadySaved(preview)) {
+        m_verify_reply = true;
+        m_phase = Phase::OBSERVE;
+        m_uncertain_funding = {};
+        return;
+    }
+    m_funding = preview;
+    m_phase = SetupFundingWithinApproval(m_approved_funding, preview) ? Phase::FUNDING : Phase::REVIEW;
+}
+
+void SetupWorkflow::ReviewFunding(bool approved)
+{
+    RequirePhase(Phase::REVIEW);
+    if (!approved) {
+        m_funding = m_approved_funding = {};
+        m_phase = Phase::OBSERVE;
+        throw std::runtime_error("PAYMASTER_SETUP_FUNDING_NOT_APPROVED");
+    }
+    m_approved_funding = m_funding;
+    m_phase = Phase::FUNDING;
+}
+
+void SetupWorkflow::Retry()
+{
+    if (m_phase == Phase::COMPLETE) return;
+    if (m_phase == Phase::FUNDING) {
+        m_uncertain_funding = m_funding;
+        // A dispatched funding effect may have committed. Reconcile that
+        // exact saved plan before considering another execution or approval.
+        m_approved_funding = {};
+    }
+    if (m_phase == Phase::CALL) m_reconcile_call = true;
+    // Earlier configuration or read failures leave the frozen review valid.
+    // Its scope is still checked against a fresh preview before any funding.
+    m_funding = {};
+    m_phase = Phase::OBSERVE;
 }
 } // namespace DigiDollar::Paymaster

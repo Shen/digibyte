@@ -634,65 +634,51 @@ public:
                   << "Applying settings pauses an existing provider temporarily. Its identity and approved work are retained.\n"
                   << "This approves the displayed recurring budgets. Creating pool capital requires its exact preview approval next.\n";
         if (!OperatorConfirm("Apply this reviewed provider configuration and its displayed permissions?")) return EXIT_FAILURE;
-        const auto steps = BuildSetupPlan(snapshot, choices);
-        size_t setup_step{0};
-        for (const auto& step : steps) {
-            std::cout << "\nApplying " << ++setup_step << '/' << steps.size() << ": " << OperatorStepName(step.method) << "...\n" << std::flush;
-            const auto current = OperatorCall("getpaymasteroperatorinfo", empty, wallet);
-            CheckSetupContext(snapshot, current);
+        SetupWorkflow workflow{snapshot, choices};
+        std::optional<size_t> reported_step;
+        while (true) {
+            const auto effect = workflow.Next();
+            if (effect.kind == SetupWorkflow::EffectKind::COMPLETE) break;
+            if (effect.kind == SetupWorkflow::EffectKind::OBSERVE) {
+                const auto previous_step = workflow.StepIndex();
+                workflow.Observe(OperatorCall(effect.call.method, effect.call.params, wallet));
+                snapshot = workflow.Snapshot();
+                if (workflow.StepIndex() > previous_step)
+                    std::cout << "Saved and verified: " << OperatorStepName(workflow.Steps()[previous_step].method) << '\n';
+                continue;
+            }
+            if (effect.kind == SetupWorkflow::EffectKind::REVIEW_FUNDING) {
+                const auto& preview = effect.funding;
+                std::cout << "Capital to reserve: " << OperatorAmount(preview.find_value("total_output_satoshis").getInt<int64_t>())
+                          << " DGB + " << SetupFormatNumber(preview.find_value("total_carrier_cents").getInt<int64_t>(), 2)
+                          << " DD. This remains wallet-owned.\nMaximum total setup network fees: "
+                          << OperatorAmount(preview.find_value("maximum_total_fee_satoshis").getInt<int64_t>())
+                          << " DGB. This is the separate spending ceiling, not a fee estimate.\n"
+                          << "Confirmed and already pending reserves are included; only missing reserves are proposed.\n";
+                workflow.ReviewFunding(OperatorConfirm("Authorize exactly this finite setup? Already accepted work keeps its existing authority."));
+                continue;
+            }
+            if (!reported_step || *reported_step != workflow.StepIndex()) {
+                reported_step = workflow.StepIndex();
+                std::cout << "\nApplying " << workflow.StepIndex() + 1 << '/' << workflow.Steps().size()
+                          << ": " << OperatorStepName(effect.call.method) << "...\n" << std::flush;
+            }
             bool relock{false};
             try {
-                if (step.method == "preparepaymasterpool") {
-                    const auto preview = OperatorCall(step.method, step.params, wallet);
-                    if (!SetupPoolNeeded(preview)) {
-                        std::cout << "Pool targets are already covered; no additional funding approval.\n";
-                        continue;
-                    }
-                    std::cout << "Capital to reserve: " << OperatorAmount(preview.find_value("total_output_satoshis").getInt<int64_t>())
-                              << " DGB + " << SetupFormatNumber(preview.find_value("total_carrier_cents").getInt<int64_t>(), 2)
-                              << " DD. This remains wallet-owned.\nMaximum total setup network fees: "
-                              << OperatorAmount(preview.find_value("maximum_total_fee_satoshis").getInt<int64_t>())
-                              << " DGB. This is the separate spending ceiling, not a fee estimate.\n"
-                              << "Confirmed and already pending reserves are included; only missing reserves are proposed.\n";
-                    if (!OperatorConfirm("Authorize exactly this finite setup? Already accepted work keeps its existing authority.")) throw std::runtime_error("Funding not approved. Provider remains safely paused; saved policy changes are retained.");
-                    auto options = step.params[0];
-                    options.pushKV("plan_id", preview.find_value("plan_id"));
-                    options.pushKV("execute", true);
-                    if (current.find_value("provider").find_value("wallet_locked").isTrue()) {
-                        OperatorUnlock(wallet, 300, false, &current);
-                        relock = true;
-                    }
-                    const auto result = OperatorCall(step.method, OperatorParams({options}), wallet);
-                    if (!result.find_value("accepted").isTrue() || result.find_value("plan_id").write() != preview.find_value("plan_id").write()) throw std::runtime_error("Core did not confirm the exact funding approval");
-                    std::cout << "Funding accepted; confirmation and readiness are separate.\n";
-                } else {
-                    if (step.unlock && current.find_value("provider").find_value("wallet_locked").isTrue()) {
-                        OperatorUnlock(wallet, 300, false, &current);
-                        relock = true;
-                    }
-                    const auto result = OperatorCall(step.method, step.params, wallet);
-                    CheckSetupReply(step, result);
-                    if (step.method == "createpaymasteridentity") {
-                        auto bound_provider = snapshot.find_value("provider");
-                        bound_provider.pushKV("provider_id", result.find_value("provider_id"));
-                        snapshot.pushKV("provider", bound_provider);
-                    }
+                if (effect.call.unlock && workflow.Snapshot().find_value("provider").find_value("wallet_locked").isTrue()) {
+                    OperatorUnlock(wallet, 300, false, &workflow.Snapshot());
+                    relock = true;
                 }
+                const auto result = OperatorCall(effect.call.method, effect.call.params, wallet);
+                if (effect.kind == SetupWorkflow::EffectKind::PREVIEW_FUNDING) workflow.AcceptFundingPreview(result);
+                else workflow.AcceptReply(result);
                 if (relock) OperatorCall("walletlock", empty, wallet);
             } catch (...) {
                 if (relock) {
-                    try {
-                        OperatorCall("walletlock", empty, wallet);
-                    } catch (...) {
-                    }
+                    try { OperatorCall("walletlock", empty, wallet); } catch (...) {}
                 }
                 throw;
             }
-            const auto after = OperatorCall("getpaymasteroperatorinfo", empty, wallet);
-            CheckSetupContext(snapshot, after);
-            CheckSetupSaved(step, after);
-            snapshot = after;
-            std::cout << "Saved and verified: " << OperatorStepName(step.method) << '\n';
         }
         OperatorStep(7, "Fund, unlock and verify completion");
         std::cout << "DGB funds network fees and reserves. Customer-paid service also needs DD reserve capital.\n"

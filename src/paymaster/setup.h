@@ -3,6 +3,7 @@
 #ifndef DIGIBYTE_PAYMASTER_SETUP_H
 #define DIGIBYTE_PAYMASTER_SETUP_H
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <iosfwd>
@@ -107,5 +108,51 @@ void CheckSetupContext(const UniValue& expected, const UniValue& current);
 void CheckSetupReply(const SetupStep& step, const UniValue& result);
 void CheckSetupSaved(const SetupStep& step, const UniValue& snapshot);
 bool SetupPoolNeeded(const UniValue& preview);
+/** A fresh executable preview may shrink a reviewed financial scope, never
+ * enlarge it. This is a frontend approval bound, not wallet spending authority. */
+bool SetupFundingWithinApproval(const UniValue& approved, const UniValue& current);
+
+/** Shared setup progression. Adapters execute effects and own user interaction
+ * and unlock leases; every mutation still passes the native wallet operation.
+ * Successful replies require saved-state observation before advancing. Retry
+ * first reconciles a possibly successful call and never renews funding consent. */
+class SetupWorkflow
+{
+public:
+    enum class EffectKind { OBSERVE, CALL, PREVIEW_FUNDING, REVIEW_FUNDING, COMPLETE };
+    struct Effect {
+        EffectKind kind;
+        SetupStep call;
+        UniValue funding;
+    };
+
+    SetupWorkflow(const UniValue& snapshot, const SetupChoices& choices,
+                  UniValue reviewed_funding = {});
+    Effect Next() const;
+    void Observe(const UniValue& snapshot);
+    void AcceptReply(const UniValue& reply);
+    void AcceptFundingPreview(const UniValue& preview);
+    void ReviewFunding(bool approved);
+    void Retry();
+    const UniValue& Snapshot() const { return m_snapshot; }
+    const std::vector<SetupStep>& Steps() const { return m_steps; }
+    size_t StepIndex() const { return m_step; }
+
+private:
+    enum class Phase { OBSERVE, CALL, PREVIEW, REVIEW, FUNDING, COMPLETE };
+    void RequirePhase(Phase phase) const;
+    void VerifyStep(const UniValue& snapshot) const;
+    bool StepAlreadySaved(const UniValue& snapshot) const;
+    bool FundingAlreadySaved(const UniValue& preview) const;
+    std::vector<SetupStep> m_steps;
+    UniValue m_snapshot;
+    UniValue m_approved_funding;
+    UniValue m_funding;
+    UniValue m_uncertain_funding;
+    size_t m_step{0};
+    Phase m_phase{Phase::OBSERVE};
+    bool m_verify_reply{false};
+    bool m_reconcile_call{false};
+};
 } // namespace DigiDollar::Paymaster
 #endif

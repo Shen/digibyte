@@ -37,8 +37,261 @@ SetupChoices Choices()
     choices.pool.pushKV("execute", false);
     return choices;
 }
+
+UniValue WorkflowFunding()
+{
+    UniValue preview{UniValue::VOBJ};
+    preview.pushKV("plan_id", std::string(64, 'a'));
+    preview.pushKV("executed", false);
+    preview.pushKV("accepted", false);
+    preview.pushKV("cancelled", false);
+    preview.pushKV("preparation", UniValue{UniValue::VARR});
+    for (const auto* key : {"admission_dgb_slots", "missing_admission_dgb_slots", "admission_carrier_slots", "missing_admission_carrier_slots"}) preview.pushKV(key, 3);
+    for (const auto* key : {"operational_dgb_slots", "missing_operational_dgb_slots", "operational_carrier_slots", "missing_operational_carrier_slots"}) preview.pushKV(key, 1);
+    for (const auto* key : {"admission_dgb_satoshis_each", "operational_dgb_satoshis_each", "maximum_fee_satoshis"}) preview.pushKV(key, 20000000);
+    preview.pushKV("carrier_cents_each", 100);
+    preview.pushKV("total_output_satoshis", 80000000);
+    preview.pushKV("total_carrier_cents", 400);
+    preview.pushKV("maximum_total_fee_satoshis", 40000000);
+    return preview;
+}
+
+// Simulate only the external effects of setup RPCs. The reducer must still
+// require its separate reply and saved-observation boundaries.
+UniValue SaveWorkflowStep(const SetupStep& step, UniValue& snapshot)
+{
+    auto provider = snapshot.find_value("provider");
+    UniValue reply = step.expected;
+    if (step.method == "createpaymasteridentity") {
+        reply.pushKV("provider_id", std::string(64, 'b'));
+        reply.pushKV("identity_key", std::string(64, 'c'));
+        reply.pushKV("created_at", 1);
+        provider.pushKV("provider_id", reply.find_value("provider_id"));
+        provider.pushKV("display_name", reply.find_value("display_name"));
+    } else if (step.method == "setpaymasterpolicy") {
+        provider.pushKV("policy", step.expected);
+    } else if (step.method == "setpaymastersafetypolicy") {
+        auto safety = snapshot.find_value("safety");
+        safety.pushKV("policy", step.expected);
+        snapshot.pushKV("safety", safety);
+    } else if (step.method == "setpaymasterliquiditypolicy") {
+        UniValue liquidity{UniValue::VOBJ};
+        liquidity.pushKV("policy", step.expected);
+        provider.pushKV("liquidity", liquidity);
+    } else {
+        for (const auto& key : step.expected.getKeys()) provider.pushKV(key, step.expected.find_value(key));
+        if (step.method == "stoppaymaster") {
+            provider.pushKV("enabled", false);
+            provider.pushKV("autostart", false);
+        }
+    }
+    snapshot.pushKV("provider", provider);
+    return reply;
+}
+
+void AdvanceWorkflowToFunding(SetupWorkflow& workflow, UniValue& snapshot)
+{
+    for (size_t count{0}; count < 32; ++count) {
+        const auto effect = workflow.Next();
+        if (effect.kind == SetupWorkflow::EffectKind::PREVIEW_FUNDING) return;
+        if (effect.kind == SetupWorkflow::EffectKind::OBSERVE) workflow.Observe(snapshot);
+        else if (effect.kind == SetupWorkflow::EffectKind::CALL) workflow.AcceptReply(SaveWorkflowStep(effect.call, snapshot));
+        else BOOST_FAIL("Unexpected setup effect before funding");
+    }
+    BOOST_FAIL("Setup did not reach its bounded funding step");
+}
 } // namespace
 BOOST_AUTO_TEST_SUITE(paymaster_setup_tests)
+BOOST_AUTO_TEST_CASE(workflow_checks_context_replies_and_saved_state_before_advancing)
+{
+    auto snapshot = Snapshot();
+    SetupWorkflow workflow{snapshot, Choices()};
+    BOOST_CHECK(workflow.Next().kind == SetupWorkflow::EffectKind::OBSERVE);
+    auto other_wallet = snapshot;
+    other_wallet.pushKV("wallet_generation", "replacement-load");
+    BOOST_CHECK_THROW(workflow.Observe(other_wallet), std::runtime_error);
+    workflow.Observe(snapshot);
+    const auto identity = workflow.Next();
+    BOOST_CHECK(identity.kind == SetupWorkflow::EffectKind::CALL);
+    BOOST_CHECK_EQUAL(identity.call.method, "createpaymasteridentity");
+    BOOST_CHECK_THROW(workflow.AcceptReply(UniValue{UniValue::VOBJ}), std::runtime_error);
+    auto saved = snapshot;
+    const auto reply = SaveWorkflowStep(identity.call, saved);
+    workflow.AcceptReply(reply);
+    BOOST_CHECK_EQUAL(workflow.StepIndex(), 0U);
+    BOOST_CHECK_THROW(workflow.Observe(snapshot), std::runtime_error);
+    workflow.Retry();
+    workflow.Observe(saved);
+    BOOST_CHECK_EQUAL(workflow.StepIndex(), 1U);
+    const auto policy = workflow.Next();
+    BOOST_CHECK_EQUAL(policy.call.method, "setpaymasterpolicy");
+    workflow.AcceptReply(policy.call.expected);
+    BOOST_CHECK_THROW(workflow.Observe(saved), std::runtime_error);
+    SaveWorkflowStep(policy.call, saved);
+    workflow.Observe(saved);
+    BOOST_CHECK_EQUAL(workflow.StepIndex(), 2U);
+}
+
+BOOST_AUTO_TEST_CASE(workflow_reconciles_a_lost_successful_reply_without_repeating_the_call)
+{
+    auto snapshot = Snapshot();
+    SetupWorkflow workflow{snapshot, Choices()};
+    workflow.Observe(snapshot);
+    const auto identity = workflow.Next();
+    SaveWorkflowStep(identity.call, snapshot); // RPC committed, reply lost.
+    workflow.Retry();
+    BOOST_CHECK(workflow.Next().kind == SetupWorkflow::EffectKind::OBSERVE);
+    workflow.Observe(snapshot);
+    BOOST_CHECK_EQUAL(workflow.StepIndex(), 1U);
+    const auto policy = workflow.Next();
+    SaveWorkflowStep(policy.call, snapshot); // Same boundary for a policy write.
+    workflow.Retry();
+    workflow.Observe(snapshot);
+    BOOST_CHECK_EQUAL(workflow.StepIndex(), 2U);
+    const auto safety = workflow.Next();
+    workflow.Retry(); // Failed before commit: only that same reviewed step may run.
+    workflow.Observe(snapshot);
+    BOOST_CHECK_EQUAL(workflow.Next().call.method, safety.call.method);
+    BOOST_CHECK_EQUAL(workflow.Next().call.params.write(), safety.call.params.write());
+}
+
+BOOST_AUTO_TEST_CASE(workflow_funding_needs_exact_approval_and_rejects_changed_or_declined_scope)
+{
+    auto snapshot = Snapshot();
+    const auto reviewed = WorkflowFunding();
+    SetupWorkflow workflow{snapshot, Choices(), reviewed};
+    AdvanceWorkflowToFunding(workflow, snapshot);
+    auto reduced = reviewed;
+    reduced.pushKV("plan_id", std::string(64, 'd'));
+    reduced.pushKV("missing_admission_dgb_slots", 2);
+    reduced.pushKV("total_output_satoshis", 60000000);
+    workflow.AcceptFundingPreview(reduced);
+    const auto execute = workflow.Next();
+    BOOST_CHECK(execute.kind == SetupWorkflow::EffectKind::CALL && execute.call.unlock);
+    BOOST_CHECK(execute.call.params[0].find_value("execute").isTrue());
+    BOOST_CHECK_EQUAL(execute.call.params[0].find_value("plan_id").get_str(), std::string(64, 'd'));
+    UniValue forged{UniValue::VOBJ};
+    forged.pushKV("accepted", true);
+    forged.pushKV("plan_id", std::string(64, 'e'));
+    BOOST_CHECK_THROW(workflow.AcceptReply(forged), std::runtime_error);
+    workflow.Retry();
+    workflow.Observe(snapshot);
+    workflow.AcceptFundingPreview(reduced);
+    BOOST_CHECK(workflow.Next().kind == SetupWorkflow::EffectKind::REVIEW_FUNDING);
+    BOOST_CHECK_THROW(workflow.ReviewFunding(false), std::runtime_error);
+    BOOST_CHECK(workflow.Next().kind == SetupWorkflow::EffectKind::OBSERVE);
+    workflow.Retry();
+    workflow.Observe(snapshot);
+    auto larger = reviewed;
+    larger.pushKV("total_output_satoshis", 80000001);
+    BOOST_CHECK(!SetupFundingWithinApproval(reviewed, larger));
+    workflow.AcceptFundingPreview(larger);
+    BOOST_CHECK(workflow.Next().kind == SetupWorkflow::EffectKind::REVIEW_FUNDING);
+    workflow.ReviewFunding(true);
+    forged.pushKV("plan_id", larger.find_value("plan_id"));
+    workflow.AcceptReply(forged);
+    BOOST_CHECK(workflow.Next().kind == SetupWorkflow::EffectKind::OBSERVE);
+    workflow.Observe(snapshot);
+    BOOST_CHECK_EQUAL(workflow.Next().call.method, "setpaymasterruntimesettings");
+}
+
+BOOST_AUTO_TEST_CASE(workflow_retains_reviewed_funding_through_earlier_step_and_preview_retries)
+{
+    for (const bool committed : {false, true}) {
+        auto snapshot = Snapshot();
+        const auto reviewed = WorkflowFunding();
+        SetupWorkflow workflow{snapshot, Choices(), reviewed};
+        for (size_t count{0}; count < 8; ++count) {
+            const auto effect = workflow.Next();
+            if (effect.kind == SetupWorkflow::EffectKind::CALL && effect.call.method == "setpaymastersafetypolicy") break;
+            if (effect.kind == SetupWorkflow::EffectKind::OBSERVE) workflow.Observe(snapshot);
+            else {
+                BOOST_REQUIRE(effect.kind == SetupWorkflow::EffectKind::CALL);
+                workflow.AcceptReply(SaveWorkflowStep(effect.call, snapshot));
+            }
+        }
+        const auto safety = workflow.Next();
+        BOOST_REQUIRE_EQUAL(safety.call.method, "setpaymastersafetypolicy");
+        if (committed) SaveWorkflowStep(safety.call, snapshot);
+        workflow.Retry(); // Configuration failed, or committed with its reply lost.
+        workflow.Observe(snapshot);
+        AdvanceWorkflowToFunding(workflow, snapshot);
+        workflow.Retry(); // A read-only funding preview failed before its reply.
+        workflow.Observe(snapshot);
+        BOOST_REQUIRE(workflow.Next().kind == SetupWorkflow::EffectKind::PREVIEW_FUNDING);
+        auto reduced = reviewed;
+        reduced.pushKV("plan_id", std::string(64, 'd'));
+        reduced.pushKV("missing_admission_dgb_slots", 2);
+        reduced.pushKV("total_output_satoshis", 60000000);
+        workflow.AcceptFundingPreview(reduced);
+        const auto effect = workflow.Next();
+        BOOST_REQUIRE(effect.kind == SetupWorkflow::EffectKind::CALL);
+        BOOST_CHECK(effect.call.unlock);
+        BOOST_CHECK_EQUAL(effect.call.method, "preparepaymasterpool");
+        BOOST_CHECK(effect.call.params[0].find_value("execute").isTrue());
+        BOOST_CHECK_EQUAL(effect.call.params[0].find_value("plan_id").get_str(), std::string(64, 'd'));
+    }
+}
+
+BOOST_AUTO_TEST_CASE(workflow_lost_funding_reply_resumes_only_the_saved_exact_plan)
+{
+    for (const bool same_plan : {false, true}) {
+        auto snapshot = Snapshot();
+        SetupWorkflow workflow{snapshot, Choices()};
+        AdvanceWorkflowToFunding(workflow, snapshot);
+        auto preview = WorkflowFunding();
+        workflow.AcceptFundingPreview(preview);
+        workflow.ReviewFunding(true);
+        workflow.Retry(); // Exact execution may have committed; no reply exists.
+        workflow.Observe(snapshot);
+        UniValue preparation{UniValue::VARR};
+        for (const auto* asset : {"dgb", "dd_carrier"}) {
+            UniValue record{UniValue::VOBJ};
+            record.pushKV("asset", asset);
+            record.pushKV("state", "pending_creation");
+            record.pushKV("plan_id", std::string(64, same_plan ? 'a' : 'f'));
+            record.pushKV("maximum_fee_satoshis", preview.find_value("maximum_fee_satoshis"));
+            preparation.push_back(record);
+        }
+        preview.pushKV("preparation", preparation);
+        workflow.AcceptFundingPreview(preview);
+        if (same_plan) {
+            BOOST_CHECK(workflow.Next().kind == SetupWorkflow::EffectKind::OBSERVE);
+            workflow.Observe(snapshot);
+            BOOST_CHECK_EQUAL(workflow.Next().call.method, "setpaymasterruntimesettings");
+        } else {
+            BOOST_CHECK(workflow.Next().kind == SetupWorkflow::EffectKind::REVIEW_FUNDING);
+        }
+    }
+}
+
+BOOST_AUTO_TEST_CASE(workflow_rejects_incomplete_funding_and_completes_only_observed_steps)
+{
+    auto snapshot = Snapshot();
+    SetupWorkflow workflow{snapshot, Choices()};
+    AdvanceWorkflowToFunding(workflow, snapshot);
+    auto malformed = WorkflowFunding();
+    malformed.pushKV("accepted", true);
+    BOOST_CHECK_THROW(workflow.AcceptFundingPreview(malformed), std::runtime_error);
+    malformed.pushKV("accepted", false);
+    malformed.pushKV("maximum_fee_satoshis", UniValue{});
+    BOOST_CHECK_THROW(workflow.AcceptFundingPreview(malformed), std::runtime_error);
+    auto no_funding = WorkflowFunding();
+    for (const auto* key : {"missing_admission_dgb_slots", "missing_operational_dgb_slots", "missing_admission_carrier_slots", "missing_operational_carrier_slots"}) no_funding.pushKV(key, 0);
+    for (const auto* key : {"total_output_satoshis", "total_carrier_cents", "maximum_total_fee_satoshis"}) no_funding.pushKV(key, 0);
+    workflow.AcceptFundingPreview(no_funding);
+    for (size_t count{0}; count < 8 && workflow.Next().kind != SetupWorkflow::EffectKind::COMPLETE; ++count) {
+        const auto effect = workflow.Next();
+        if (effect.kind == SetupWorkflow::EffectKind::OBSERVE) workflow.Observe(snapshot);
+        else {
+            BOOST_REQUIRE(effect.kind == SetupWorkflow::EffectKind::CALL);
+            workflow.AcceptReply(SaveWorkflowStep(effect.call, snapshot));
+        }
+    }
+    BOOST_CHECK(workflow.Next().kind == SetupWorkflow::EffectKind::COMPLETE);
+    BOOST_CHECK(snapshot.find_value("provider").find_value("enabled").isTrue());
+    BOOST_CHECK_EQUAL(workflow.Snapshot().write(), snapshot.write());
+}
 BOOST_AUTO_TEST_CASE(edited_sponsored_proposal_preserves_the_fee_draft_and_raw_validation)
 {
     auto draft = SetupDefaultPolicy();

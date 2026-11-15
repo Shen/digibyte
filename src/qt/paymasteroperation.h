@@ -3,6 +3,7 @@
 #ifndef DIGIBYTE_QT_PAYMASTEROPERATION_H
 #define DIGIBYTE_QT_PAYMASTEROPERATION_H
 
+#include <paymaster/setup.h>
 #include <univalue.h>
 #include <QString>
 #include <algorithm>
@@ -178,18 +179,7 @@ public:
      * previously approved financial scope. No float arithmetic or UI defaults. */
     static bool fundingWithinApproval(const UniValue& approved, const UniValue& current)
     {
-        try {
-            for (const char* key : {"admission_dgb_satoshis_each", "operational_dgb_satoshis_each", "carrier_cents_each", "maximum_fee_satoshis",
-                                   "admission_dgb_slots", "operational_dgb_slots", "admission_carrier_slots", "operational_carrier_slots"}) {
-                if (!approved.find_value(key).isNum() || approved.find_value(key).getInt<int64_t>() != current.find_value(key).getInt<int64_t>()) return false;
-            }
-            for (const char* key : {"total_output_satoshis", "total_carrier_cents", "maximum_total_fee_satoshis",
-                                   "missing_admission_dgb_slots", "missing_operational_dgb_slots", "missing_admission_carrier_slots", "missing_operational_carrier_slots"}) {
-                const auto actual = current.find_value(key).getInt<int64_t>();
-                if (actual < 0 || actual > approved.find_value(key).getInt<int64_t>()) return false;
-            }
-            return true;
-        } catch (const std::exception&) { return false; }
+        return DigiDollar::Paymaster::SetupFundingWithinApproval(approved, current);
     }
 };
 #endif

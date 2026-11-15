@@ -5932,6 +5932,7 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep_
     QTest::newRow("already-funded") << false << false << QString{};
     QTest::newRow("disabled-provider-accepted-pending") << true << false << QString{};
     QTest::newRow("encrypted-start") << true << true << QString{};
+    QTest::newRow("lost-successful-safety-reply") << false << false << QStringLiteral("lost-safety");
     QTest::newRow("wallet-change-open-wizard") << false << false << QStringLiteral("open");
     QTest::newRow("wallet-change-pending-preview") << false << false << QStringLiteral("preview");
     QTest::newRow("privacy-pending-read-success") << false << false << QStringLiteral("privacy-read-success");
@@ -6197,6 +6198,9 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
                 setup_write_order.push_back(QString::fromStdString(command));
                 safety_payloads.push_back(params[0]);
                 if (safety_attempts == 1) {
+                    // The write succeeded but its reply was lost. A retry must
+                    // observe these saved values without issuing it again.
+                    if (wallet_change_stage == QLatin1String("lost-safety")) safety_policy = params[0];
                     throw std::runtime_error("injected safety retry");
                 }
                 safety_policy = params[0];
@@ -6907,7 +6911,7 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
         QVERIFY(funding_ready_updated);
     }
     QCOMPARE(operating_policy_attempts, 1);
-    QCOMPARE(safety_attempts, 2);
+    QCOMPARE(safety_attempts, wallet_change_stage == QLatin1String("lost-safety") ? 1 : 2);
     QCOMPARE(enabled_requests, QList<bool>{true});
     QCOMPARE(pool_approvals, deferred_funding ? 1 : 0);
     if (deferred_funding) QVERIFY(funding_approved_while_disabled);
@@ -7187,7 +7191,7 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
     QVERIFY(sponsored_carrier_targets_cleared);
     QVERIFY(disabled_target_retained);
     QCOMPARE(operating_policy_attempts, 2);
-    QCOMPARE(safety_attempts, 4);
+    QCOMPARE(safety_attempts, wallet_change_stage == QLatin1String("lost-safety") ? 3 : 4);
     QCOMPARE(enabled_requests, QList<bool>({true, false}));
     QCOMPARE(setup_write_order, QStringList({
                                     QStringLiteral("stoppaymaster"),
@@ -7210,7 +7214,7 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
         advertised_policy.find_value("funding_models");
     QCOMPARE(final_models.size(), 1U);
     QCOMPARE(final_models[0].get_str(), std::string{"sponsored"});
-    const UniValue& bridge = safety_payloads.at(2);
+    const UniValue& bridge = safety_payloads.at(wallet_change_stage == QLatin1String("lost-safety") ? 1 : 2);
     QCOMPARE(bridge.find_value("user_paid").find_value(
         "maximum_network_fee_per_transaction_satoshis").getInt<qint64>(),
         10000000);
