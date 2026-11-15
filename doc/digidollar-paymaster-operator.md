@@ -379,11 +379,23 @@ matching/quiescent states can be adopted after review. Do not operate cloned
 stores as independent instances of one identity.
 An interrupted native reserve transaction can resume automatically from its exact
 saved signed journal during startup or maintenance reconciliation. This creates
-no replacement signature. Missing/corrupt journals, stale checkpoints and legacy
+no replacement signature. An interrupted ordinary provider-state commit also
+retains an exact wallet-side mutation journal. Reloading this wallet with a
+compatible build can finish only the mutation bound by the independent
+checkpoint; do not reset that checkpoint to recover from a commit error.
+Reload before changing wallet flags, locks or other captured records. Conflicting
+prior rows or a newly added restore guard prevent replay and wallet loading;
+they require review with the exact original wallet and checkpoint preserved.
+Missing/corrupt journals, stale checkpoints and legacy
 pending markers remain blocked for review; do not clear the marker or delete the
 independent checkpoint to restart service. See the
 [recovery contract](digidollar-paymaster-implementation.md#wallet-lifecycle)
 for the implementation constraints.
+`walletbroadcast=0` suppresses local Paymaster submission as well as ordinary
+wallet submission. Observations and protected commitments remain readable.
+Startup can reaccept exact pending finals locally when broadcasting is enabled;
+network relay follows wallet readiness and the ordinary resend schedule. Other
+holders of an already signed transaction can still publish it independently.
 Wallet backup and completion bookkeeping serialize with material configuration
 changes. A later change restores the reminder, including changes in the same
 timestamp second. If safety data cannot be read, the DD overview retains known

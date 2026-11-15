@@ -4,6 +4,53 @@ There is **no complete current-revision release certification** in this record.
 The candidate below and historical checkpoints identify actual verification;
 implemented behavior alone does not establish release acceptance.
 
+## Exact-final relay, checkpoint recovery and shared setup (2026-11-15)
+
+Review baseline: `3b9e5c5d6b2c657996be8926e9c2ea794d34b040`; implementation
+through `ead31b06fb`. AP1-AP5 now respect wallet broadcast policy and randomized
+relay opportunities, recover exact ordinary checkpoint mutations before wallet
+loading, share bounded peer-time checks, drive CLI/Qt setup through one workflow
+and share quote-validation phases. Weak legacy mutation APIs are private fixture
+access. Independent checks also caught relay-round loss during index rebuild
+and premature funding-consent revocation; both have explicit regressions.
+
+| Actual local check | Result and scope |
+| --- | --- |
+| Native | **77 distinct selected cases, 12630 assertions**, latest successful result per case across checkpoints, exit 0; Boost seed `20261115`, fixed random context seed. Includes exact journal replay/quarantine, failed preparation/final commits, real SQLite commit denial, V5/V6 capacity, quote/budget and recovery-finance reload, mixed flags/manual locks/prefix erase, bounded relay pages, peer clocks, setup, exact finals and ordinary wallet/DD checks. |
+| Native relay follow-up | The final partial link passes **7 cases, 956 assertions**: witnessed ordinary DGB admission/reannouncement, rejected stem expiry, exact stem inventory, client execution, provider crash boundaries and wallet DB checks. Four further ordinary DD/manual-selection cases pass **21 assertions**. These overlap the 77-case selection. |
+| Qt | **14 setup data rows and 2 ordinary DD cases**, exit 0, Windows/Fusion; init/cleanup excluded. Covers a lost successful safety reply, precommit retry, funding, encryption, privacy and wallet/context changes. The final partial link reruns the lost-reply row and both ordinary DD cases. |
+| Compilation | **40 translation units freshly compiled, including all 29 changed units**; source/object SHA256 pairs match final source. MSVC 19.43/toolset 14.43, Qt 5.15.10 static, `/std:c++20 /W3 /WX /Od /MT`. All **17 changed production units** pass C++17 `/Zs`; the isolated quote-extraction intermediate also passes. Retained dependencies have no complete transitive rebuild provenance. |
+| Architecture and scope | Working-tree dependency/cycle check, six boundary fixtures, JSON and whitespace checks pass. The operator explicitly approved the two additional native relay paths. Scope commit `06ee1c7e8c` passes comparison against the review baseline; implementation passes the trusted policy from that scope commit. No checker, dependency rule, validation or checkpoint guarantee was weakened. |
+
+Final native SHA256:
+`b500c89911f1c25477cc6047a60fd2d2c0c2bcc4db6659e1ab994d6342c7dbca`.
+Full Qt selection SHA256:
+`fd332569ce8a9b5ba3d4e88c6968e2045edd6613ab628e557ba304011a9ff0f7`.
+Final Qt follow-up SHA256:
+`ca212b3090769535021c97c76ce913a759b789803054905cdf5bea6b2aadb04b`.
+Exact commands, selections, logs and source/object hashes remain under local
+ignored `.ai/implement-review-3b9e/` and `.ai/implement-review-3b9e-qt/`, including
+`verification-final.json`. Counts above are unique cases, not sums of repeated
+runs. Earlier domain/persistence selections preceded the final one-line native
+relay fix; they were not all repeated in the final binary.
+
+The ordinary DGB regression first failed with `txn-already-in-mempool`; setting
+the existing native mempool-presence flag fixes Dandelion fallback without
+reimplementing relay in Paymaster. The first Qt run exposed consent revocation
+before funding and timed out after the failed row; the corrected workflow passes
+all 14 rows without weakening timer or consent assertions. Live provider fixtures
+now explicitly enable broadcasting and establish a synced tip for the separate
+nonblocking-index test. Disabled-broadcast cases retain exact signed authority.
+Initial compile/link diagnostics and failed runs remain in the local logs.
+
+Repository baseline guidance, node/wallet/test conventions and the canonical
+Paymaster boundaries/change record governed this work. Full daemon/GUI builds,
+full native/functional suites, live-peer restart/relay matrices, million-event
+resource limits, sanitizers, Tidy/plugin and cross-platform jobs were **not run**;
+they remain operator/release gates in the [runbook](digidollar-paymaster-testing.md).
+Journal recovery requires exact unchanged prior rows. A conflicting row or new
+restore guard refuses loading; this is not generic checkpoint adoption.
+
 ## Client closure, transport retirement and durable history (2026-11-15)
 
 Review baseline: `708693223d7fef07e65f0db756b8471e90f2c197`; code through

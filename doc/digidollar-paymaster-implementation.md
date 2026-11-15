@@ -88,6 +88,10 @@ Request IDs use the shared 36-byte UUID decoding limit in Direct, intent,
 recovery and persisted authority records. Oversized lengths fail before string
 allocation; valid V5/V6 and record serialization bytes are unchanged.
 Announcements last up to 600 seconds; quote default/maximum is 60 seconds.
+Remote timestamps share a checked 60-second positive clock-skew allowance,
+including recovery envelopes, capacity observations and client acceptance of a
+provider response. Local record chronology and expiry/signing deadlines remain
+strict; this allowance never renews spending authority.
 An announcement may become unavailable before expiry. Expiry does not prove
 already signed spending authority harmless.
 
@@ -340,6 +344,13 @@ Periodic durable rebroadcast pages provider commits, signed attempts and client
 finals; validation then uses the transaction-to-session index to reload only
 matching sessions. Exact manifests, signatures, chain preflight and reorg/pruning
 checks remain mandatory.
+Observation and relay use separate disposable page cursors. An ordinary wallet
+resend opportunity starts a bounded relay round that continues on later ticks;
+an unreadable Paymaster page does not postpone the ordinary resend schedule.
+Wallet-load recovery reaccepts exact finals locally without Dandelion routing.
+Every submission respects `walletbroadcast`; relay additionally requires the
+ordinary wallet's broadcast readiness. A locally reaccepted final is offered for
+relay on its later scheduled round. Deferral retains its exact signed authority.
 
 ## Wallet lifecycle
 
@@ -405,6 +416,11 @@ CLI and Qt use `CalculateSetupCapital` for checked reserve amounts. Paid-refill
 approval requires a complete current provider offer; Qt binds its reviewed fee
 basis and liquidity revision atomically with `expected_provider_policy_hash`
 and `expected_revision` on `setpaymasterliquiditypolicy`.
+Their shared `SetupWorkflow` owns step progression, saved-state verification,
+exact funding review and retry reconciliation. Frontends execute its effects and
+retain their own input, presentation and unlock lifetimes. A lost setter reply
+is reconciled before replay; a lost funding reply grants no approval for another
+plan.
 
 Maintenance reconciliation keeps record timestamps and the ledger accounting
 high-water mark monotonic. Saved policy revisions can advance accounting time
@@ -496,6 +512,21 @@ retain the journal and fence; recovery does not change those states to inactive.
 Its OS lock, flush and high-water ordering are unchanged.
 Keep a compatible build while native work is pending: earlier builds do not
 implement this journal's recovery or ordinary fee-input protection.
+
+Ordinary checkpointed provider mutations use a separate versioned
+`pmcheckpointjournal` in the wallet database. Before advancing the external
+checkpoint, Core persists the exact raw before/after mutation, including wallet
+flags and lock-owner changes. The external token commits that complete intent;
+keys and transaction metadata never leave the wallet. Wallet loading resolves
+only that exact intent before decoding flags, locks or financial records. A
+preparation whose external checkpoint never advanced is discarded. A committed
+external intent replays only against its exact prior rows; corrupt, unknown,
+restored or conflicting state stays fenced. Recovery creates no new signature
+and never accepts an arbitrary one-generation checkpoint gap. Keep a compatible
+build while either kind of journal is pending. Reload before making further
+wallet changes: even an independently edited captured flag or lock is a divergent
+prior row and must not be overwritten. An invalid journal or a newly added
+restore guard fails wallet loading rather than silently adopting the mutation.
 
 Policy and pool setters initialize records only after a status-bearing read
 proves `NOT_FOUND`. Read errors and unsupported versions preserve budgets, pool

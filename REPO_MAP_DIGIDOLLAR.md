@@ -616,13 +616,13 @@ API: [RPC groups](doc/digidollar-paymaster.md) and [client contract](doc/digidol
 | Source | Responsibility |
 |---|---|
 | `src/paymaster/types.*`, `protocol.*`, `wire.*` | Records, commitments and bounded serialization. |
-| `src/paymaster/txbuilder.*`, `psbt.*` | Collaborative transfer, exact manifest checks and the shared persisted provider-signature envelope decoder. `BuildQuoteTransferParameters` in `protocol.*` shares input/output arrangement between provider and trusted client-template construction. |
+| `src/paymaster/txbuilder.*`, `psbt.*` | Collaborative transfer, exact manifest checks and the shared persisted provider-signature envelope decoder. `protocol.*` shares input/output arrangement and quote binding/resource/signature phases between provider and client trust boundaries. |
 | `src/paymaster/provider.*`, `provider_policy.*`, `reservation.*`, `sponsorship.*` | Admission, policies, slots and budgets. |
 | `src/paymaster/directory.*`, `validation.*`, `client.*`, `reputation.*`, `recovery.*` | Verified discovery, selection, retries and recovery. |
 | `src/paymaster/manager.*`, `transport.h` | Dedicated Direct channels, authenticated admission, shared connection quotas. |
 | `Manager::LeaseResults`, `LeaseRecoveryResults` | Client result leases protect received artifacts until durable acceptance and explicit acknowledgement. |
 | `src/paymaster/help.h` | Informational node/GUI RPC and terminal-assistant help, separate from argument registration. |
-| `src/paymaster/setup.*`, `cli.*` | Shared setup decisions and terminal setup/status assistant; `CalculateSetupCapital` checks known fee basis and reserve amounts before multiplication. `SetupSelectLiquidity` reviews capacity presets while preserving automation choices, `DescribeSetupFunding` explains preparation-specific capital/fees. Read-only `OperatorFeeLimitConflicts` checks the executable fee against offer and payment caps for GUI, CLI and operator RPC status. |
+| `src/paymaster/setup.*`, `cli.*` | `SetupWorkflow` owns shared CLI/Qt step, funding and retry progression; adapters execute typed effects. Shared capital, liquidity, funding and fee-conflict decisions remain read-only until explicit execution. |
 | `src/rpc/paymaster.cpp` | Preview/apply node configuration and bounded IP/Tor endpoint diagnostics. Diagnostic leases stop at V2/capability negotiation and cannot authorize payment traffic; `rpc_paymaster_endpoint.py` covers TCP and SOCKS5 routes. |
 
 Ordinary DD consensus/history checks remain authoritative. See
@@ -1138,6 +1138,7 @@ Files outside the DigiDollar/Oracle directories that contain DD integration code
 
 ### src/node/transaction.cpp
 - ⚠️ DD-aware transaction broadcast handling, oracle data relay
+- Native Dandelion fallback reannounces existing pooled transactions without repeating admission; ordinary DGB regression in `src/test/dandelion_tests.cpp` also checks exact witness preservation.
 
 ### src/rpc/client.cpp
 - ⚠️ Registers all DD RPC command parameter types (54 `CRPCConvertParam` rows at `src/rpc/client.cpp:306-363`)
@@ -1599,6 +1600,7 @@ remote provider identity locally.
 | `paymaster_wallet_psbt_tests.cpp` | Wallet ownership proofs, role-limited signing, mutations before either party signs, and correctly signed malicious DD quotes rejected by independent client reconstruction |
 | `paymaster_wallet_store_tests.cpp` | Durable session/attempt state, derived index, exact replay, recovery, reorg and transactional failure handling. |
 | `paymaster_wallet_security_tests.cpp` | Manifest/budget binding, crash windows, final validation, restore quarantine and real SQLite failure/reopen. |
+| `wallet/test/paymaster_checkpoint.h`, `wallet/test/paymaster_chain.h` | Commit-boundary fault injection and explicitly private legacy-state fixture access; neither is a product authorization API. |
 | `digidollar_persistence_wallet_tests.cpp` | Full wallet DD persistence: balances, positions, transactions, keys across restart |
 | `digidollar_wallet_security_tests.cpp` | Wallet-level DD security: key protection, unauthorized access, encryption boundaries; full history ownership checks, descriptor-only missing-address-key recovery/persistence, self-send/receive/redemption-change rows and locked/reloaded key recognition; HD descriptor probe counts private expansions and rejects public-only/leaf-key ownership; unresolved locked descriptor matches recover after unlock instead of entering the foreign cache |
 | `rh59_coincontrol_dd_lock_bypass_tests.cpp` | RH-59: coin-control / lockunspent bypass on preset DD inputs (W7; partially reverted in `ce0abf4e3a`) |

@@ -571,6 +571,33 @@ git diff -w $paymasterBases.official_baseline HEAD
 
 ## Review follow-up regressions
 
+For the broadcast/checkpoint/setup follow-up to review `3b9e5c5d6b`, use freshly
+built candidate binaries and the isolated Windows temporary directory above.
+Start with the following narrow selections; the setup suite is small and also
+checks the existing CLI paths:
+
+```powershell
+& ./build_msvc/x64/Release/test_digibyte.exe '--run_test=paymaster_types_tests/peer_timestamps_allow_bounded_skew_without_overflow:paymaster_recovery_tests/recovery_envelopes_share_peer_clock_skew_and_strict_expiry,recovery_request_response_chronology_handles_distinct_clocks:paymaster_protocol_tests/provider_and_client_share_quote_structure_and_signature_firewall:paymaster_setup_tests' --report_level=detailed --random=20261115
+if ($LASTEXITCODE -ne 0) { throw 'Validation and setup regressions failed' }
+& ./build_msvc/x64/Release/test_digibyte.exe '--run_test=paymaster_wallet_security_tests/checkpoint_failed_intent_commit_keeps_previous_authority,checkpoint_exact_journal_replays_all_financial_rows_before_wallet_load,checkpoint_unbound_intent_cannot_create_authority,checkpoint_journal_corruption_and_restoration_never_authorize_replay,checkpoint_native_journal_repairs_only_adjacent_exact_commit_gaps,checkpoint_sqlite_commit_failure_retains_independent_high_water_mark:paymaster_wallet_identity_tests/capacity_expiry_failed_commit_preserves_checkpoint_guard,v5_capacity_expiry_failed_commit_preserves_checkpoint_guard:paymaster_wallet_store_tests/provider_quote_failed_commit_requires_checkpoint_review:paymaster_wallet_finance_tests/recovery_final_commit_failure_cannot_publish_finance_or_spend_budget' --report_level=detailed --random=20261115
+if ($LASTEXITCODE -ne 0) { throw 'Checkpoint recovery regressions failed' }
+& ./build_msvc/x64/Release/test_digibyte.exe '--run_test=paymaster_wallet_store_tests/scheduled_relay_rounds_visit_every_bounded_stream_independently,scheduled_relay_pages_preserve_ordinary_cadence_and_cancel_on_policy:paymaster_wallet_security_tests/durable_client_final_executor_revalidates_authority_and_replays_exact_payment' --report_level=detailed --random=20261115
+if ($LASTEXITCODE -ne 0) { throw 'Broadcast policy regressions failed' }
+```
+
+The scheduler cases test bounded opportunities with synthetic candidates, not
+successful financial execution. The executor uses real admission and exact signed
+artifacts with broadcasting disabled, import, local-only startup and later relay.
+Also run `dandelion_tests/already_pooled_transaction_reannounces_without_stem_destination`:
+it admits an ordinary witnessed DGB spend and its funding parent through the real
+node, then checks native Dandelion fallback without duplicate admission or witness
+replacement. `txn-already-in-mempool` before relay is a failure, not success.
+Retest provider payment/recovery, native journals, ordinary wallet database and
+manual-lock behavior too. Run Qt `paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep`
+including `lost-successful-safety-reply`, plus the existing funding, context,
+wallet-switch and ordinary DD cases. A lost successful setter reply must cause
+one setter call; failed precommit work still needs its existing retry.
+
 For the closure/transport/history/backup/finance follow-up to review `708693223d`,
 use freshly built binaries from the candidate. The following selection covers
 nine distinct native cases, including one 300-session transport sequence:
@@ -1105,9 +1132,13 @@ the old implementation may also pass a run that misses the Windows handle race.
 
 Database-failure fixtures must distinguish wallet transaction rollback from
 the independent provider checkpoint. A rejected row write leaves both unchanged;
-a rejected DB commit can leave the external checkpoint ahead, requiring review
-instead of an immediate retry. Capacity-expiry and provider-quote tests cover
-successful completion and commit-failure quarantine in separate fixtures.
+a rejected intent-preparation commit also leaves both unchanged. A rejected
+final DB commit can leave an independently committed checkpoint and an exact
+wallet-side journal. The wallet stays fenced until load-boundary recovery
+validates and completes that exact mutation. Native execution journals retain
+their separate exact-replay contract. Inject failure at the intended commit
+boundary and assert the journal as well as unchanged prior financial rows.
+Missing, future, tampered or mismatched journals must remain quarantined.
 Inject malformed copied records through the mock database, without performing a
 legitimate provider mutation that advances the original identity's checkpoint.
 Client-only fixtures retain the remote provider key in their artifacts, rather
