@@ -170,6 +170,7 @@ DIGIBYTE_CORE_H = \
   paymaster/setup.h \
   paymaster/help.h \
   paymaster/types.h \
+  paymaster/conflict.h \
   paymaster/reservation.h \
   paymaster/directory.h \
   paymaster/manager.h \
@@ -416,6 +417,7 @@ DIGIBYTE_CORE_H = \
   wallet/paymasterapplication_internal.h \
   wallet/paymasteridentity.h \
   wallet/paymasterprovider.h \
+  wallet/paymasterconflicts.h \
   wallet/paymasterstore.h \
   wallet/paymastersessionindex.h \
   wallet/paymasterstore_internal.h \
@@ -847,6 +849,7 @@ libdigibyte_common_a_SOURCES = \
   paymaster/psbt.cpp \
   paymaster/recovery.cpp \
   paymaster/provider.cpp \
+  paymaster/conflict_merkle.cpp \
   paymaster/finance.cpp \
   paymaster/provider_policy.cpp \
   paymaster/protocol.cpp \

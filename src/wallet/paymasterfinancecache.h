@@ -9,6 +9,7 @@
 namespace DigiDollar::Paymaster {
 struct ProviderAttempt;
 struct ProviderCommitRecord;
+struct ProviderConflictClosure;
 struct ProviderMaintenanceLedger;
 struct ProviderPoolEntry;
 struct AlternativeRecoveryRecord;
@@ -27,6 +28,8 @@ void QueuePaymasterFinanceRecord(const WalletBatch*, WalletDatabase&,
                                  const DigiDollar::Paymaster::ProviderAttempt&);
 void QueuePaymasterFinanceRecord(const WalletBatch*, WalletDatabase&,
                                  const DigiDollar::Paymaster::ProviderCommitRecord&);
+void QueuePaymasterFinanceRecord(const WalletBatch*, WalletDatabase&,
+                                 const DigiDollar::Paymaster::ProviderConflictClosure&);
 void QueuePaymasterFinanceRecord(const WalletBatch*, WalletDatabase&,
                                  const DigiDollar::Paymaster::AlternativeRecoveryRecord&);
 void QueuePaymasterFinanceRecord(const WalletBatch*, WalletDatabase&,

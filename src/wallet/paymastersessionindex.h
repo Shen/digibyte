@@ -18,13 +18,40 @@ class WalletDatabase;
 /** Disposable scheduling progress, never financial authority. Independent
  * scans must not advance one another. Wallet unload discards all progress. */
 enum class PaymasterScan { QUOTE_EXPIRY, RECONCILIATION, CLIENT_FINALS, CAPACITY_SNAPSHOTS, RECOVERIES, PROVIDER_COMMITS, SIGNED_ATTEMPTS, POOL_SUCCESSORS,
-                          RELAY_PROVIDER_COMMITS, RELAY_SIGNED_ATTEMPTS, RELAY_CLIENT_FINALS, RECOVERY_POOL_SUCCESSORS };
+                          RELAY_PROVIDER_COMMITS, RELAY_SIGNED_ATTEMPTS, RELAY_CLIENT_FINALS, RECOVERY_POOL_SUCCESSORS, PROVIDER_CONFLICTS };
 struct PaymasterScanPosition {
     std::string request;
     uint256 record;
 };
 PaymasterScanPosition GetPaymasterScanPosition(WalletDatabase& database, PaymasterScan scan);
 void SetPaymasterScanPosition(WalletDatabase& database, PaymasterScan scan, const PaymasterScanPosition& position);
+struct PaymasterConflictScanPosition {
+    uint16_t version{2};
+    int next_height{0};
+    uint256 previous_block;
+    bool anchored{false};
+    std::vector<uint256> parent_blocks;
+    uint32_t next_input{0};
+    template <typename Stream> void Serialize(Stream& stream) const
+    {
+        stream << version << next_height << previous_block << anchored << parent_blocks << next_input;
+    }
+    template <typename Stream> void Unserialize(Stream& stream)
+    {
+        stream >> version >> next_height >> previous_block >> anchored;
+        const auto count = ReadCompactSize(stream);
+        if (version != 2 || count > 1024 || count > stream.size() / 32)
+            throw std::ios_base::failure("invalid Paymaster conflict scan");
+        parent_blocks.resize(count);
+        for (auto& block : parent_blocks) stream >> block;
+        stream >> next_input;
+    }
+};
+PaymasterConflictScanPosition GetPaymasterConflictScanPosition(WalletDatabase& database, const uint256& authority);
+/** Persist disposable progress to avoid starvation when the bounded RAM cache
+ * evicts a cursor or the wallet restarts. Its anchor is revalidated on use. */
+bool SetPaymasterConflictScanPosition(WalletDatabase& database, const uint256& authority,
+    const PaymasterConflictScanPosition& position);
 /** One randomized relay opportunity drains bounded pages across later ticks.
  * Observations have separate cursors; this disposable progress grants no
  * payment authority and is discarded on wallet unload or policy cancellation. */

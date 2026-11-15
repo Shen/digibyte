@@ -4,6 +4,7 @@
 
 #include <wallet/paymasterfinance.h>
 #include <wallet/paymasterfinancecache.h>
+#include <wallet/paymasterconflicts.h>
 
 #include <chainparams.h>
 #include <hash.h>
@@ -88,6 +89,7 @@ struct PendingFinanceChanges {
     std::map<uint256, std::pair<PaymasterId, uint256>> commits;
     std::set<uint256> erased_commits;
     std::set<uint256> erased_attempts;
+    std::set<uint256> transactions;
     std::set<uint256> events;
     std::map<uint256, FinanceEventChange> event_changes;
     bool rebuild{false};
@@ -138,19 +140,30 @@ auto MaintenanceContribution(const ProviderMaintenanceRecord& record)
                     record.actual_fee.value, record.created_at);
 }
 
-void ObserveTransaction(CWallet& wallet, const uint256& txid, int64_t created_at,
+bool ObserveTransaction(CWallet& wallet, const uint256& txid, const uint256& provider, int64_t created_at,
                         ProviderFinanceEventState& state, int64_t& confirmed_at,
-                        std::map<uint256, int64_t>& confirmation_times)
+                        std::map<uint256, int64_t>& confirmation_times, std::string& error)
 {
     state = ProviderFinanceEventState::PENDING;
     confirmed_at = 0;
+    WalletBatch batch{wallet.GetDatabase()};
+    PaymasterConflictClosure closure;
+    const auto closure_status = batch.ReadPaymasterConflictClosureWithStatus(txid, closure);
+    if (closure_status == DatabaseReadStatus::FOUND) {
+        bool settled{false};
+        if (!ReadSettledPaymasterConflict(wallet, batch, txid, provider, closure.authority_hash, settled, error)) return false;
+        if (settled) { state = ProviderFinanceEventState::INVALIDATED; return true; }
+    } else if (closure_status != DatabaseReadStatus::NOT_FOUND) {
+        error = "PAYMASTER_CONFLICT_DATABASE_READ";
+        return false;
+    }
     const auto transaction = wallet.mapWallet.find(txid);
-    if (transaction == wallet.mapWallet.end()) return;
+    if (transaction == wallet.mapWallet.end()) return true;
     if (transaction->second.isAbandoned() || transaction->second.isConflicted()) {
         state = ProviderFinanceEventState::INVALIDATED;
-        return;
+        return true;
     }
-    if (wallet.GetTxDepthInMainChain(transaction->second) <= 0) return;
+    if (wallet.GetTxDepthInMainChain(transaction->second) <= 0) return true;
     state = ProviderFinanceEventState::CONFIRMED;
     int64_t block_time{0};
     if (const auto* confirmed = transaction->second.state<TxStateConfirmed>()) {
@@ -159,6 +172,7 @@ void ObserveTransaction(CWallet& wallet, const uint256& txid, int64_t created_at
         block_time = entry->second;
     }
     confirmed_at = std::max(created_at, block_time > 0 ? block_time : transaction->second.GetTxTime());
+    return true;
 }
 
 bool PrepareObservation(ProviderFinanceEvent& event, const ProviderFinanceEvent* previous,
@@ -347,6 +361,11 @@ void QueuePaymasterFinanceRecord(const WalletBatch* owner, WalletDatabase& datab
     });
 }
 
+void QueuePaymasterFinanceRecord(const WalletBatch* owner, WalletDatabase& database, const ProviderConflictClosure& closure)
+{
+    QueueFinanceChange(owner, database, [&](auto& changes) { changes.transactions.insert(closure.transaction_id); });
+}
+
 void QueuePaymasterFinanceRecord(const WalletBatch* owner, WalletDatabase& database, const AlternativeRecoveryRecord& recovery)
 {
     if (!recovery.provider_side || recovery.phase != AlternativeRecoveryPhase::FINAL_COMMITTED) return;
@@ -491,6 +510,7 @@ void PaymasterFinanceTransactionEnd(const WalletBatch* owner, bool committed)
         state->events_by_time[EventPosition(event)] = id;
         if (!contribute(event, 1)) { state->initialized = false; break; }
     }
+    for (const auto& txid : changes.transactions) state->Mark(FinanceWorkKind::TRANSACTION, txid);
     for (const auto& id : changes.events) state->Mark(FinanceWorkKind::EVENT, id, true);
 }
 
@@ -551,7 +571,7 @@ bool RebuildProviderFinancesAtTime(CWallet& wallet, size_t& changed_events,
     std::map<uint256, int64_t> confirmation_times;
     const auto transaction_state = [&](const uint256& txid, int64_t created_at,
                                        ProviderFinanceEventState& state, int64_t& confirmed_at) {
-        ObserveTransaction(wallet, txid, created_at, state, confirmed_at, confirmation_times);
+        return ObserveTransaction(wallet, txid, identity.provider_id, created_at, state, confirmed_at, confirmation_times, error);
     };
     const auto apply_event = [&](ProviderFinanceEvent event, const ProviderMaintenanceRecord* source = nullptr,
                                   bool historical_cost_repair = false) {
@@ -595,7 +615,7 @@ bool RebuildProviderFinancesAtTime(CWallet& wallet, size_t& changed_events,
         auto event = saved;
         bool repair_cost{false};
         if (!CorrectHistoricalMaintenanceCost(wallet, event, repair_cost)) return false;
-        transaction_state(event.transaction_id, event.created_at, event.state, event.confirmed_at);
+        if (!transaction_state(event.transaction_id, event.created_at, event.state, event.confirmed_at)) return false;
         if (!apply_event(std::move(event), nullptr, repair_cost)) return false;
     }
 
@@ -632,8 +652,8 @@ bool RebuildProviderFinancesAtTime(CWallet& wallet, size_t& changed_events,
         event.dgb_cost = *cost;
         event.created_at = std::max(
             identity.created_at, transaction->second.GetTxTime());
-        transaction_state(event.transaction_id, event.created_at,
-                          event.state, event.confirmed_at);
+        if (!transaction_state(event.transaction_id, event.created_at,
+                          event.state, event.confirmed_at)) return false;
         return apply_event(std::move(event));
     };
     for (const auto& [txid, transaction] : wallet.mapWallet) {
@@ -716,7 +736,7 @@ bool RebuildProviderFinancesAtTime(CWallet& wallet, size_t& changed_events,
                 ProviderFinanceEvent event;
                 if (!RecoveryEvent(identity, recovery, commit, event, error)) return false;
                 recovery_ids_by_commit.emplace(commit.commit_key, recovery.recovery_id);
-                transaction_state(event.transaction_id, event.created_at, event.state, event.confirmed_at);
+                if (!transaction_state(event.transaction_id, event.created_at, event.state, event.confirmed_at)) return false;
                 if (!apply_event(std::move(event))) return false;
                 continue;
             }
@@ -735,8 +755,8 @@ bool RebuildProviderFinancesAtTime(CWallet& wallet, size_t& changed_events,
         }
         ProviderFinanceEvent event;
         if (!TransferEvent(identity, attempt->second, commit, event, error)) return false;
-        transaction_state(event.transaction_id, event.created_at,
-                          event.state, event.confirmed_at);
+        if (!transaction_state(event.transaction_id, event.created_at,
+                          event.state, event.confirmed_at)) return false;
         if (!apply_event(std::move(event))) return false;
     }
 
@@ -748,9 +768,9 @@ bool RebuildProviderFinancesAtTime(CWallet& wallet, size_t& changed_events,
             if (record.transaction_id.IsNull()) continue;
             ProviderFinanceEvent event;
             if (!MaintenanceEvent(wallet, identity, record, event, error)) return false;
-            transaction_state(event.transaction_id, event.created_at,
-                              event.state, event.confirmed_at);
-            if (record.state == ProviderMaintenanceState::FAILED ||
+            if (!transaction_state(event.transaction_id, event.created_at,
+                              event.state, event.confirmed_at)) return false;
+            if (record.state == ProviderMaintenanceState::FAILED || record.state == ProviderMaintenanceState::CONFLICT_SETTLED ||
                 record.state == ProviderMaintenanceState::RELEASED) {
                 event.state = ProviderFinanceEventState::INVALIDATED;
                 event.confirmed_at = 0;
@@ -903,14 +923,14 @@ bool ReconcileProviderFinancesAtTime(CWallet& wallet, size_t& changed_events,
         }
         bool historical_cost_repair{false};
         if (!CorrectHistoricalMaintenanceCost(wallet, event, historical_cost_repair)) return false;
-        ObserveTransaction(wallet, event.transaction_id, event.created_at, event.state, event.confirmed_at, confirmation_times);
+        if (!ObserveTransaction(wallet, event.transaction_id, event.provider_id, event.created_at, event.state, event.confirmed_at, confirmation_times, error)) return false;
         std::optional<ProviderMaintenanceRecord> source;
         {
             std::lock_guard<std::mutex> lock{state->mutex};
             const auto maintenance = state->maintenance.find(event.event_id);
             if (maintenance != state->maintenance.end()) {
                 source = maintenance->second;
-                if (source->state == ProviderMaintenanceState::FAILED ||
+                if (source->state == ProviderMaintenanceState::FAILED || source->state == ProviderMaintenanceState::CONFLICT_SETTLED ||
                     source->state == ProviderMaintenanceState::RELEASED) {
                     event.state = ProviderFinanceEventState::INVALIDATED;
                     event.confirmed_at = 0;

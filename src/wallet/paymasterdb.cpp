@@ -78,6 +78,7 @@ struct SessionIndex {
     uint64_t revision{0};
     uint256 capacity_cleanup_after;
     std::map<PaymasterScan, PaymasterScanPosition> scans;
+    std::map<uint256, PaymasterConflictScanPosition> conflict_scans;
     PaymasterRelayRound relay_round;
     std::map<uint256, std::set<std::string>> by_transaction;
     std::map<std::string, FinalIds> by_request;
@@ -325,6 +326,33 @@ PaymasterRelayRound GetPaymasterRelayRound(WalletDatabase& database)
 {
     std::lock_guard<std::mutex> lock{session_index_mutex};
     return session_indexes[&database].relay_round;
+}
+
+PaymasterConflictScanPosition GetPaymasterConflictScanPosition(WalletDatabase& database, const uint256& authority)
+{
+    {
+        std::lock_guard<std::mutex> lock{session_index_mutex};
+        const auto& scans = session_indexes[&database].conflict_scans;
+        const auto found = scans.find(authority);
+        if (found != scans.end()) return found->second;
+    }
+    PaymasterConflictScanPosition saved;
+    if (database.MakeBatch()->ReadWithStatus(std::make_pair(std::string{"pmconflictscan"}, authority), saved) != DatabaseReadStatus::FOUND ||
+        saved.version != 2 || saved.next_height < 0) return {};
+    return saved;
+}
+
+bool SetPaymasterConflictScanPosition(WalletDatabase& database, const uint256& authority,
+    const PaymasterConflictScanPosition& position)
+{
+    // Progress never changes Paymaster authority or a checkpoint. A corrupted
+    // row can only delay discovery; every positive hit is proved independently.
+    if (!database.MakeBatch()->Write(std::make_pair(std::string{"pmconflictscan"}, authority), position)) return false;
+    std::lock_guard<std::mutex> lock{session_index_mutex};
+    auto& scans = session_indexes[&database].conflict_scans;
+    if (!scans.count(authority) && scans.size() >= 256) scans.erase(scans.begin());
+    scans[authority] = position;
+    return true;
 }
 
 bool BeginPaymasterRelayRound(WalletDatabase& database)
@@ -1857,6 +1885,79 @@ bool WalletBatch::ReadPaymasterTombstone(
            DatabaseReadStatus::FOUND;
 }
 
+namespace {
+struct StrictConflictClosure : PaymasterConflictClosure {
+    template <typename Stream> void Unserialize(Stream& stream)
+    {
+        if (stream.size() > MAX_BYTES) throw std::ios_base::failure("oversized Paymaster conflict proof");
+        PaymasterConflictClosure::Unserialize(stream);
+        if (!stream.empty()) throw std::ios_base::failure("trailing Paymaster conflict proof data");
+    }
+};
+bool ValidConflictClosure(const PaymasterConflictClosure& record)
+{
+    DigiDollar::Paymaster::ConflictInclusion inclusion;
+    std::string error;
+    return record.version == PaymasterConflictClosure::CURRENT_VERSION &&
+        record.blocked_ancestors.size() <= 256 &&
+        record.genesis_hash == Params().GenesisBlock().GetHash() && !record.provider_id.IsNull() &&
+        !record.authority_hash.IsNull() && !record.transaction_id.IsNull() && !record.witness_hash.IsNull() &&
+        record.closed_at > 0 && !record.original_transaction.empty() && !record.winner_transaction.empty() &&
+        !record.merkle_block.empty() && GetSerializeSize(record, CLIENT_VERSION) <= PaymasterConflictClosure::MAX_BYTES &&
+        DigiDollar::Paymaster::ValidatePaymasterConflictInclusion(record, inclusion, error);
+}
+bool ConflictOutputDisposition(const PaymasterConflictClosure& closure, DigiDollar::Paymaster::ProviderPoolEntry& entry)
+{
+    CMutableTransaction original;
+    try {
+        SpanReader stream{::PROTOCOL_VERSION, closure.original_transaction};
+        stream >> original;
+        if (!stream.empty() || entry.outpoint.hash != closure.transaction_id || entry.outpoint.n >= original.vout.size() ||
+            original.vout[entry.outpoint.n].scriptPubKey != entry.script_pub_key) return false;
+    } catch (const std::exception&) { return false; }
+    DigiDollar::Paymaster::SettleProviderPoolSuccessorConflict(entry, closure.closed_at);
+    return true;
+}
+} // namespace
+
+DatabaseReadStatus WalletBatch::ReadPaymasterConflictClosureWithStatus(const uint256& txid, PaymasterConflictClosure& closure)
+{
+    StrictConflictClosure decoded;
+    const auto status = ReadPaymasterVersionedRecord(std::make_pair(std::string{"pmconflictclosure"}, txid), decoded);
+    closure = std::move(decoded);
+    if (status != DatabaseReadStatus::FOUND) return status;
+    return closure.transaction_id == txid && ValidConflictClosure(closure)
+        ? DatabaseReadStatus::FOUND : DatabaseReadStatus::READ_ERROR;
+}
+
+bool WalletBatch::WritePaymasterConflictClosure(const PaymasterConflictClosure& closure)
+{
+    if (!ValidConflictClosure(closure)) return false;
+    const bool own = !PaymasterCheckpointInTransaction(this);
+    if (own && !TxnBegin()) return false;
+    const auto fail = [&] { PaymasterCheckpointFailed(this); if (own) TxnAbort(); return false; };
+    if (!WritePaymasterIC(std::make_pair(std::string{"pmconflictclosure"}, closure.transaction_id), closure, false)) return fail();
+    CMutableTransaction original;
+    SpanReader stream{::PROTOCOL_VERSION, closure.original_transaction};
+    stream >> original; // Canonical inclusion validation above decoded these exact bytes.
+    for (uint32_t index{0}; index < original.vout.size(); ++index) {
+        DigiDollar::Paymaster::ProviderPoolEntry archived;
+        const auto status = ReadPaymasterPoolHistoryWithStatus(COutPoint{closure.transaction_id, index}, archived);
+        if (status == DatabaseReadStatus::NOT_FOUND) continue;
+        if (status != DatabaseReadStatus::FOUND || !ConflictOutputDisposition(closure, archived) ||
+            !WritePaymasterIC(std::make_pair(std::string{"pmpoolhistory"}, archived.outpoint), archived, true)) return fail();
+    }
+    const auto cursor_key = (HashWriter{} << closure.authority_hash << closure.transaction_id << closure.witness_hash).GetHash();
+    if (!ErasePaymasterIC(std::make_pair(std::string{"pmconflictscan"}, cursor_key))) return fail();
+    {
+        std::lock_guard<std::mutex> lock{session_index_mutex};
+        session_indexes[&m_database].conflict_scans.erase(cursor_key);
+    }
+    if (!own || TxnCommit()) return true;
+    TxnAbort();
+    return false;
+}
+
 bool WalletBatch::WritePaymasterProviderCommit(const DigiDollar::Paymaster::ProviderCommitRecord& commit, bool overwrite)
 {
     if (commit.version != DigiDollar::Paymaster::ProviderCommitRecord::CURRENT_VERSION ||
@@ -1896,6 +1997,15 @@ bool WalletBatch::ReadPaymasterProviderCommit(
 
 bool WalletBatch::ErasePaymasterProviderCommit(const uint256& commit_key)
 {
+    DigiDollar::Paymaster::ProviderCommitRecord commit;
+    const auto status = ReadPaymasterProviderCommitWithStatus(commit_key, commit);
+    if (status != DatabaseReadStatus::FOUND && status != DatabaseReadStatus::NOT_FOUND) return false;
+    if (status == DatabaseReadStatus::FOUND) {
+        const auto key = (HashWriter{} << (HashWriter{} << commit).GetHash() << commit.final_txid << commit.raw_transaction_hash).GetHash();
+        if (!ErasePaymasterIC(std::make_pair(std::string{"pmconflictscan"}, key))) return false;
+        std::lock_guard<std::mutex> lock{session_index_mutex};
+        session_indexes[&m_database].conflict_scans.erase(key);
+    }
     return ErasePaymasterIC(std::make_pair(DBKeys::PAYMASTER_PROVIDER_COMMIT, commit_key));
 }
 
@@ -2303,10 +2413,15 @@ bool WalletBatch::WritePaymasterProviderPool(
         // A source can become SPENT and be pruned in the same working copy.
         // Retain its protected before-image even when the terminal row was
         // never written separately. History grants no capacity authority.
+        auto disposition = old;
+        PaymasterConflictClosure closure;
+        const auto closed = ReadPaymasterConflictClosureWithStatus(old.outpoint.hash, closure);
+        if (closed != DatabaseReadStatus::FOUND && closed != DatabaseReadStatus::NOT_FOUND) return fail();
         if (IsActiveProviderPoolState(old.state) && old.state != PoolEntryState::RESERVED &&
-            old.state != PoolEntryState::COMMITTED) continue;
+            old.state != PoolEntryState::COMMITTED && closed == DatabaseReadStatus::NOT_FOUND) continue;
         if (!history_readable(old.outpoint)) return fail();
-        if (!WritePaymasterIC(std::make_pair(std::string{"pmpoolhistory"}, old.outpoint), old, true) ||
+        if (closed == DatabaseReadStatus::FOUND && !ConflictOutputDisposition(closure, disposition)) return fail();
+        if (!WritePaymasterIC(std::make_pair(std::string{"pmpoolhistory"}, old.outpoint), disposition, true) ||
             !WritePaymasterIC(std::string{"pmpoolhistoryversion"}, uint16_t{1}, true)) return fail();
     }
     // Explicit re-enrolment replaces history only in the same transaction as
@@ -2475,13 +2590,29 @@ bool WalletBatch::HasPaymasterLiquidityPolicy()
     return m_batch->Exists(DBKeys::PAYMASTER_LIQUIDITY_POLICY);
 }
 
+namespace {
+bool MaintenanceConflictClosuresReadable(WalletBatch& batch, const DigiDollar::Paymaster::ProviderMaintenanceLedger& ledger)
+{
+    using namespace DigiDollar::Paymaster;
+    for (const auto& record : ledger.records) {
+        if (record.state != ProviderMaintenanceState::CONFLICT_SETTLED) continue;
+        PaymasterConflictClosure closure;
+        ProviderIdentityRecord identity;
+        if (batch.ReadPaymasterConflictClosureWithStatus(record.transaction_id, closure) != DatabaseReadStatus::FOUND ||
+            batch.ReadPaymasterIdentityWithStatus(identity) != DatabaseReadStatus::FOUND ||
+            closure.provider_id != identity.provider_id || closure.authority_hash != GetPaymasterMaintenanceConflictAuthority(record)) return false;
+    }
+    return true;
+}
+} // namespace
+
 bool WalletBatch::WritePaymasterMaintenanceLedger(
     const DigiDollar::Paymaster::ProviderMaintenanceLedger& ledger,
     bool overwrite)
 {
     using namespace DigiDollar::Paymaster;
     std::string error;
-    if (!ValidateProviderMaintenanceLedger(ledger, error)) return false;
+    if (!ValidateProviderMaintenanceLedger(ledger, error) || !MaintenanceConflictClosuresReadable(*this, ledger)) return false;
     const bool own = !PaymasterCheckpointInTransaction(this);
     if (own && !TxnBegin()) return false;
     const auto fail = [&] {
@@ -2505,7 +2636,7 @@ bool WalletBatch::WritePaymasterMaintenanceLedger(
     }
     if (std::any_of(ledger.records.begin(), ledger.records.end(), [&](const auto& record) {
             return record.IsPreparation() && record.plan_id == authorization.plan_id &&
-                   record.state == ProviderMaintenanceState::RELEASED;
+                   (record.state == ProviderMaintenanceState::RELEASED || record.state == ProviderMaintenanceState::CONFLICT_SETTLED);
         })) {
         authorization.revoked = true;
     }
@@ -2537,7 +2668,8 @@ DatabaseReadStatus WalletBatch::ReadPaymasterMaintenanceLedgerWithStatus(
         (setup_status != DatabaseReadStatus::NOT_FOUND || ledger.version != 1)) {
         return setup_status == DatabaseReadStatus::NOT_FOUND ? DatabaseReadStatus::READ_ERROR : setup_status;
     }
-    return ValidateProviderMaintenanceLedger(ledger, error) ? DatabaseReadStatus::FOUND : DatabaseReadStatus::READ_ERROR;
+    return ValidateProviderMaintenanceLedger(ledger, error) && MaintenanceConflictClosuresReadable(*this, ledger)
+        ? DatabaseReadStatus::FOUND : DatabaseReadStatus::READ_ERROR;
 }
 
 bool WalletBatch::WritePaymasterSetupAuthorization(

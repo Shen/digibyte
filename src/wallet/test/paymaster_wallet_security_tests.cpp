@@ -49,6 +49,7 @@
 #include <wallet/paymasteridentity.h>
 #include <wallet/paymasterfinance.h>
 #include <wallet/paymastercheckpoint.h>
+#include <wallet/paymasterconflicts.h>
 #include <wallet/paymasterprovider.h>
 #include <wallet/paymasterpsbt.h>
 #include <wallet/paymasterservice.h>
@@ -10567,5 +10568,122 @@ BOOST_AUTO_TEST_CASE(exact_wallet_persistence_requires_durable_receive_history)
     BOOST_CHECK_EQUAL(received, 1000);
 }
 
+
+BOOST_FIXTURE_TEST_CASE(provider_conflict_proof_requires_exact_active_chain_input_and_safety_depth, TestChain100Setup)
+{
+    wallet::CWallet observed{m_node.chain.get(), "conflict-proof", CreateMockableWalletDatabase()};
+    BOOST_REQUIRE(observed.LoadWallet() == DBErrors::LOAD_OK);
+    const auto funding = CreateValidMempoolTransaction(m_coinbase_txns[0], 0, 1,
+        coinbaseKey, CScript() << OP_TRUE, 2 * COIN, false);
+    const auto funding_block = CreateAndProcessBlock({funding}, CScript() << OP_TRUE);
+    CMutableTransaction original;
+    original.vin.emplace_back(COutPoint{funding_block.vtx.at(1)->GetHash(), 0});
+    original.vout.emplace_back(COIN, CScript() << OP_TRUE);
+    auto winner = original;
+    winner.vout.front().nValue -= 1;
+    const auto winning_block = CreateAndProcessBlock({winner}, CScript() << OP_TRUE);
+    BOOST_REQUIRE(winning_block.GetHash() == WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Tip()->GetBlockHash()));
+    for (int i{0}; i < DEFAULT_REORG_SAFETY_DEPTH - 2; ++i) CreateAndProcessBlock({}, CScript() << OP_TRUE);
+    const auto update_tip = [&] {
+        SyncWithValidationInterfaceQueue();
+        LOCK(observed.cs_wallet);
+        LOCK(cs_main);
+        const auto* tip = m_node.chainman->ActiveChain().Tip();
+        observed.SetLastBlockProcessed(tip->nHeight, tip->GetBlockHash());
+    };
+    update_tip();
+    const uint256 provider{uint256::ONE}, authority{uint256S("4567")};
+    const CTransaction exact{original};
+    std::string error;
+    std::optional<PaymasterInputConflictProof> proof;
+    // The original was never inserted into mapWallet. Bounded historical
+    // discovery must still find a foreign winner, without treating absence as proof.
+    for (int i{0}; i < 24 && error.empty(); ++i)
+        proof = ObservePaymasterInputConflict(observed, exact, provider, authority, GetTime(), error);
+    BOOST_CHECK(!proof);
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_CONFLICT_PROOF_NOT_SETTLED");
+    CreateAndProcessBlock({}, CScript() << OP_TRUE);
+    update_tip();
+    proof = ObservePaymasterInputConflict(observed, exact, provider, authority, GetTime(), error);
+    BOOST_REQUIRE_MESSAGE(proof, error);
+    BOOST_CHECK(proof->Recheck(observed, exact, provider, authority, error));
+    auto record = proof->Record();
+    BOOST_CHECK(!VerifyPaymasterInputConflict(observed, CTransaction{winner}, provider, authority, record, error));
+    BOOST_CHECK(!VerifyPaymasterInputConflict(observed, exact, provider, uint256::ONE, record, error));
+    auto altered = record;
+    altered.witness_hash = uint256::ONE;
+    BOOST_CHECK(!VerifyPaymasterInputConflict(observed, exact, provider, authority, altered, error));
+    altered = record;
+    altered.merkle_block.back() ^= 1;
+    BOOST_CHECK(!VerifyPaymasterInputConflict(observed, exact, provider, authority, altered, error));
+    {
+        LOCK(observed.cs_wallet);
+        WalletBatch batch{observed.GetDatabase()};
+        BOOST_REQUIRE(batch.WritePaymasterConflictClosure(record));
+        PaymasterConflictClosure loaded;
+        BOOST_CHECK(batch.ReadPaymasterConflictClosureWithStatus(exact.GetHash(), loaded) == DatabaseReadStatus::FOUND);
+        BOOST_CHECK(VerifyPaymasterInputConflict(observed, exact, provider, authority, loaded, error));
+        BOOST_CHECK(!PaymasterConflictClosureIsAbsent(batch, exact.GetHash(), error));
+        BOOST_CHECK(!batch.WritePaymasterConflictClosure(record));
+        const auto intact = GetMockableDatabase(observed).m_records;
+        for (int scenario : {0, 1, 2}) {
+            auto raw = SerializePaymasterSecurityObject(record);
+            if (scenario == 0) raw = {2, 0};
+            if (scenario == 1) raw.push_back(0);
+            if (scenario == 2) raw.resize(PaymasterConflictClosure::MAX_BYTES + 1);
+            DataStream key, value;
+            key << std::make_pair(std::string{"pmconflictclosure"}, exact.GetHash());
+            value.write(MakeByteSpan(raw));
+            GetMockableDatabase(observed).m_records[SerializeData{key.begin(), key.end()}] = SerializeData{value.begin(), value.end()};
+            const auto before = GetMockableDatabase(observed).m_records;
+            const auto status = batch.ReadPaymasterConflictClosureWithStatus(exact.GetHash(), loaded);
+            BOOST_CHECK(status == (scenario == 0 ? DatabaseReadStatus::UNSUPPORTED_VERSION : DatabaseReadStatus::READ_ERROR));
+            BOOST_CHECK(!PaymasterConflictClosureIsAbsent(batch, exact.GetHash(), error));
+            BOOST_CHECK(GetMockableDatabase(observed).m_records == before);
+            GetMockableDatabase(observed).m_records = intact;
+        }
+    }
+    for (uint64_t i{1}; i <= 257; ++i) {
+        PaymasterConflictScanPosition cursor;
+        cursor.anchored = true;
+        cursor.next_height = i;
+        cursor.previous_block = winning_block.GetHash();
+        BOOST_REQUIRE(SetPaymasterConflictScanPosition(observed.GetDatabase(), SecurityTestId(authority, i), cursor));
+    }
+    BOOST_CHECK_EQUAL(GetPaymasterConflictScanPosition(observed.GetDatabase(), SecurityTestId(authority, 1)).next_height, 1);
+    ForgetPaymasterSessionIndex(observed.GetDatabase());
+    BOOST_CHECK_EQUAL(GetPaymasterConflictScanPosition(observed.GetDatabase(), SecurityTestId(authority, 257)).next_height, 257);
+    CMutableTransaction child;
+    child.vin.emplace_back(COutPoint{exact.GetHash(), 0});
+    child.vout.emplace_back(COIN - 2, CScript() << OP_TRUE);
+    CMutableTransaction grandchild;
+    grandchild.vin.emplace_back(COutPoint{child.GetHash(), 0});
+    grandchild.vout.emplace_back(COIN - 3, CScript() << OP_TRUE);
+    WITH_LOCK(observed.cs_wallet, BOOST_REQUIRE(observed.AddToWallet(MakeTransactionRef(child), TxStateInactive{})));
+    const uint256 descendant_authority{uint256S("4568")};
+    auto inherited = ObservePaymasterInputConflict(observed, CTransaction{grandchild}, provider, descendant_authority, GetTime(), error);
+    BOOST_REQUIRE_MESSAGE(inherited, error);
+    BOOST_CHECK_EQUAL(inherited->Record().blocked_ancestors.size(), 2U);
+    BOOST_CHECK(inherited->Recheck(observed, CTransaction{grandchild}, provider, descendant_authority, error));
+    auto forged = inherited->Record();
+    forged.blocked_ancestors.erase(forged.blocked_ancestors.begin());
+    BOOST_CHECK(!VerifyPaymasterInputConflict(observed, CTransaction{grandchild}, provider, descendant_authority, forged, error));
+    forged = inherited->Record();
+    forged.blocked_ancestors.front().back() ^= 1;
+    BOOST_CHECK(!VerifyPaymasterInputConflict(observed, CTransaction{grandchild}, provider, descendant_authority, forged, error));
+    auto& chainstate = m_node.chainman->ActiveChainstate();
+    CBlockIndex* index = WITH_LOCK(cs_main, return m_node.chainman->m_blockman.LookupBlockIndex(winning_block.GetHash()));
+    BlockValidationState disconnected;
+    BOOST_REQUIRE_MESSAGE(chainstate.InvalidateBlock(disconnected, index), disconnected.ToString());
+    BlockValidationState switched;
+    BOOST_REQUIRE_MESSAGE(chainstate.ActivateBestChain(switched), switched.ToString());
+    update_tip();
+    BOOST_CHECK(!proof->Recheck(observed, exact, provider, authority, error));
+    WITH_LOCK(cs_main, chainstate.ResetBlockFailureFlags(index));
+    BlockValidationState reconnected;
+    BOOST_REQUIRE_MESSAGE(chainstate.ActivateBestChain(reconnected), reconnected.ToString());
+    update_tip();
+    BOOST_CHECK_MESSAGE(proof->Recheck(observed, exact, provider, authority, error), error);
+}
 
 BOOST_AUTO_TEST_SUITE_END()

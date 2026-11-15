@@ -8,6 +8,7 @@
 
 #include <key.h>
 #include <paymaster/protocol.h>
+#include <paymaster/conflict.h>
 #include <paymaster/provider.h>
 #include <paymaster/recovery.h>
 #include <paymaster/reputation.h>
@@ -41,6 +42,7 @@ struct ProviderFinanceReport;
 } // namespace DigiDollar::Paymaster
 
 namespace wallet {
+using PaymasterConflictClosure = DigiDollar::Paymaster::ProviderConflictClosure;
 /** Immutable, already signed native work. Exact before/after accounting makes
  * replay idempotent; its hash is the independently retained pending token. */
 struct PaymasterMaintenanceExecutionLeg {
@@ -654,6 +656,8 @@ public:
     bool ReadPaymasterTombstone(const std::string& request_id, DigiDollar::Paymaster::IdempotencyTombstone& tombstone);
     bool HasPaymasterTombstone(const std::string& request_id);
     bool WritePaymasterProviderCommit(const DigiDollar::Paymaster::ProviderCommitRecord& commit, bool overwrite = false);
+    DatabaseReadStatus ReadPaymasterConflictClosureWithStatus(const uint256& txid, PaymasterConflictClosure& closure);
+    bool WritePaymasterConflictClosure(const PaymasterConflictClosure& closure);
     DatabaseReadStatus ReadPaymasterProviderCommitWithStatus(
         const uint256& commit_key,
         DigiDollar::Paymaster::ProviderCommitRecord& commit);

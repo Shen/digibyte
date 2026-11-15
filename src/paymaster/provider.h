@@ -544,6 +544,7 @@ enum class ProviderMaintenanceState : uint8_t {
     CONFIRMED,
     RELEASED,
     FAILED,
+    CONFLICT_SETTLED,
 };
 
 struct ProviderMaintenanceOutput {
@@ -575,7 +576,7 @@ struct ProviderMaintenanceOutput {
  * committed. Persisting the exact output scripts makes a broadcast recoverable
  * even if shutdown occurs before its txid is attached to this record. */
 struct ProviderMaintenanceRecord {
-    static constexpr uint16_t CURRENT_VERSION{4};
+    static constexpr uint16_t CURRENT_VERSION{5};
 
     uint16_t version{CURRENT_VERSION};
     uint256 operation_id;
@@ -610,6 +611,12 @@ struct ProviderMaintenanceRecord {
                kind == ProviderMaintenanceKind::PREPARE_CARRIER;
     }
 
+    bool IsClosed() const
+    {
+        return state == ProviderMaintenanceState::CONFIRMED || state == ProviderMaintenanceState::RELEASED ||
+               state == ProviderMaintenanceState::CONFLICT_SETTLED;
+    }
+
     /** A local conflict or abandonment does not revoke retained signatures.
      * Keep following and budgeting the exact transaction until it confirms. */
     bool HasUnresolvedTransaction() const
@@ -629,7 +636,7 @@ struct ProviderMaintenanceRecord {
     {
         READWRITE(obj.version, obj.operation_id, obj.plan_id,
             Using<EnumByteFormatter<static_cast<uint8_t>(ProviderMaintenanceKind::PREPARE_CARRIER)>>(obj.kind),
-            Using<EnumByteFormatter<static_cast<uint8_t>(ProviderMaintenanceState::FAILED)>>(obj.state),
+            Using<EnumByteFormatter<static_cast<uint8_t>(ProviderMaintenanceState::CONFLICT_SETTLED)>>(obj.state),
             obj.outputs, obj.source_inputs,
             obj.withdrawal_excess_script_pub_key,
             obj.withdrawal_excess_amount, obj.transaction_id,
@@ -640,6 +647,8 @@ struct ProviderMaintenanceRecord {
         }
     }
 };
+
+uint256 GetPaymasterMaintenanceConflictAuthority(const ProviderMaintenanceRecord& record);
 
 struct ProviderMaintenanceLedger {
     // V2 requires the independent setup authorization record. Older software
@@ -974,6 +983,9 @@ uint8_t SupportedProviderPoolFundingModels(const ProviderPoolReadiness& pool, co
 
 bool ValidateProviderPoolEntries(const std::vector<ProviderPoolEntry>& entries,
                                  std::string& error);
+/** Terminal accounting for an exact output of a conflict-proven transaction.
+ * This does not release any other transaction's real source inputs. */
+void SettleProviderPoolSuccessorConflict(ProviderPoolEntry& entry, int64_t now);
 /** States that still dedicate an outpoint to Paymaster operation and must
  * therefore be excluded from ordinary wallet coin selection. */
 bool IsActiveProviderPoolState(PoolEntryState state);

@@ -118,6 +118,7 @@ void PruneProviderMaintenanceLedger(ProviderMaintenanceLedger& ledger,
             [now](const ProviderMaintenanceRecord& record) {
                 const bool terminal =
                     record.state == ProviderMaintenanceState::CONFIRMED ||
+                    record.state == ProviderMaintenanceState::CONFLICT_SETTLED ||
                     record.state == ProviderMaintenanceState::RELEASED ||
                     (record.state == ProviderMaintenanceState::FAILED &&
                      !record.HasUnresolvedTransaction());
@@ -1290,6 +1291,14 @@ bool IsActiveProviderPoolState(PoolEntryState state)
            state == PoolEntryState::COMMITTED;
 }
 
+void SettleProviderPoolSuccessorConflict(ProviderPoolEntry& entry, int64_t now)
+{
+    entry.state = PoolEntryState::RELEASED;
+    entry.reservation_id.SetNull();
+    entry.confirmation_height = 0;
+    entry.updated_at = std::max(entry.updated_at, now);
+}
+
 bool ValidateProviderCarrierWithdrawalPlan(
     const ProviderCarrierWithdrawalPlan& plan,
     std::string& error)
@@ -1363,6 +1372,14 @@ bool ValidateProviderCarrierWithdrawalPlan(
     return true;
 }
 
+uint256 GetPaymasterMaintenanceConflictAuthority(const ProviderMaintenanceRecord& record)
+{
+    return (HashWriter{} << std::string{"DigiByte Paymaster maintenance conflict v1"} << record.operation_id
+        << record.plan_id << static_cast<uint8_t>(record.kind) << record.outputs << record.source_inputs
+        << record.withdrawal_excess_script_pub_key << record.withdrawal_excess_amount << record.transaction_id
+        << record.maximum_fee << record.created_at << record.preparation_authorization << record.preparation_request).GetHash();
+}
+
 bool ValidateProviderMaintenanceLedger(const ProviderMaintenanceLedger& ledger,
                                        std::string& error)
 {
@@ -1384,9 +1401,10 @@ bool ValidateProviderMaintenanceLedger(const ProviderMaintenanceLedger& ledger,
             record.state == ProviderMaintenanceState::BROADCAST ||
             record.state == ProviderMaintenanceState::CONFIRMED ||
             record.state == ProviderMaintenanceState::RELEASED ||
-            record.state == ProviderMaintenanceState::FAILED;
+            record.state == ProviderMaintenanceState::FAILED ||
+            (record.version >= 5 && record.state == ProviderMaintenanceState::CONFLICT_SETTLED);
         const bool current_record =
-            (record.version == 3 || record.version == ProviderMaintenanceRecord::CURRENT_VERSION);
+            (record.version == 3 || record.version == 4 || record.version == ProviderMaintenanceRecord::CURRENT_VERSION);
         if (!current_record ||
             !valid_kind || !valid_state ||
             record.operation_id.IsNull() || record.plan_id.IsNull() ||
@@ -1398,7 +1416,8 @@ bool ValidateProviderMaintenanceLedger(const ProviderMaintenanceLedger& ledger,
             record.actual_fee.value > record.maximum_fee.value ||
             record.created_at <= 0 || record.updated_at < record.created_at ||
             ((record.state == ProviderMaintenanceState::BROADCAST ||
-              record.state == ProviderMaintenanceState::CONFIRMED) &&
+              record.state == ProviderMaintenanceState::CONFIRMED ||
+              record.state == ProviderMaintenanceState::CONFLICT_SETTLED) &&
              record.transaction_id.IsNull()) ||
             ((record.state == ProviderMaintenanceState::PLANNED ||
               record.state == ProviderMaintenanceState::RELEASED) &&
@@ -1552,7 +1571,8 @@ bool SummarizeProviderMaintenanceBudget(const ProviderMaintenanceLedger& ledger,
                 ? record.actual_fee.value : record.maximum_fee.value;
             valid = AddAmount(result.broadcast_fee.value, exposure) &&
                     AddAmount(result.reserved_fee.value, exposure);
-        } else if (record.state == ProviderMaintenanceState::CONFIRMED) {
+        } else if (record.state == ProviderMaintenanceState::CONFIRMED ||
+                   record.state == ProviderMaintenanceState::CONFLICT_SETTLED) {
             if (record.updated_at >= result.accounting_time - SAFETY_HOUR_SECONDS) {
                 valid = AddAmount(result.spent_last_hour.value, record.actual_fee.value);
             }

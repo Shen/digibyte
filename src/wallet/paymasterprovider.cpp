@@ -17,6 +17,7 @@
 #include <index/txindex.h>
 #include <key.h>
 #include <logging/timer.h>
+#include <wallet/paymasterconflicts.h>
 #include <node/context.h>
 #include <node/transaction.h>
 #include <paymaster/psbt.h>
@@ -41,6 +42,7 @@
 #include <validation.h>
 
 #include <algorithm>
+#include <functional>
 #include <limits>
 #include <map>
 #include <optional>
@@ -970,6 +972,300 @@ static bool PromoteProviderSignedAttempt(
         return false;
     }
     return true;
+}
+
+std::optional<PaymasterInputConflictProof> VerifyPaymasterInputConflict(
+    CWallet& wallet, const CTransaction& original, const uint256& provider,
+    const uint256& authority, const PaymasterConflictClosure& record, std::string& error)
+{
+    error.clear();
+    const auto invalid = [&]() -> std::optional<PaymasterInputConflictProof> {
+        error = "PAYMASTER_CONFLICT_PROOF_INVALID";
+        return std::nullopt;
+    };
+    if (record.version != PaymasterConflictClosure::CURRENT_VERSION ||
+        record.genesis_hash != Params().GenesisBlock().GetHash() || record.provider_id != provider ||
+        provider.IsNull() || authority.IsNull() || record.authority_hash != authority ||
+        record.transaction_id != original.GetHash() || record.witness_hash != original.GetWitnessHash() ||
+        record.closed_at <= 0 || record.original_transaction != CanonicalBytes(original) ||
+        record.blocked_ancestors.size() > 256 ||
+        GetSerializeSize(record, CLIENT_VERSION) > PaymasterConflictClosure::MAX_BYTES) return invalid();
+    ConflictInclusion inclusion;
+    if (!ValidatePaymasterConflictInclusion(record, inclusion, error)) return invalid();
+    auto* node = wallet.chain().context();
+    if (!node || !node->chainman) return invalid();
+    LOCK(wallet.cs_wallet);
+    LOCK(cs_main);
+    const auto& chain = node->chainman->ActiveChain();
+    const auto* index = node->chainman->m_blockman.LookupBlockIndex(inclusion.block_hash);
+    if (!index || inclusion.transactions != index->nTx || !chain.Contains(index) || !chain.Tip() ||
+        wallet.GetLastBlockHash() != chain.Tip()->GetBlockHash() ||
+        chain.Height() - index->nHeight + 1 < DEFAULT_REORG_SAFETY_DEPTH) {
+        error = "PAYMASTER_CONFLICT_PROOF_NOT_SETTLED";
+        return std::nullopt;
+    }
+    return PaymasterInputConflictProof{record, chain.Tip()->GetBlockHash(), inclusion};
+}
+
+bool PaymasterInputConflictProof::Recheck(CWallet& wallet, const CTransaction& original,
+    const uint256& provider, const uint256& authority, std::string& error) const
+{
+    if (original.GetHash() != m_record.transaction_id || original.GetWitnessHash() != m_record.witness_hash ||
+        provider != m_record.provider_id || authority != m_record.authority_hash) {
+        error = "PAYMASTER_CONFLICT_PROOF_INVALID";
+        return false;
+    }
+    return Recheck(wallet, error);
+}
+
+bool PaymasterInputConflictProof::Recheck(CWallet& wallet, std::string& error) const
+{
+    auto* node = wallet.chain().context();
+    LOCK(wallet.cs_wallet);
+    LOCK(cs_main);
+    const auto* index = node && node->chainman ? node->chainman->m_blockman.LookupBlockIndex(m_block) : nullptr;
+    if (!node || !node->chainman || !node->chainman->ActiveChain().Tip() ||
+        node->chainman->ActiveChain().Tip()->GetBlockHash() != m_tip || wallet.GetLastBlockHash() != m_tip ||
+        !index || index->nTx != m_transactions || !node->chainman->ActiveChain().Contains(index) ||
+        node->chainman->ActiveChain().Height() - index->nHeight + 1 < DEFAULT_REORG_SAFETY_DEPTH) {
+        error = "PAYMASTER_CONFLICT_CHAIN_CHANGED";
+        return false;
+    }
+    error.clear();
+    return true;
+}
+
+bool PaymasterConflictClosureIsAbsent(WalletBatch& batch, const uint256& txid, std::string& error)
+{
+    PaymasterConflictClosure closure;
+    const auto status = batch.ReadPaymasterConflictClosureWithStatus(txid, closure);
+    if (status == DatabaseReadStatus::NOT_FOUND) return true;
+    error = status == DatabaseReadStatus::FOUND ? "PAYMASTER_TRANSACTION_CONFLICT_SETTLED" :
+        status == DatabaseReadStatus::UNSUPPORTED_VERSION ? "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION" : "PAYMASTER_CONFLICT_DATABASE_READ";
+    return false;
+}
+
+bool ReadSettledPaymasterConflict(CWallet& wallet, WalletBatch& batch, const uint256& txid,
+    const uint256& provider, const uint256& authority, bool& settled, std::string& error,
+    std::optional<PaymasterInputConflictProof>* snapshot)
+{
+    error.clear();
+    settled = false;
+    PaymasterConflictClosure closure;
+    const auto status = batch.ReadPaymasterConflictClosureWithStatus(txid, closure);
+    if (status == DatabaseReadStatus::NOT_FOUND) return true;
+    if (status != DatabaseReadStatus::FOUND) { error = "PAYMASTER_CONFLICT_DATABASE_READ"; return false; }
+    CMutableTransaction original;
+    try {
+        SpanReader stream{::PROTOCOL_VERSION, closure.original_transaction};
+        stream >> original;
+        if (!stream.empty()) throw std::ios_base::failure("trailing original");
+    } catch (const std::exception&) { error = "PAYMASTER_CONFLICT_PROOF_INVALID"; return false; }
+    const auto proof = VerifyPaymasterInputConflict(wallet, CTransaction{original}, provider, authority, closure, error);
+    settled = proof.has_value();
+    if (snapshot) *snapshot = proof;
+    return settled;
+}
+
+std::optional<PaymasterInputConflictProof> ObservePaymasterInputConflict(
+    CWallet& wallet, const CTransaction& original, const uint256& provider,
+    const uint256& authority, int64_t now, std::string& error)
+{
+    error.clear();
+    LOCK(wallet.cs_wallet);
+    auto* node = wallet.chain().context();
+    if (!node || !node->chainman || now <= 0) { error = "PAYMASTER_NODE_CONTEXT_UNAVAILABLE"; return std::nullopt; }
+    PaymasterConflictClosure saved;
+    const auto status = WalletBatch{wallet.GetDatabase()}.ReadPaymasterConflictClosureWithStatus(original.GetHash(), saved);
+    if (status == DatabaseReadStatus::FOUND) return VerifyPaymasterInputConflict(wallet, original, provider, authority, saved, error);
+    if (status != DatabaseReadStatus::NOT_FOUND) { error = "PAYMASTER_CONFLICT_DATABASE_READ"; return std::nullopt; }
+    const auto make_proof = [&](const CBlock& block) -> std::optional<PaymasterInputConflictProof> {
+        PaymasterConflictClosure record;
+        record.genesis_hash = Params().GenesisBlock().GetHash();
+        record.provider_id = provider;
+        record.authority_hash = authority;
+        record.closed_at = now;
+        if (!BuildPaymasterConflictInclusion(block, original, record)) return std::nullopt;
+        return VerifyPaymasterInputConflict(wallet, original, provider, authority, record, error);
+    };
+    const uint256 scan_key = (HashWriter{} << authority << original.GetHash() << original.GetWitnessHash()).GetHash();
+    auto cursor = GetPaymasterConflictScanPosition(wallet.GetDatabase(), scan_key);
+    size_t disk_blocks{0}, disk_bytes{0};
+    // Indexed parents and full blocks share one conservative I/O allowance.
+    // Reserve the maximum serialized block before a read, so even the last
+    // valid block/transaction cannot exceed the byte budget.
+    const auto can_read = [&] { return disk_blocks < 16 && disk_bytes + MAX_BLOCK_SERIALIZED_SIZE <= 8 * 1024 * 1024; };
+    std::map<uint256, std::shared_ptr<CBlock>> blocks;
+    const auto read_block = [&](const uint256& hash) -> std::shared_ptr<CBlock> {
+        const auto cached = blocks.find(hash);
+        if (cached != blocks.end()) return cached->second;
+        if (!can_read()) return {};
+        const CBlockIndex* index{nullptr};
+        {
+            LOCK(cs_main);
+            index = node->chainman->m_blockman.LookupBlockIndex(hash);
+            if (!index || !node->chainman->ActiveChain().Contains(index)) return {};
+        }
+        auto block = std::make_shared<CBlock>();
+        if (!node->chainman->m_blockman.ReadBlockFromDisk(*block, *index)) {
+            error = "PAYMASTER_CONFLICT_BLOCK_UNAVAILABLE";
+            return {};
+        }
+        ++disk_blocks;
+        disk_bytes += GetSerializeSize(*block, ::PROTOCOL_VERSION);
+        blocks.emplace(hash, block);
+        return block;
+    };
+    // A wallet conflict state is only a disk locator. Read the block and prove
+    // the actual competing input; foreign spenders need not be in mapWallet.
+    const auto* known = wallet.GetWalletTx(original.GetHash());
+    if (known && known->tx && known->tx->GetWitnessHash() != original.GetWitnessHash()) {
+        error = "PAYMASTER_CONFLICT_ORIGINAL_MISMATCH";
+        return std::nullopt;
+    }
+    if (known && known->state<TxStateConflicted>()) {
+        const auto* conflict = known->state<TxStateConflicted>();
+        const auto block = read_block(conflict->conflicting_block_hash);
+        if (block) {
+            auto proof = make_proof(*block);
+            if (proof || !error.empty()) return proof;
+        }
+        if (!error.empty()) return std::nullopt;
+    }
+    if (known && wallet.GetTxDepthInMainChain(*known) > 0) return std::nullopt;
+    // A confirmed competitor may defeat an ancestor rather than a direct
+    // input. Every hop proves an exact parent txid and existing output index;
+    // a wallet conflict enum alone never substitutes for that dependency.
+    std::set<uint256> visited{original.GetHash()};
+    WalletBatch records{wallet.GetDatabase()};
+    std::function<std::optional<PaymasterConflictClosure>(const CTransaction&, size_t)> ancestor_conflict;
+    size_t examined{0};
+    ancestor_conflict = [&](const CTransaction& child, size_t depth) -> std::optional<PaymasterConflictClosure> {
+        if (depth >= 256) return std::nullopt;
+        for (size_t i{0}; i < child.vin.size() && examined < 1024; ++i) {
+            const auto& input = child.vin[(i + (depth == 0 ? cursor.next_input : 0)) % child.vin.size()];
+            ++examined;
+            PaymasterConflictClosure parent_record;
+            const auto parent_status = records.ReadPaymasterConflictClosureWithStatus(input.prevout.hash, parent_record);
+            if (parent_status != DatabaseReadStatus::FOUND && parent_status != DatabaseReadStatus::NOT_FOUND) {
+                error = "PAYMASTER_CONFLICT_DATABASE_READ";
+                return std::nullopt;
+            }
+            if (parent_status == DatabaseReadStatus::FOUND) {
+                PaymasterConflictClosure extended;
+                if (ExtendPaymasterConflictInclusion(child, parent_record, extended)) return extended;
+            }
+            const auto* parent = wallet.GetWalletTx(input.prevout.hash);
+            if (!parent || !parent->tx || parent->tx->GetHash() != input.prevout.hash ||
+                input.prevout.n >= parent->tx->vout.size() || wallet.GetTxDepthInMainChain(*parent) > 0 ||
+                visited.size() >= 256 || !visited.insert(input.prevout.hash).second) continue;
+            std::optional<PaymasterConflictClosure> proof;
+            if (const auto* conflict = parent->state<TxStateConflicted>(); conflict && disk_blocks < 4) {
+                const auto block = read_block(conflict->conflicting_block_hash);
+                if (block && BuildPaymasterConflictInclusion(*block, *parent->tx, parent_record)) proof = parent_record;
+                if (!error.empty()) return std::nullopt;
+            }
+            if (!proof) proof = ancestor_conflict(*parent->tx, depth + 1);
+            if (!error.empty()) return std::nullopt;
+            if (proof) {
+                PaymasterConflictClosure extended;
+                if (ExtendPaymasterConflictInclusion(child, *proof, extended)) return extended;
+            }
+        }
+        return std::nullopt;
+    };
+    if (auto inherited = ancestor_conflict(original, 0)) {
+        inherited->genesis_hash = Params().GenesisBlock().GetHash();
+        inherited->provider_id = provider;
+        inherited->authority_hash = authority;
+        inherited->closed_at = std::max(now, inherited->closed_at);
+        return VerifyPaymasterInputConflict(wallet, original, provider, authority, *inherited, error);
+    }
+    if (!error.empty()) return std::nullopt;
+    if (!original.vin.empty()) cursor.next_input = (cursor.next_input + 1) % original.vin.size();
+    {
+        LOCK(cs_main);
+        const auto& chain = node->chainman->ActiveChain();
+        if (cursor.next_height < 0) cursor = {};
+        if (cursor.next_height > 0) {
+            const auto* previous = node->chainman->m_blockman.LookupBlockIndex(cursor.previous_block);
+            if (!previous || previous->nHeight != cursor.next_height - 1) cursor = {};
+            else if (!chain.Contains(previous)) {
+                const auto* fork = chain.FindFork(previous);
+                cursor.next_height = fork ? fork->nHeight + 1 : 0;
+                cursor.previous_block = fork ? fork->GetBlockHash() : uint256{};
+            }
+        }
+    }
+    if (!cursor.anchored && cursor.next_height == 0 && g_txindex && !original.vin.empty()) {
+        // A spend cannot precede the earliest creation of any exact input.
+        // Use the minimum, never the newest parent's height: the competitor
+        // may spend an older client input before another input was created.
+        std::map<uint256, uint32_t> parents;
+        for (const auto& input : original.vin) parents[input.prevout.hash] = std::max(parents[input.prevout.hash], input.prevout.n);
+        bool unknown{parents.size() > 1024 || cursor.parent_blocks.size() > parents.size()};
+        auto input = parents.begin();
+        if (!unknown) std::advance(input, cursor.parent_blocks.size());
+        while (!unknown && input != parents.end() && can_read()) {
+            uint256 block_hash;
+            CTransactionRef parent;
+            ++disk_blocks;
+            if (!g_txindex->FindTx(input->first, block_hash, parent) || !parent ||
+                parent->GetHash() != input->first || input->second >= parent->vout.size()) {
+                unknown = true;
+                break;
+            }
+            disk_bytes += GetSerializeSize(*parent, ::PROTOCOL_VERSION);
+            cursor.parent_blocks.push_back(block_hash);
+            ++input;
+        }
+        if (!unknown && cursor.parent_blocks.size() != parents.size()) {
+            if (!SetPaymasterConflictScanPosition(wallet.GetDatabase(), scan_key, cursor)) error = "PAYMASTER_CONFLICT_SCAN_WRITE";
+            return std::nullopt;
+        }
+        if (!unknown) {
+            LOCK(cs_main);
+            const auto& chain = node->chainman->ActiveChain();
+            int first = chain.Height() + 1;
+            for (const auto& hash : cursor.parent_blocks) {
+                const auto* parent = node->chainman->m_blockman.LookupBlockIndex(hash);
+                if (!parent || !chain.Contains(parent)) { first = 0; break; }
+                first = std::min(first, parent->nHeight);
+            }
+            cursor.next_height = first;
+            cursor.previous_block = first > 0 ? chain[first - 1]->GetBlockHash() : uint256{};
+        }
+        cursor.anchored = true;
+        cursor.parent_blocks.clear();
+    }
+    // Missing old anchors fall back to bounded history, never an absence-based
+    // release. Pruned/unavailable history keeps the original authority protected.
+    for (size_t count{0}; count < 16 && can_read(); ++count) {
+        const CBlockIndex* index{nullptr};
+        {
+            LOCK(cs_main);
+            const auto& chain = node->chainman->ActiveChain();
+            if (cursor.next_height > chain.Height()) break;
+            index = chain[cursor.next_height];
+        }
+        if (!index) { error = "PAYMASTER_CONFLICT_CHAIN_CHANGED"; return std::nullopt; }
+        const auto block = read_block(index->GetBlockHash());
+        if (!block) { if (!error.empty()) return std::nullopt; break; }
+        auto proof = make_proof(*block);
+        if (proof || !error.empty()) {
+            if (!SetPaymasterConflictScanPosition(wallet.GetDatabase(), scan_key, cursor)) error = "PAYMASTER_CONFLICT_SCAN_WRITE";
+            return proof;
+        }
+        {
+            LOCK(cs_main);
+            const auto& chain = node->chainman->ActiveChain();
+            if (!chain.Contains(index)) { error = "PAYMASTER_CONFLICT_CHAIN_CHANGED"; return std::nullopt; }
+        }
+        ++cursor.next_height;
+        cursor.previous_block = block->GetHash();
+    }
+    if (!SetPaymasterConflictScanPosition(wallet.GetDatabase(), scan_key, cursor)) error = "PAYMASTER_CONFLICT_SCAN_WRITE";
+    return std::nullopt;
 }
 
 DurablePaymasterCommitRecovery RecoverDurablePaymasterCommit(
