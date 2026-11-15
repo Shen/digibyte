@@ -2581,7 +2581,7 @@ ProviderProcessingResult ProcessPaymasterRequests(WalletContext& context, CWalle
     return ProcessProviderQuoteRequest(request_context, direct, result);
 }
 
-PaymentResult ProcessPaymasterResult(WalletContext& context, CWallet& target, const std::string& request_id)
+ClientResultReceipt ReceivePaymasterResult(WalletContext& context, CWallet& target, const std::string& request_id)
 {
     CWallet* const wallet = &target;
     if (!context.paymaster || !context.paymaster->Enabled()) {
@@ -2744,8 +2744,7 @@ PaymentResult ProcessPaymasterResult(WalletContext& context, CWallet& target, co
             if (const auto* node = wallet->chain().context(); node && node->connman) {
                 node->connman->ReleasePaymasterConnection(PaymentChannelKey(*wallet, session, attempt.provider_id));
             }
-            ExecuteDurableClientFinal(
-                *wallet, *message->result.txid, GetTime(), context.paymaster);
+
         } else if (message->result.status == PaymasterResultStatus::REJECTED ||
                    message->result.status == PaymasterResultStatus::SLOT_UNAVAILABLE) {
             if (!store.GetAttempt(attempt.attempt_id, attempt) ||
@@ -2796,7 +2795,29 @@ PaymentResult ProcessPaymasterResult(WalletContext& context, CWallet& target, co
         if (accepted_result->txid) result.txid = *accepted_result->txid;
     }
     if (!session.final_txid.IsNull()) result.txid = session.final_txid;
-    return result;
+    ClientResultReceipt receipt;
+    receipt.disposition = observed_payment ? ClientReceiptDisposition::LOCALLY_COMPLETED :
+        accepted_result ? ClientReceiptDisposition::ACCEPTED : ClientReceiptDisposition::NO_MESSAGE;
+    if (accepted_result && accepted_result->final_transaction) receipt.final_txid = accepted_result->txid;
+    receipt.payment = std::move(result);
+    return receipt;
+}
+
+PaymentResult ProcessPaymasterResult(WalletContext& context, CWallet& wallet, const std::string& request_id)
+{
+    auto receipt = ReceivePaymasterResult(context, wallet, request_id);
+    if (receipt.final_txid) {
+        ExecuteDurableClientFinal(wallet, *receipt.final_txid, GetTime(), context.paymaster);
+        PaymasterStore store{wallet};
+        PaymentSession current;
+        ProviderAttempt attempt;
+        if (!store.GetSessionByRequestId(request_id, current) || current.attempt_ids.empty() ||
+            !store.GetAttempt(current.attempt_ids.back(), attempt))
+            throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_FINAL_STATE_RELOAD_FAILED");
+        receipt.payment.session_state = current.state;
+        receipt.payment.attempt_state = attempt.state;
+    }
+    return std::move(receipt.payment);
 }
 
 PaymentResult CaptureSignedClientPSBT(const PaymentSession& session,

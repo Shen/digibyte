@@ -303,6 +303,19 @@ bool LoadAttemptAuthorizationArtifacts(
 bool HasDurableClientAuthorization(
     const DigiDollar::Paymaster::ProviderAttempt& attempt,
     int64_t observation_time);
+enum class ClientReceiptDisposition { NO_MESSAGE, ACCEPTED, LOCALLY_COMPLETED };
+/** Receipt never signs, submits or broadcasts. A final txid denotes durable
+ * authenticated evidence, not a network observation or payment success. */
+struct ClientResultReceipt {
+    ClientReceiptDisposition disposition{ClientReceiptDisposition::NO_MESSAGE};
+    std::optional<uint256> final_txid;
+    PaymentResult payment;
+};
+ClientResultReceipt ReceivePaymasterResult(WalletContext& context, CWallet& wallet,
+    const std::string& request_id);
+ClientResultReceipt ReceiveAlternativePaymasterResult(WalletContext& context, CWallet& wallet,
+    PaymasterStore& store, const DigiDollar::Paymaster::PaymentSession& session,
+    DigiDollar::Paymaster::AlternativeRecoveryRecord& recovery, int64_t now);
 /** Observe an already authorized exact payment; never sign, submit, or broadcast.
  * Returns true on completion and copies the full records before pruning can run.
  * Throws an ApplicationError on failed validation or persistence. */

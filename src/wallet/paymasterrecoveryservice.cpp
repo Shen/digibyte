@@ -56,6 +56,141 @@
 
 namespace wallet::paymaster_app {
 using namespace DigiDollar::Paymaster;
+ClientResultReceipt ReceiveAlternativePaymasterResult(WalletContext& context, CWallet& wallet,
+    PaymasterStore& store, const PaymentSession& session, AlternativeRecoveryRecord& recovery, int64_t now)
+{
+    if (recovery.phase != AlternativeRecoveryPhase::USER_SIGNED) return {};
+    std::string error;
+    const int64_t authorization_time =
+        recovery.recovery_authorization_accepted_at;
+    if (authorization_time <= 0) {
+        throw ApplicationError(
+            ErrorKind::WALLET,
+            "PAYMASTER_RECOVERY_AUTHORIZATION_REQUIRED");
+    }
+    const int64_t observation_time{
+        std::max(now, authorization_time)};
+    AlternativeRecoveryParameters parameters;
+    AlternativeRecoveryTemplate trusted;
+    PartiallySignedTransaction unsigned_psbt;
+    AlternativeRecoverySubmit submit;
+    submit.genesis_hash = Params().GenesisBlock().GetHash();
+    submit.request_id = recovery.request_id;
+    submit.session_id = recovery.session_id;
+    submit.recovery_id = recovery.recovery_id;
+    submit.recovery_provider_id = recovery.recovery_provider_id;
+    submit.recovery_request_hash = recovery.recovery_request_hash;
+    submit.recovery_commit_key =
+        recovery.recovery_response.recovery_commit_key;
+    submit.template_commitment =
+        recovery.recovery_response.manifest.template_commitment;
+    submit.user_psbt = recovery.user_signed_psbt;
+    if (!context.paymaster || !context.paymaster->Enabled()) return {};
+    const auto lease = context.paymaster->LeaseRecoveryResults(
+        recovery.request_id, recovery.session_id, recovery.recovery_provider_id, 1);
+    const auto& messages = lease.Messages();
+    if (messages.empty()) return {};
+    if (RetainAuthenticatedClientResult(*context.paymaster, messages.front(), session,
+            recovery, now, error) == ClientResultRetention::FAILED)
+        throw ApplicationError(ErrorKind::WALLET, error);
+    auto* node = wallet.chain().context();
+    if (!node || !node->chainman) throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_NODE_CONTEXT_UNAVAILABLE");
+    const AlternativeRecoveryResultMessage* message{nullptr};
+    CTransactionRef observed_final;
+    FinalTransactionPresence observed_presence{FinalTransactionPresence::NONE};
+    std::optional<ExactFinalTransactionProof> observed_proof;
+    if (!messages.empty()) {
+        message = std::get_if<AlternativeRecoveryResultMessage>(
+            &messages.front().payload);
+        // Local corruption must not turn a valid remote result into an
+        // acknowledged binding failure. Validate at historical creation
+        // times so an already signed recovery survives quote expiry.
+        if (!paymaster_store::internal::ValidateAlternativeRecoveryRecordShape(recovery, error) ||
+            recovery.capacity_request.genesis_hash != Params().GenesisBlock().GetHash()) {
+            throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_RECOVERY_DATABASE_READ");
+        }
+        if (!message || !ValidateAlternativeRecoveryResult(*message, recovery.recovery_response, recovery.recovery_provider_identity_key, Params().GenesisBlock().GetHash(), 1, now, error) ||
+            !message->result.final_transaction ||
+            !message->result.raw_transaction_hash) {
+            const std::string rejection{error.empty() ? "PAYMASTER_INVALID_RECOVERY_RESULT" : error};
+            if (!AcknowledgeRejectedDirectMessage(*context.paymaster, messages.front(), error)) {
+                throw ApplicationError(ErrorKind::WALLET, error);
+            }
+            throw ApplicationError(
+                ErrorKind::INVALID_INPUT,
+                rejection);
+        }
+        observed_final = MakeTransactionRef(
+            *message->result.final_transaction);
+        if (!PreflightFinalPaymasterTransaction(
+                wallet, observed_final, observed_presence, error,
+                ExactFinalTxIndexMode::WAIT_FOR_SYNC, &observed_proof)) {
+            throw ApplicationError(IsTransientPaymasterFinalizationError(error)
+                ? ErrorKind::WALLET : ErrorKind::REJECTED, error);
+        }
+    }
+    const auto* final_proof = observed_proof ? &*observed_proof : nullptr;
+    PartiallySignedTransaction user_psbt;
+    if (!BuildRecoveryParametersFromRecord(
+            wallet, recovery, parameters, error) ||
+        !ValidateAuthorizedAlternativeRecoveryResponseTemplateAgainstChainstate(
+            recovery.recovery_response, recovery.recovery_request,
+            recovery.recovery_provider_identity_key, parameters,
+            Params(), *node->chainman, authorization_time,
+            observation_time,
+            final_proof, trusted, unsigned_psbt, error) ||
+        !ValidateAuthorizedAlternativeRecoverySubmitAgainstChainstate(
+            submit, recovery.recovery_response, trusted, parameters,
+            Params(), *node->chainman, authorization_time,
+            observation_time,
+            final_proof, user_psbt, error)) {
+        throw ApplicationError(IsTransientPaymasterFinalizationError(error)
+            ? ErrorKind::WALLET : ErrorKind::REJECTED, error);
+    }
+
+    if (message) {
+        const CMutableTransaction& final_transaction =
+            *message->result.final_transaction;
+        const CTransactionRef& final_ref = observed_final;
+        if (!ValidateAuthorizedFinalAlternativeRecoveryAgainstChainstate(
+                final_transaction, *message->result.raw_transaction_hash,
+                trusted, parameters, Params(), *node->chainman,
+                authorization_time, observation_time,
+                final_proof, error)) {
+            throw ApplicationError(IsTransientPaymasterFinalizationError(error)
+                ? ErrorKind::WALLET : ErrorKind::REJECTED, error);
+        }
+        recovery.phase = AlternativeRecoveryPhase::FINAL_COMMITTED;
+        recovery.final_transaction =
+            SerializeTransaction(final_transaction);
+        recovery.expected_wtxid =
+            CTransaction{final_transaction}.GetWitnessHash();
+        recovery.signed_result = message->result;
+        recovery.updated_at = std::max(recovery.updated_at, now);
+        SelfRecoveryRecord final_recovery;
+        final_recovery.request_id = recovery.request_id;
+        final_recovery.session_id = recovery.session_id;
+        final_recovery.user_inputs =
+            recovery.recovery_request.user_dd_inputs;
+        final_recovery.recovery_txid =
+            CTransaction{final_transaction}.GetHash();
+        final_recovery.raw_transaction_hash =
+            Hash(recovery.final_transaction);
+        final_recovery.final_transaction = recovery.final_transaction;
+        final_recovery.created_at = now;
+        if (!store.CommitClientAlternativeRecoveryFinal(
+                recovery, final_recovery, error)) {
+            throw ApplicationError(ErrorKind::WALLET, error);
+        }
+        if (!context.paymaster->AcknowledgeDirectMessagesIfPresent({messages.front().message_id})) {
+            throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_DIRECT_INBOX_ACK_CONFLICT");
+        }
+
+        return {ClientReceiptDisposition::ACCEPTED, final_ref->GetHash(), {}};
+    }
+    return {};
+}
+
 ClientRecoveryResult ResolveAlternativePaymasterRecovery(
     WalletContext& context,
     CWallet& wallet,
@@ -736,44 +871,16 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
         submit.template_commitment =
             recovery.recovery_response.manifest.template_commitment;
         submit.user_psbt = recovery.user_signed_psbt;
-        retain_result();
-        const auto& messages = result_lease->Messages();
-        const AlternativeRecoveryResultMessage* message{nullptr};
-        CTransactionRef observed_final;
-        FinalTransactionPresence observed_presence{
-            FinalTransactionPresence::NONE};
-        std::optional<ExactFinalTransactionProof> observed_proof;
-        if (!messages.empty()) {
-            message = std::get_if<AlternativeRecoveryResultMessage>(
-                &messages.front().payload);
-            // Local corruption must not turn a valid remote result into an
-            // acknowledged binding failure. Validate at historical creation
-            // times so an already signed recovery survives quote expiry.
-            if (!paymaster_store::internal::ValidateAlternativeRecoveryRecordShape(recovery, error) ||
-                recovery.capacity_request.genesis_hash != Params().GenesisBlock().GetHash()) {
-                throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_RECOVERY_DATABASE_READ");
-            }
-            if (!message || !ValidateAlternativeRecoveryResult(*message, recovery.recovery_response, recovery.recovery_provider_identity_key, Params().GenesisBlock().GetHash(), 1, now, error) ||
-                !message->result.final_transaction ||
-                !message->result.raw_transaction_hash) {
-                const std::string rejection{error.empty() ? "PAYMASTER_INVALID_RECOVERY_RESULT" : error};
-                if (!AcknowledgeRejectedDirectMessage(*context.paymaster, messages.front(), error)) {
-                    throw ApplicationError(ErrorKind::WALLET, error);
-                }
-                throw ApplicationError(
-                    ErrorKind::INVALID_INPUT,
-                    rejection);
-            }
-            observed_final = MakeTransactionRef(
-                *message->result.final_transaction);
-            if (!PreflightFinalPaymasterTransaction(
-                    wallet, observed_final, observed_presence, error,
-                    ExactFinalTxIndexMode::WAIT_FOR_SYNC, &observed_proof)) {
-                throw ApplicationError(IsTransientPaymasterFinalizationError(error)
-                    ? ErrorKind::WALLET : ErrorKind::REJECTED, error);
-            }
+        const auto received = ReceiveAlternativePaymasterResult(context, wallet, store, session, recovery, now);
+        if (received.final_txid) {
+            node->connman->ReleasePaymasterConnection(RecoveryChannelKey(wallet, recovery));
+            ExecuteDurableClientFinal(wallet, *received.final_txid, now, context.paymaster);
+            return make_result(recovery, RecoveryQueueState{}, true);
         }
-        if (!message) {
+        CTransactionRef observed_final;
+        FinalTransactionPresence observed_presence{FinalTransactionPresence::NONE};
+        std::optional<ExactFinalTransactionProof> observed_proof;
+        {
             // A lost result does not imply that the provider failed to finish
             // the recovery. As for an ordinary submit retry, only local exact
             // chain/mempool evidence can permit retrying already spent inputs.
@@ -806,7 +913,7 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
                 ? ErrorKind::WALLET : ErrorKind::REJECTED, error);
         }
 
-        if (!message && observed_final &&
+        if (observed_final &&
             !ValidateAuthorizedFinalAlternativeRecoveryAgainstChainstate(
                 CMutableTransaction{*observed_final}, observed_final->GetWitnessHash(),
                 trusted, parameters, Params(), *node->chainman,
@@ -815,49 +922,6 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
                 ? ErrorKind::WALLET : ErrorKind::REJECTED, error);
         }
 
-        if (message) {
-            const CMutableTransaction& final_transaction =
-                *message->result.final_transaction;
-            const CTransactionRef& final_ref = observed_final;
-            if (!ValidateAuthorizedFinalAlternativeRecoveryAgainstChainstate(
-                    final_transaction, *message->result.raw_transaction_hash,
-                    trusted, parameters, Params(), *node->chainman,
-                    authorization_time, observation_time,
-                    final_proof, error)) {
-                throw ApplicationError(IsTransientPaymasterFinalizationError(error)
-                    ? ErrorKind::WALLET : ErrorKind::REJECTED, error);
-            }
-            recovery.phase = AlternativeRecoveryPhase::FINAL_COMMITTED;
-            recovery.final_transaction =
-                SerializeTransaction(final_transaction);
-            recovery.expected_wtxid =
-                CTransaction{final_transaction}.GetWitnessHash();
-            recovery.signed_result = message->result;
-            recovery.updated_at = std::max(recovery.updated_at, now);
-            SelfRecoveryRecord final_recovery;
-            final_recovery.request_id = recovery.request_id;
-            final_recovery.session_id = recovery.session_id;
-            final_recovery.user_inputs =
-                recovery.recovery_request.user_dd_inputs;
-            final_recovery.recovery_txid =
-                CTransaction{final_transaction}.GetHash();
-            final_recovery.raw_transaction_hash =
-                Hash(recovery.final_transaction);
-            final_recovery.final_transaction = recovery.final_transaction;
-            final_recovery.created_at = now;
-            if (!store.CommitClientAlternativeRecoveryFinal(
-                    recovery, final_recovery, error)) {
-                throw ApplicationError(ErrorKind::WALLET, error);
-            }
-            if (!context.paymaster->AcknowledgeDirectMessagesIfPresent({messages.front().message_id})) {
-                throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_DIRECT_INBOX_ACK_CONFLICT");
-            }
-
-            node->connman->ReleasePaymasterConnection(RecoveryChannelKey(wallet, recovery));
-
-            ExecuteDurableClientFinal(wallet, final_ref->GetHash(), now, context.paymaster);
-            return make_result(recovery, RecoveryQueueState{}, true);
-        }
         // Process/retain a received signed result before local completion can
         // fail. Without a result, deep local evidence replaces transport retry.
         bool completed{false};
