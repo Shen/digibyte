@@ -65,6 +65,11 @@ enum class ExactFinalTxIndexMode {
     WAIT_FOR_SYNC,
 };
 
+/** Recovery may observe exact historical work without submitting it. Startup
+ * follows ordinary wallet local-only submission; periodic relay is scheduled by
+ * ShouldResend. Every submitting mode still respects walletbroadcast. */
+enum class ExactFinalBroadcastMode { OBSERVE_ONLY, SUBMIT_LOCAL, RELAY };
+
 enum class ExactFinalTransactionPresence {
     NONE,
     MEMPOOL,
@@ -109,7 +114,8 @@ struct ClientFinalExecutionResult {
 ClientFinalExecutionResult ExecuteDurableClientFinal(
     CWallet& wallet, const uint256& txid, int64_t now,
     DigiDollar::Paymaster::Manager* manager,
-    ExactFinalTxIndexMode txindex_mode = ExactFinalTxIndexMode::WAIT_FOR_SYNC);
+    ExactFinalTxIndexMode txindex_mode = ExactFinalTxIndexMode::WAIT_FOR_SYNC,
+    ExactFinalBroadcastMode broadcast_mode = ExactFinalBroadcastMode::RELAY);
 } // namespace paymaster_app
 
 /** Classify infrastructure failures at the legacy string boundary. Durable
@@ -141,7 +147,8 @@ bool InsertAndBroadcastExactPaymasterTransaction(
     CWallet& wallet,
     const CTransactionRef& transaction,
     bool& already_confirmed,
-    std::string& error);
+    std::string& error,
+    ExactFinalBroadcastMode broadcast_mode = ExactFinalBroadcastMode::RELAY);
 
 /** Revalidate and insert/broadcast the exact transaction in a durable provider
  * commit. Quote/retry expiry is not an authorization revocation mechanism and
@@ -149,7 +156,8 @@ bool InsertAndBroadcastExactPaymasterTransaction(
 DurablePaymasterCommitRecovery RecoverDurablePaymasterCommit(
     CWallet& wallet,
     const DigiDollar::Paymaster::ProviderCommitRecord& commit,
-    int64_t now);
+    int64_t now,
+    ExactFinalBroadcastMode broadcast_mode = ExactFinalBroadcastMode::RELAY);
 
 /** Reconcile canonical state, then retire transport for the closed clients. */
 bool ReconcilePaymasterSessionsAtTip(CWallet& wallet, int64_t now, std::string& error);
@@ -165,7 +173,8 @@ DurablePaymasterRecoveryReport RecoverDurablePaymasterCommits(
     int64_t now);
 /** Periodic recovery uses bounded raw pages; startup retains a complete pass. */
 DurablePaymasterRecoveryReport RecoverDurablePaymasterCommits(
-    CWallet& wallet, int64_t now, bool bounded);
+    CWallet& wallet, int64_t now, bool bounded,
+    ExactFinalBroadcastMode broadcast_mode = ExactFinalBroadcastMode::SUBMIT_LOCAL);
 
 bool SetPaymasterProviderPolicy(CWallet& wallet,
                                 const DigiDollar::Paymaster::ProviderPolicy& policy,

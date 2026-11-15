@@ -2565,11 +2565,25 @@ void CWallet::ResubmitWalletTransactions(bool relay, bool force)
 void MaybeResendWalletTxs(WalletContext& context)
 {
     for (const std::shared_ptr<CWallet>& pwallet : GetWallets(context)) {
+        const bool resend_due = pwallet->ShouldResend();
+        const bool relay_ready = pwallet->GetBroadcastTransactions() && pwallet->chain().isReadyToBroadcast();
+        // Ordinary transactions retain their randomized cadence even if a
+        // Paymaster page cannot be read. Each new opportunity starts a fresh
+        // bounded round; later ticks drain it using independent relay cursors.
+        if (resend_due) {
+            ResetPaymasterRelayRound(pwallet->GetDatabase());
+            BeginPaymasterRelayRound(pwallet->GetDatabase());
+            pwallet->ResubmitWalletTransactions(/*relay=*/true, /*force=*/false);
+            pwallet->SetNextResend();
+        }
+        if (!relay_ready) ResetPaymasterRelayRound(pwallet->GetDatabase());
+        const bool relay = relay_ready && GetPaymasterRelayRound(pwallet->GetDatabase()).active;
         // Durable provider commits are exact, fully signed transactions. A
-        // transient txindex/mempool condition at wallet load must defer them,
-        // not make recovery depend on startpaymaster or wallet unlock.
+        // transient txindex/mempool condition must not prevent observation.
+        // Relay retains the ordinary wallet policy and randomized schedule.
         const DurablePaymasterRecoveryReport paymaster_recovery =
-            RecoverDurablePaymasterCommits(*pwallet, GetTime(), /*bounded=*/true);
+            RecoverDurablePaymasterCommits(*pwallet, GetTime(), /*bounded=*/true,
+                relay ? ExactFinalBroadcastMode::RELAY : ExactFinalBroadcastMode::OBSERVE_ONLY);
         if (!paymaster_recovery.errors.empty()) {
             pwallet->WalletLogPrintf(
                 "Paymaster durable-commit retry: %u candidate(s), %u "
@@ -2578,9 +2592,9 @@ void MaybeResendWalletTxs(WalletContext& context)
                 static_cast<unsigned int>(paymaster_recovery.recovered),
                 static_cast<unsigned int>(paymaster_recovery.errors.size()));
         }
-        if (!pwallet->ShouldResend()) continue;
-        pwallet->ResubmitWalletTransactions(/*relay=*/true, /*force=*/false);
-        pwallet->SetNextResend();
+        if (relay && GetPaymasterRelayRound(pwallet->GetDatabase()).Complete()) {
+            ResetPaymasterRelayRound(pwallet->GetDatabase());
+        }
     }
 }
 

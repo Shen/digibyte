@@ -332,12 +332,20 @@ bool PaymasterStore::ListClientDurableFinalTransactions(
 bool PaymasterStore::ListClientDurableFinalTransactions(
     std::vector<CTransactionRef>& transactions, std::string& error, bool bounded) const
 {
+    bool wrapped{false};
+    return ListClientDurableFinalTransactions(transactions, error, bounded, false, wrapped);
+}
+
+bool PaymasterStore::ListClientDurableFinalTransactions(
+    std::vector<CTransactionRef>& transactions, std::string& error, bool bounded, bool relay_scan, bool& wrapped) const
+{
+    wrapped = false;
     transactions.clear();
     error.clear();
     LOCK(m_wallet.cs_wallet);
     WalletBatch batch{m_wallet.GetDatabase()};
     std::vector<PaymentSession> sessions;
-    PaymasterScanPage page{m_wallet.GetDatabase(), PaymasterScan::CLIENT_FINALS};
+    PaymasterScanPage page{m_wallet.GetDatabase(), relay_scan ? PaymasterScan::RELAY_CLIENT_FINALS : PaymasterScan::CLIENT_FINALS};
     std::string next;
     if (bounded ? !batch.ListPaymasterSessionsPage(page.after.request,
             PAYMASTER_BACKGROUND_SESSION_ROWS, PAYMASTER_BACKGROUND_SESSION_BYTES, sessions, next)
@@ -374,6 +382,7 @@ bool PaymasterStore::ListClientDurableFinalTransactions(
         transactions.push_back(MakeTransactionRef(selected.transaction));
     }
     if (bounded) page.Complete(next);
+    wrapped = !bounded || next.empty();
     return true;
 }
 

@@ -589,13 +589,26 @@ bool PaymasterStore::ListProviderCommits(
 
 bool PaymasterStore::ListProviderCommits(std::vector<ProviderCommitRecord>& commits, bool bounded) const
 {
+    bool wrapped{false};
+    return ListProviderCommits(commits, bounded, false, wrapped);
+}
+
+bool PaymasterStore::ListProviderCommits(std::vector<ProviderCommitRecord>& commits, bool bounded,
+    bool relay_scan, bool& wrapped) const
+{
+    wrapped = false;
     LOCK(m_wallet.cs_wallet);
     WalletBatch batch{m_wallet.GetDatabase()};
-    if (!bounded) return batch.ListPaymasterProviderCommits(commits);
-    PaymasterScanPage page{m_wallet.GetDatabase(), PaymasterScan::PROVIDER_COMMITS};
+    if (!bounded) {
+        const bool read = batch.ListPaymasterProviderCommits(commits);
+        wrapped = read;
+        return read;
+    }
+    PaymasterScanPage page{m_wallet.GetDatabase(), relay_scan ? PaymasterScan::RELAY_PROVIDER_COMMITS : PaymasterScan::PROVIDER_COMMITS};
     uint256 next;
     if (!batch.ListPaymasterProviderCommitsPage(page.after.record, commits, next)) return false;
     page.Complete(next);
+    wrapped = next.IsNull();
     return true;
 }
 
@@ -760,11 +773,19 @@ bool PaymasterStore::ListProviderSignedAttemptsWithoutCommit(
 bool PaymasterStore::ListProviderSignedAttemptsWithoutCommit(
     std::vector<ProviderAttempt>& attempts, bool bounded) const
 {
+    bool wrapped{false};
+    return ListProviderSignedAttemptsWithoutCommit(attempts, bounded, false, wrapped);
+}
+
+bool PaymasterStore::ListProviderSignedAttemptsWithoutCommit(
+    std::vector<ProviderAttempt>& attempts, bool bounded, bool relay_scan, bool& wrapped) const
+{
+    wrapped = false;
     attempts.clear();
     LOCK(m_wallet.cs_wallet);
     WalletBatch batch{m_wallet.GetDatabase()};
     std::vector<PaymentSession> sessions;
-    PaymasterScanPage page{m_wallet.GetDatabase(), PaymasterScan::SIGNED_ATTEMPTS};
+    PaymasterScanPage page{m_wallet.GetDatabase(), relay_scan ? PaymasterScan::RELAY_SIGNED_ATTEMPTS : PaymasterScan::SIGNED_ATTEMPTS};
     std::string next;
     if (bounded ? !batch.ListPaymasterSessionsPage(page.after.request,
             PAYMASTER_BACKGROUND_SESSION_ROWS, PAYMASTER_BACKGROUND_SESSION_BYTES, sessions, next)
@@ -793,6 +814,7 @@ bool PaymasterStore::ListProviderSignedAttemptsWithoutCommit(
         }
     }
     if (bounded) page.Complete(next);
+    wrapped = !bounded || next.empty();
     return true;
 }
 

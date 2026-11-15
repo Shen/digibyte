@@ -26,6 +26,7 @@
 #include <streams.h>
 #include <test/util/mining.h>
 #include <test/util/txmempool.h>
+#include <test/util/validation.h>
 #include <txmempool.h>
 #include <util/time.h>
 #include <validation.h>
@@ -52,6 +53,7 @@
 #include <wallet/walletdb.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdlib>
 #include <limits>
@@ -961,6 +963,212 @@ void CheckUnreadableClientArtifact(WalletTestingSetup& fixture, const PaymentSes
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(paymaster_wallet_store_tests, WalletTestingSetup)
+
+BOOST_AUTO_TEST_CASE(scheduled_relay_rounds_visit_every_bounded_stream_independently)
+{
+    SyncWithValidationInterfaceQueue();
+    auto owned = std::make_unique<SessionIndexDatabase>();
+    auto& database = *owned;
+    wallet::CWallet wallet{m_node.chain.get(), "bounded-relay-round", std::move(owned)};
+    WalletBatch batch{database};
+    constexpr size_t rows{129};
+    const auto candidate = [](const uint256& key) {
+        ProviderCommitRecord commit;
+        commit.commit_key = commit.final_txid = key;
+        commit.provider_id = commit.quote_id = commit.template_commitment = key;
+        commit.raw_transaction_hash = key;
+        commit.final_transaction = {1};
+        commit.provider_inputs.emplace_back(key, 0);
+        return commit;
+    };
+    {
+        LOCK(wallet.cs_wallet);
+        BOOST_REQUIRE(batch.TxnBegin());
+        for (size_t i{0}; i < rows; ++i) {
+            PaymentSession session;
+            session.request_id = strprintf("550e8400-e29b-41d4-a716-%012u", i);
+            session.session_id = uint256S(strprintf("%064x", i + 1));
+            session.created_at = session.updated_at = 100;
+            session.state = SessionState::FAILED;
+            BOOST_REQUIRE(batch.WritePaymasterSession(session));
+            // These entries deliberately lack financial authority. They test
+            // candidate scheduling, and must all fail before any broadcast.
+            BOOST_REQUIRE(batch.WritePaymasterProviderCommit(candidate(uint256S(strprintf("%064x", i + 1)))));
+        }
+        BOOST_REQUIRE(batch.TxnCommit());
+    }
+    const auto before = database.m_records;
+    const auto observe = [&] {
+        return RecoverDurablePaymasterCommits(wallet, 1000, true, ExactFinalBroadcastMode::OBSERVE_ONLY);
+    };
+    observe();
+    const auto observation_after = GetPaymasterScanPosition(database, PaymasterScan::CLIENT_FINALS).request;
+    BOOST_CHECK(!observation_after.empty());
+    BOOST_CHECK(BeginPaymasterRelayRound(database));
+    BOOST_CHECK(!BeginPaymasterRelayRound(database));
+    PrimePaymasterSessionIndex(database, {});
+    BOOST_CHECK(GetPaymasterRelayRound(database).active);
+    size_t offered{0}, passes{0};
+    while (!GetPaymasterRelayRound(database).Complete() && passes++ < 8) {
+        const auto report = RecoverDurablePaymasterCommits(wallet, 1000, true, ExactFinalBroadcastMode::RELAY);
+        BOOST_CHECK_EQUAL(report.recovered, 0U);
+        offered += report.candidates;
+        const auto provider_after = GetPaymasterScanPosition(database, PaymasterScan::RELAY_PROVIDER_COMMITS).record;
+        const auto client_after = GetPaymasterScanPosition(database, PaymasterScan::RELAY_CLIENT_FINALS).request;
+        const auto signed_after = GetPaymasterScanPosition(database, PaymasterScan::RELAY_SIGNED_ATTEMPTS).request;
+        const auto round = GetPaymasterRelayRound(database);
+        if (passes == 1) {
+            PrimePaymasterSessionIndex(database, {});
+            LOCK(wallet.cs_wallet);
+            BOOST_REQUIRE(batch.TxnBegin());
+            BOOST_REQUIRE(batch.WritePaymasterProviderCommit(candidate(uint256S("1")), true));
+            batch.TxnAbort();
+            const auto scans = database.session_scans;
+            std::vector<PaymentSession> found;
+            BOOST_REQUIRE(ListPaymasterFinalSessions(batch, database, uint256S("ff"), found));
+            BOOST_CHECK_GT(database.session_scans, scans);
+            BOOST_CHECK(found.empty());
+        }
+        observe();
+        BOOST_CHECK(GetPaymasterScanPosition(database, PaymasterScan::RELAY_PROVIDER_COMMITS).record == provider_after);
+        BOOST_CHECK_EQUAL(GetPaymasterScanPosition(database, PaymasterScan::RELAY_CLIENT_FINALS).request, client_after);
+        BOOST_CHECK_EQUAL(GetPaymasterScanPosition(database, PaymasterScan::RELAY_SIGNED_ATTEMPTS).request, signed_after);
+        BOOST_CHECK_EQUAL(GetPaymasterRelayRound(database).active, round.active);
+        BOOST_CHECK_EQUAL(GetPaymasterRelayRound(database).Complete(), round.Complete());
+    }
+    BOOST_CHECK(GetPaymasterRelayRound(database).Complete());
+    BOOST_CHECK_GT(passes, 1U);
+    BOOST_CHECK_EQUAL(offered, rows);
+    BOOST_CHECK_EQUAL(RecoverDurablePaymasterCommits(wallet, 1000, true, ExactFinalBroadcastMode::RELAY).candidates, 0U);
+    BOOST_CHECK(database.m_records == before);
+    const auto observation_before_reset = GetPaymasterScanPosition(database, PaymasterScan::CLIENT_FINALS).request;
+    ResetPaymasterRelayRound(database);
+    BOOST_CHECK(!GetPaymasterRelayRound(database).active);
+    BOOST_CHECK(GetPaymasterScanPosition(database, PaymasterScan::RELAY_CLIENT_FINALS).request.empty());
+    BOOST_CHECK_EQUAL(GetPaymasterScanPosition(database, PaymasterScan::CLIENT_FINALS).request, observation_before_reset);
+
+    // A corrupt provider page must not strand the other two streams. Repair
+    // only the synthetic bad row, then finish the same scheduled round.
+    const auto bad_key = uint256S(strprintf("%064x", 1));
+    const auto raw_key = std::make_pair(DBKeys::PAYMASTER_PROVIDER_COMMIT, bad_key);
+    BOOST_REQUIRE(database.MakeBatch()->Write(raw_key, uint16_t{65535}));
+    for (size_t i{0}; i < 4; ++i) {
+        const auto report = RecoverDurablePaymasterCommits(wallet, 1000, true, ExactFinalBroadcastMode::RELAY);
+        BOOST_CHECK(!report.errors.empty());
+    }
+    auto round = GetPaymasterRelayRound(database);
+    BOOST_CHECK(round.active && !round.provider_commits_complete && round.signed_attempts_complete && round.client_finals_complete);
+    BOOST_REQUIRE(batch.WritePaymasterProviderCommit(candidate(bad_key), true));
+    for (size_t i{0}; i < 8 && !GetPaymasterRelayRound(database).Complete(); ++i)
+        RecoverDurablePaymasterCommits(wallet, 1000, true, ExactFinalBroadcastMode::RELAY);
+    BOOST_CHECK(GetPaymasterRelayRound(database).Complete());
+    ForgetPaymasterSessionIndex(database);
+    BOOST_CHECK(!GetPaymasterRelayRound(database).active);
+    BOOST_CHECK(GetPaymasterScanPosition(database, PaymasterScan::RELAY_PROVIDER_COMMITS).record.IsNull());
+}
+
+BOOST_AUTO_TEST_CASE(scheduled_relay_pages_preserve_ordinary_cadence_and_cancel_on_policy)
+{
+    ScopedRecoveryMockTime time{GetTime()};
+    if (m_node.chainman->IsInitialBlockDownload())
+        static_cast<TestChainstateManager&>(*m_node.chainman).JumpOutOfIbd();
+    BOOST_REQUIRE(m_node.chain->isReadyToBroadcast());
+    auto owned = std::make_unique<SessionIndexDatabase>();
+    auto& database = *owned;
+    auto observed = std::make_shared<wallet::CWallet>(m_node.chain.get(), "relay-cadence", std::move(owned));
+    observed->SetBroadcastTransactions(true);
+    WalletContext background;
+    background.wallets.push_back(observed);
+    {
+        LOCK(observed->cs_wallet);
+        WalletBatch batch{database};
+        BOOST_REQUIRE(batch.TxnBegin());
+        for (size_t i{0}; i < 129; ++i) {
+            PaymentSession session;
+            session.request_id = strprintf("550e8400-e29b-41d4-a716-%012u", i);
+            session.session_id = uint256S(strprintf("%064x", i + 1));
+            session.created_at = session.updated_at = 100;
+            session.state = SessionState::FAILED;
+            BOOST_REQUIRE(batch.WritePaymasterSession(session));
+        }
+        BOOST_REQUIRE(batch.TxnCommit());
+    }
+    BOOST_REQUIRE(database.MakeBatch()->Write(
+        std::make_pair(DBKeys::PAYMASTER_PROVIDER_COMMIT, uint256S("1")), uint16_t{65535}));
+    const auto before = database.m_records;
+    // Find the already chosen ordinary deadline without changing it. A fresh
+    // random choice on any continuation tick would be visible here.
+    const auto next_due = [&] {
+        const int64_t current = GetTime();
+        int64_t low = current, high = current + 37 * 60 * 60;
+        while (low < high) {
+            const int64_t middle = low + (high - low) / 2;
+            SetMockTime(middle);
+            if (observed->ShouldResend()) high = middle;
+            else low = middle + 1;
+        }
+        SetMockTime(current);
+        return high;
+    };
+    SetMockTime(GetTime() + 37 * 60 * 60);
+    BOOST_REQUIRE(observed->ShouldResend());
+    MaybeResendWalletTxs(background);
+    BOOST_CHECK(!observed->ShouldResend());
+    const auto deadline = next_due();
+    auto round = GetPaymasterRelayRound(database);
+    BOOST_CHECK(round.active && !round.provider_commits_complete && !round.client_finals_complete);
+    const auto first_page = GetPaymasterScanPosition(database, PaymasterScan::RELAY_CLIENT_FINALS).request;
+    BOOST_CHECK(!first_page.empty());
+    {
+        // A validation callback can lazily rebuild the invalid final-session
+        // index between scheduler ticks. Its replacement must retain both
+        // the active relay opportunity and the continuation already visited.
+        LOCK(observed->cs_wallet);
+        WalletBatch batch{database};
+        const auto scans = database.session_scans;
+        std::vector<PaymentSession> found;
+        BOOST_REQUIRE(ListPaymasterFinalSessions(batch, database, uint256S("ff"), found));
+        BOOST_CHECK_GT(database.session_scans, scans);
+        BOOST_CHECK(found.empty());
+    }
+    BOOST_CHECK(GetPaymasterRelayRound(database).active);
+    BOOST_CHECK_EQUAL(GetPaymasterScanPosition(database, PaymasterScan::RELAY_CLIENT_FINALS).request, first_page);
+    BOOST_CHECK_EQUAL(next_due(), deadline);
+    // The ordinary deadline is in the future. The existing relay opportunity
+    // must still visit the remaining source pages on subsequent ticks.
+    MaybeResendWalletTxs(background);
+    BOOST_CHECK(GetPaymasterScanPosition(database, PaymasterScan::RELAY_CLIENT_FINALS).request != first_page);
+    MaybeResendWalletTxs(background);
+    round = GetPaymasterRelayRound(database);
+    BOOST_CHECK(round.active && !round.provider_commits_complete && round.signed_attempts_complete && round.client_finals_complete);
+    BOOST_CHECK_EQUAL(next_due(), deadline);
+    // The corrupt page cannot postpone the next ordinary opportunity. It
+    // starts a fresh source scan and chooses a later ordinary deadline.
+    SetMockTime(deadline);
+    BOOST_REQUIRE(observed->ShouldResend());
+    MaybeResendWalletTxs(background);
+    BOOST_CHECK(!observed->ShouldResend());
+    BOOST_CHECK_GT(next_due(), deadline);
+    BOOST_CHECK(!GetPaymasterRelayRound(database).client_finals_complete);
+    observed->SetBroadcastTransactions(false);
+    MaybeResendWalletTxs(background);
+    BOOST_CHECK(!GetPaymasterRelayRound(database).active);
+    BOOST_CHECK(GetPaymasterScanPosition(database, PaymasterScan::RELAY_CLIENT_FINALS).request.empty());
+    BOOST_CHECK(!GetPaymasterScanPosition(database, PaymasterScan::CLIENT_FINALS).request.empty());
+    observed->SetBroadcastTransactions(true);
+    BeginPaymasterRelayRound(database);
+    {
+        struct ImportScope {
+            std::atomic<bool>& flag;
+            const bool before;
+            explicit ImportScope(std::atomic<bool>& value) : flag{value}, before{flag.exchange(true)} {}
+            ~ImportScope() { flag.store(before); }
+        } importing{m_node.chainman->m_blockman.m_importing};
+        MaybeResendWalletTxs(background);
+        BOOST_CHECK(!GetPaymasterRelayRound(database).active);
+    }
+    BOOST_CHECK(database.m_records == before);
+}
 
 BOOST_AUTO_TEST_CASE(background_maintenance_pages_terminal_history_and_reuses_final_index)
 {

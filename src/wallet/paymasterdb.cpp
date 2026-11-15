@@ -37,6 +37,7 @@ struct SessionIndex {
     uint64_t revision{0};
     uint256 capacity_cleanup_after;
     std::map<PaymasterScan, PaymasterScanPosition> scans;
+    PaymasterRelayRound relay_round;
     std::map<uint256, std::set<std::string>> by_transaction;
     std::map<std::string, FinalIds> by_request;
     std::map<uint256, uint256> commit_transactions;
@@ -128,7 +129,15 @@ void PaymasterSessionIndexEnd(const WalletBatch* owner, bool committed)
         if (!committed) {
             index->second.valid = false;
             index->second.commits_valid = false;
-            index->second.scans.clear();
+            // Failed financial work invalidates observation progress. Relay
+            // pages record only candidates already offered in this scheduled
+            // round; retaining them prevents one failing entry from starving
+            // later independent candidates. They never authorize execution.
+            for (auto scan = index->second.scans.begin(); scan != index->second.scans.end();) {
+                if (scan->first == PaymasterScan::RELAY_PROVIDER_COMMITS || scan->first == PaymasterScan::RELAY_SIGNED_ATTEMPTS ||
+                    scan->first == PaymasterScan::RELAY_CLIENT_FINALS) ++scan;
+                else scan = index->second.scans.erase(scan);
+            }
         } else {
             if (index->second.valid)
                 for (const auto& [request, ids] : pending->second.updates) index->second.Update(request, ids);
@@ -155,6 +164,36 @@ void SetPaymasterScanPosition(WalletDatabase& database, PaymasterScan scan, cons
 {
     std::lock_guard<std::mutex> lock{session_index_mutex};
     session_indexes[&database].scans[scan] = position;
+}
+
+PaymasterRelayRound GetPaymasterRelayRound(WalletDatabase& database)
+{
+    std::lock_guard<std::mutex> lock{session_index_mutex};
+    return session_indexes[&database].relay_round;
+}
+
+bool BeginPaymasterRelayRound(WalletDatabase& database)
+{
+    std::lock_guard<std::mutex> lock{session_index_mutex};
+    auto& round = session_indexes[&database].relay_round;
+    if (round.active) return false;
+    round.active = true;
+    return true;
+}
+
+void SetPaymasterRelayRound(WalletDatabase& database, const PaymasterRelayRound& round)
+{
+    std::lock_guard<std::mutex> lock{session_index_mutex};
+    session_indexes[&database].relay_round = round;
+}
+
+void ResetPaymasterRelayRound(WalletDatabase& database)
+{
+    std::lock_guard<std::mutex> lock{session_index_mutex};
+    auto& index = session_indexes[&database];
+    index.relay_round = {};
+    for (const auto scan : {PaymasterScan::RELAY_PROVIDER_COMMITS, PaymasterScan::RELAY_SIGNED_ATTEMPTS, PaymasterScan::RELAY_CLIENT_FINALS})
+        index.scans.erase(scan);
 }
 
 PaymasterScanPage::PaymasterScanPage(WalletDatabase& database, PaymasterScan scan)
@@ -191,6 +230,7 @@ void PrimePaymasterSessionIndex(WalletDatabase& database,
     rebuilt.revision = session_indexes[&database].revision + 1;
     rebuilt.capacity_cleanup_after = session_indexes[&database].capacity_cleanup_after;
     rebuilt.scans = std::move(session_indexes[&database].scans);
+    rebuilt.relay_round = session_indexes[&database].relay_round;
     rebuilt.commits_valid = session_indexes[&database].commits_valid;
     rebuilt.commit_transactions = std::move(session_indexes[&database].commit_transactions);
     rebuilt.commits_by_transaction = std::move(session_indexes[&database].commits_by_transaction);
@@ -227,6 +267,7 @@ bool ListPaymasterFinalSessions(WalletBatch& batch, WalletDatabase& database,
         rebuilt.revision = revision;
         rebuilt.capacity_cleanup_after = index.capacity_cleanup_after;
         rebuilt.scans = std::move(index.scans);
+        rebuilt.relay_round = index.relay_round;
         rebuilt.commits_valid = index.commits_valid;
         rebuilt.commit_transactions = std::move(index.commit_transactions);
         rebuilt.commits_by_transaction = std::move(index.commits_by_transaction);

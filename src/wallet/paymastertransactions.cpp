@@ -1585,7 +1585,8 @@ bool PreflightFinalPaymasterTransaction(CWallet& wallet,
 ClientFinalExecutionResult ExecuteDurableClientFinal(
     CWallet& wallet, const uint256& txid, int64_t now,
     Manager* manager,
-    ExactFinalTxIndexMode txindex_mode)
+    ExactFinalTxIndexMode txindex_mode,
+    ExactFinalBroadcastMode broadcast_mode)
 {
     using namespace paymaster_store::internal;
     PaymasterStore store{wallet};
@@ -1682,7 +1683,7 @@ ClientFinalExecutionResult ExecuteDurableClientFinal(
         }
     }
     ClientFinalExecutionResult result{transaction};
-    if (!InsertAndBroadcastPaymasterTransaction(wallet, transaction, result.already_confirmed, error)) {
+    if (!InsertAndBroadcastPaymasterTransaction(wallet, transaction, result.already_confirmed, error, broadcast_mode)) {
         fail(error.empty() ? "PAYMASTER_FINAL_BROADCAST_UNAVAILABLE" : error);
     }
     ExactFinalTransactionPreflight observation;
@@ -1861,10 +1862,11 @@ bool GetOrCreateFinalProviderResult(CWallet& wallet,
 bool InsertAndBroadcastPaymasterTransaction(CWallet& wallet,
                                             const CTransactionRef& transaction,
                                             bool& already_confirmed,
-                                            std::string& error)
+                                            std::string& error,
+                                            ExactFinalBroadcastMode broadcast_mode)
 {
     return InsertAndBroadcastExactPaymasterTransaction(
-        wallet, transaction, already_confirmed, error);
+        wallet, transaction, already_confirmed, error, broadcast_mode);
 }
 
 // Wallet insertion precedes network broadcast so restart recovery can find the

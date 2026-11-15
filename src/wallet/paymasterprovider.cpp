@@ -32,6 +32,7 @@
 #include <wallet/digidollarwallet.h>
 #include <wallet/paymasterpsbt.h>
 #include <wallet/paymasterstore.h>
+#include <wallet/paymastersessionindex.h>
 #include <wallet/scriptpubkeyman.h>
 #include <wallet/transaction.h>
 #include <wallet/wallet.h>
@@ -523,11 +524,32 @@ bool ReconcileDurableFinalObservation(
         now, error);
 }
 
+bool ExactFinalRelayIsEnabled(CWallet& wallet)
+{
+    return WITH_LOCK(wallet.cs_wallet, return wallet.GetBroadcastTransactions()) &&
+        wallet.chain().isReadyToBroadcast();
+}
+
 TransactionError BroadcastExactDurableTransaction(
+    CWallet& wallet,
     node::NodeContext& node,
     const CTransactionRef& transaction,
-    std::string& error)
+    std::string& error,
+    ExactFinalBroadcastMode broadcast_mode)
 {
+    if (broadcast_mode == ExactFinalBroadcastMode::OBSERVE_ONLY) {
+        error = "PAYMASTER_FINAL_BROADCAST_DEFERRED";
+        return TransactionError::P2P_DISABLED;
+    }
+    if (!WITH_LOCK(wallet.cs_wallet, return wallet.GetBroadcastTransactions())) {
+        error = "PAYMASTER_WALLET_BROADCAST_DISABLED";
+        return TransactionError::P2P_DISABLED;
+    }
+    const bool relay = broadcast_mode == ExactFinalBroadcastMode::RELAY;
+    if (relay && !wallet.chain().isReadyToBroadcast()) {
+        error = "PAYMASTER_FINAL_BROADCAST_DEFERRED";
+        return TransactionError::P2P_DISABLED;
+    }
     if (!node.chainman || !node.mempool || !node.stempool || !node.peerman ||
         !node.connman) {
         error = "PAYMASTER_NODE_RUNTIME_UNAVAILABLE";
@@ -549,6 +571,17 @@ TransactionError BroadcastExactDurableTransaction(
         if (!MatchDurableFinalTransaction(known, transaction, error)) {
             return TransactionError::MEMPOOL_REJECTED;
         }
+    }
+    if (!relay) {
+        // BroadcastTransaction(relay=false) still routes through Dandelion.
+        // Startup must only reaccept locally, including when Dandelion is on.
+        if (node.mempool->get(transaction->GetHash()) || node.stempool->get(transaction->GetHash()))
+            return TransactionError::OK;
+        const auto accepted = node.chainman->ProcessTransaction(transaction, /*test_accept=*/false);
+        if (accepted.m_result_type == MempoolAcceptResult::ResultType::VALID)
+            return TransactionError::OK;
+        error = accepted.m_state.ToString();
+        return TransactionError::MEMPOOL_REJECTED;
     }
     return node::BroadcastTransaction(
         node, transaction, error, /*max_tx_fee=*/0, /*relay=*/true,
@@ -630,6 +663,8 @@ PaymasterFinalizationFailure ClassifyPaymasterFinalizationFailure(
          error == "PAYMASTER_WALLET_DD_STATE_UPDATE_FAILED" ||
          error == "PAYMASTER_FINAL_MEMPOOL_POLICY" ||
          error == "PAYMASTER_FINAL_BROADCAST_UNAVAILABLE" ||
+         error == "PAYMASTER_FINAL_BROADCAST_DEFERRED" ||
+         error == "PAYMASTER_WALLET_BROADCAST_DISABLED" ||
          error == "PAYMASTER_RECOVERY_USER_PREVOUT_NOT_FOUND")) {
         return PaymasterFinalizationFailure::LOCAL_UNAVAILABLE;
     }
@@ -680,7 +715,8 @@ bool InsertAndBroadcastExactPaymasterTransaction(
     CWallet& wallet,
     const CTransactionRef& transaction,
     bool& already_confirmed,
-    std::string& error)
+    std::string& error,
+    ExactFinalBroadcastMode broadcast_mode)
 {
     already_confirmed = false;
     error.clear();
@@ -701,8 +737,9 @@ bool InsertAndBroadcastExactPaymasterTransaction(
         already_confirmed = true;
         return true;
     }
-    if (preflight.presence == ExactFinalTransactionPresence::MEMPOOL ||
-        preflight.presence == ExactFinalTransactionPresence::STEMPOOL) {
+    if ((preflight.presence == ExactFinalTransactionPresence::MEMPOOL ||
+         preflight.presence == ExactFinalTransactionPresence::STEMPOOL) &&
+        (broadcast_mode != ExactFinalBroadcastMode::RELAY || !ExactFinalRelayIsEnabled(wallet))) {
         return true;
     }
 
@@ -712,9 +749,11 @@ bool InsertAndBroadcastExactPaymasterTransaction(
         return false;
     }
     const TransactionError broadcast = BroadcastExactDurableTransaction(
-        *node, transaction, error);
+        wallet, *node, transaction, error, broadcast_mode);
     if (broadcast != TransactionError::OK &&
         broadcast != TransactionError::ALREADY_IN_CHAIN) {
+        if (error == "PAYMASTER_FINAL_BROADCAST_DEFERRED" ||
+            error == "PAYMASTER_WALLET_BROADCAST_DISABLED") return false;
         // Wallet insertion can outlive a policy change after preflight. The
         // broadcast API exposes only a coarse result and diagnostic text;
         // classify current admissibility through the canonical typed preflight.
@@ -919,7 +958,8 @@ static bool PromoteProviderSignedAttempt(
 DurablePaymasterCommitRecovery RecoverDurablePaymasterCommit(
     CWallet& wallet,
     const ProviderCommitRecord& commit,
-    int64_t now)
+    int64_t now,
+    ExactFinalBroadcastMode broadcast_mode)
 {
     DurablePaymasterCommitRecovery result;
     if (now <= 0) {
@@ -1079,8 +1119,9 @@ DurablePaymasterCommitRecovery RecoverDurablePaymasterCommit(
         result.already_confirmed = true;
         return result;
     }
-    if (observed.presence == ExactFinalTransactionPresence::MEMPOOL ||
-        observed.presence == ExactFinalTransactionPresence::STEMPOOL) {
+    if ((observed.presence == ExactFinalTransactionPresence::MEMPOOL ||
+         observed.presence == ExactFinalTransactionPresence::STEMPOOL) &&
+        (broadcast_mode != ExactFinalBroadcastMode::RELAY || !ExactFinalRelayIsEnabled(wallet))) {
         if (!ReconcileDurableFinalObservation(
                 store, transaction, observed, recovery_now, result.error)) {
             return result;
@@ -1095,7 +1136,7 @@ DurablePaymasterCommitRecovery RecoverDurablePaymasterCommit(
         return result;
     }
     const TransactionError broadcast = BroadcastExactDurableTransaction(
-        *node, transaction, result.error);
+        wallet, *node, transaction, result.error, broadcast_mode);
     result.already_confirmed =
         broadcast == TransactionError::ALREADY_IN_CHAIN;
     result.broadcast = broadcast == TransactionError::OK ||
@@ -1132,29 +1173,36 @@ DurablePaymasterRecoveryReport RecoverDurablePaymasterCommits(
 }
 
 DurablePaymasterRecoveryReport RecoverDurablePaymasterCommits(
-    CWallet& wallet, int64_t now, bool bounded)
+    CWallet& wallet, int64_t now, bool bounded,
+    ExactFinalBroadcastMode broadcast_mode)
 {
     LOG_TIME_MILLIS_WITH_CATEGORY("Paymaster durable transaction recovery", BCLog::BENCH);
     DurablePaymasterRecoveryReport report;
     PaymasterStore store{wallet};
+    const bool relay_scan = bounded && broadcast_mode == ExactFinalBroadcastMode::RELAY;
+    if (relay_scan) BeginPaymasterRelayRound(wallet.GetDatabase());
+    auto round = GetPaymasterRelayRound(wallet.GetDatabase());
+    bool wrapped{false};
     std::vector<ProviderCommitRecord> commits;
-    if (!store.ListProviderCommits(commits, bounded)) {
-        report.errors.emplace_back("PAYMASTER_COMMIT_DATABASE_READ");
-        return report;
+    if (!relay_scan || !round.provider_commits_complete) {
+        if (!store.ListProviderCommits(commits, bounded, relay_scan, wrapped)) {
+            report.errors.emplace_back("PAYMASTER_COMMIT_DATABASE_READ");
+            commits.clear();
+        } else if (relay_scan) round.provider_commits_complete = wrapped;
     }
     std::vector<ProviderAttempt> provider_signed_attempts;
-    if (!store.ListProviderSignedAttemptsWithoutCommit(
-            provider_signed_attempts, bounded)) {
-        report.errors.emplace_back(
-            "PAYMASTER_PROVIDER_SIGNED_ATTEMPT_DATABASE_READ");
-        return report;
+    if (!relay_scan || !round.signed_attempts_complete) {
+        if (!store.ListProviderSignedAttemptsWithoutCommit(provider_signed_attempts, bounded, relay_scan, wrapped)) {
+            report.errors.emplace_back("PAYMASTER_PROVIDER_SIGNED_ATTEMPT_DATABASE_READ");
+            provider_signed_attempts.clear();
+        } else if (relay_scan) round.signed_attempts_complete = wrapped;
     }
     std::set<uint256> provider_txids;
     report.candidates = commits.size() + provider_signed_attempts.size();
     for (const ProviderCommitRecord& commit : commits) {
         provider_txids.insert(commit.final_txid);
         DurablePaymasterCommitRecovery recovered =
-            RecoverDurablePaymasterCommit(wallet, commit, now);
+            RecoverDurablePaymasterCommit(wallet, commit, now, broadcast_mode);
         if (recovered.broadcast) ++report.recovered;
         if (recovered.already_confirmed) ++report.already_confirmed;
         if (!recovered.error.empty()) {
@@ -1172,7 +1220,7 @@ DurablePaymasterRecoveryReport RecoverDurablePaymasterCommits(
         }
         provider_txids.insert(promoted.final_txid);
         DurablePaymasterCommitRecovery recovered =
-            RecoverDurablePaymasterCommit(wallet, promoted, now);
+            RecoverDurablePaymasterCommit(wallet, promoted, now, broadcast_mode);
         if (recovered.broadcast) ++report.recovered;
         if (recovered.already_confirmed) ++report.already_confirmed;
         if (!recovered.error.empty()) {
@@ -1182,11 +1230,11 @@ DurablePaymasterRecoveryReport RecoverDurablePaymasterCommits(
 
     std::vector<CTransactionRef> client_finals;
     std::string list_error;
-    if (!store.ListClientDurableFinalTransactions(client_finals,
-                                                  list_error, bounded)) {
-        report.errors.push_back(
-            list_error.empty() ? "PAYMASTER_CLIENT_FINAL_DATABASE_READ" : std::move(list_error));
-        return report;
+    if (!relay_scan || !round.client_finals_complete) {
+        if (!store.ListClientDurableFinalTransactions(client_finals, list_error, bounded, relay_scan, wrapped)) {
+            report.errors.push_back(list_error.empty() ? "PAYMASTER_CLIENT_FINAL_DATABASE_READ" : std::move(list_error));
+            client_finals.clear();
+        } else if (relay_scan) round.client_finals_complete = wrapped;
     }
     for (const CTransactionRef& transaction : client_finals) {
         if (!transaction || provider_txids.count(transaction->GetHash()) != 0) {
@@ -1198,7 +1246,7 @@ DurablePaymasterRecoveryReport RecoverDurablePaymasterCommits(
             const auto* node = wallet.chain().context();
             const auto execution = paymaster_app::ExecuteDurableClientFinal(
                 wallet, transaction->GetHash(), now, node ? node->paymaster.get() : nullptr,
-                ExactFinalTxIndexMode::NONBLOCKING);
+                ExactFinalTxIndexMode::NONBLOCKING, broadcast_mode);
             already_confirmed = execution.already_confirmed;
         } catch (const ApplicationError& failure) {
             report.errors.push_back(failure.what());
@@ -1207,6 +1255,7 @@ DurablePaymasterRecoveryReport RecoverDurablePaymasterCommits(
         ++report.recovered;
         if (already_confirmed) ++report.already_confirmed;
     }
+    if (relay_scan) SetPaymasterRelayRound(wallet.GetDatabase(), round);
     return report;
 }
 

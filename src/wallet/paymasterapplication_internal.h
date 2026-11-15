@@ -4,6 +4,7 @@
 #ifndef DIGIBYTE_WALLET_PAYMASTERAPPLICATION_INTERNAL_H
 #define DIGIBYTE_WALLET_PAYMASTERAPPLICATION_INTERNAL_H
 #include <wallet/paymasterapplication.h>
+#include <wallet/paymasterprovider.h>
 #include <wallet/paymasterresults.h>
 #include <wallet/paymasterstore.h>
 #include <wallet/paymasterpsbt.h>
@@ -374,7 +375,8 @@ bool BuildFinalProviderResult(
 bool InsertAndBroadcastPaymasterTransaction(CWallet& wallet,
                                             const CTransactionRef& transaction,
                                             bool& already_confirmed,
-                                            std::string& error);
+                                            std::string& error,
+                                            ExactFinalBroadcastMode broadcast_mode = ExactFinalBroadcastMode::RELAY);
 bool InsertAndBroadcastProviderCommit(
     CWallet& wallet,
     PaymasterStore& store,

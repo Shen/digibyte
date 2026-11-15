@@ -996,6 +996,7 @@ struct QuoteRequestProcessingSetup : TestChain100Setup {
         bool commit_quote = true, CAmount provider_change = 5500)
     {
         BOOST_REQUIRE(wallet.LoadWallet() == DBErrors::LOAD_OK);
+        wallet.SetBroadcastTransactions(true);
         environment.policy.maximum_network_fee = DGBSatoshis{COIN / 10};
         environment.settings.policy_hash = GetProviderPolicyHash(environment.policy);
         auto& limits = environment.safety.public_sponsored;
@@ -5968,6 +5969,25 @@ BOOST_FIXTURE_TEST_CASE(provider_final_commit_spends_budget_atomically,
                           DBErrors::LOAD_OK);
             PaymasterStore restarted_boundary_store{
                 restarted_boundary_wallet};
+            if (crash_case.boundary != FinalizationCrashBoundary::AFTER_BROADCAST) {
+                restarted_boundary_wallet.SetBroadcastTransactions(false);
+                const auto disabled = RecoverDurablePaymasterCommits(
+                    restarted_boundary_wallet, commit.committed_at, /*bounded=*/false,
+                    ExactFinalBroadcastMode::RELAY);
+                BOOST_CHECK_EQUAL(disabled.candidates, 1U);
+                BOOST_CHECK_EQUAL(disabled.recovered, 0U);
+                BOOST_REQUIRE_EQUAL(disabled.errors.size(), 1U);
+                BOOST_CHECK_EQUAL(disabled.errors.front(), "PAYMASTER_WALLET_BROADCAST_DISABLED");
+                BOOST_CHECK(!m_node.mempool->get(final_ref->GetHash()));
+                BOOST_CHECK(!m_node.stempool->get(final_ref->GetHash()));
+                ProviderAttempt protected_attempt;
+                BOOST_REQUIRE(restarted_boundary_store.GetAttempt(provider_signed.attempt_id, protected_attempt));
+                BOOST_CHECK(protected_attempt.final_transaction == provider_signed.final_transaction);
+                BOOST_CHECK(protected_attempt.provider_signed_result == provider_signed.provider_signed_result);
+                BOOST_CHECK(protected_attempt.user_signed_psbt == provider_signed.user_signed_psbt);
+            }
+            // A live fixture opts in just as normal wallet startup does.
+            restarted_boundary_wallet.SetBroadcastTransactions(true);
             const DurablePaymasterRecoveryReport boundary_recovery =
                 RecoverDurablePaymasterCommits(
                     restarted_boundary_wallet, commit.committed_at);
@@ -6141,6 +6161,7 @@ BOOST_FIXTURE_TEST_CASE(provider_final_commit_spends_budget_atomically,
                                      "final-security-restart",
                                      std::move(restarted_database)};
     BOOST_REQUIRE(restarted_wallet.LoadWallet() == DBErrors::LOAD_OK);
+    restarted_wallet.SetBroadcastTransactions(true);
     PaymasterStore restarted_store{restarted_wallet};
     ProviderBudgetLedger restarted_ledger;
     std::vector<ProviderPoolEntry> restarted_pool;
@@ -6262,6 +6283,7 @@ BOOST_FIXTURE_TEST_CASE(provider_final_commit_spends_budget_atomically,
         auto lagging_database = std::make_unique<MockableDatabase>(signature_boundary_records);
         wallet::CWallet lagging_wallet{m_node.chain.get(), "post-commit-index-lag", std::move(lagging_database)};
         BOOST_REQUIRE(lagging_wallet.LoadWallet() == DBErrors::LOAD_OK);
+        lagging_wallet.SetBroadcastTransactions(true);
         AlignSecurityFixtureCheckpoint(lagging_wallet.GetDatabase());
         PaymasterStore lagging_store{lagging_wallet};
         BOOST_REQUIRE_MESSAGE(lagging_store.CommitProviderFinalTransaction(request_id,
@@ -6271,6 +6293,13 @@ BOOST_FIXTURE_TEST_CASE(provider_final_commit_spends_budget_atomically,
         const auto spent_bytes = SerializePaymasterSecurityObject(spent);
         BOOST_REQUIRE_EQUAL(*m_node.chain->getHeight(), 0);
         const auto block = CreateBlockChain(1, Params()).front();
+        struct RestoreMockTime {
+            const std::chrono::seconds previous{GetMockTime()};
+            ~RestoreMockTime() { SetMockTime(previous); }
+        } restore_time;
+        // Exercise index lag on a synced node: relay now correctly retains
+        // the ordinary IBD/readiness gate, independently of txindex progress.
+        SetMockTime(block->nTime);
         std::promise<void> queue_entered, release_queue;
         auto entered = queue_entered.get_future();
         const auto release = release_queue.get_future().share();
@@ -6283,6 +6312,9 @@ BOOST_FIXTURE_TEST_CASE(provider_final_commit_spends_budget_atomically,
             bool new_block{false};
             if (!m_node.chainman->ProcessNewBlock(block, true, true, &new_block) || !new_block) {
                 throw std::runtime_error("Failed to advance tip during provider commit recovery");
+            }
+            if (!m_node.chain->isReadyToBroadcast()) {
+                throw std::runtime_error("Provider index-lag fixture is not ready to broadcast");
             }
             return paymaster_app::RecoverProviderCommit(lagging_wallet, lagging_store, commit, commit.committed_at);
         });
@@ -6311,6 +6343,7 @@ BOOST_FIXTURE_TEST_CASE(provider_final_commit_spends_budget_atomically,
     wallet::CWallet facade_wallet{m_node.chain.get(), "stopped-submit-replay",
         DuplicateSecurityFixtureDatabase(restarted_wallet.GetDatabase())};
     BOOST_REQUIRE(facade_wallet.LoadWallet() == DBErrors::LOAD_OK);
+    facade_wallet.SetBroadcastTransactions(true);
     PaymasterStore facade_store{facade_wallet};
     {
         LOCK(facade_wallet.cs_wallet);
@@ -7466,6 +7499,117 @@ static void ExerciseDurablePaymentExecutor(wallet::CWallet& client, ProviderQuot
     }
     auto& database = GetMockableDatabase(client);
     const auto retained = database.m_records;
+    client.SetBroadcastTransactions(true);
+    // A durable signature is not a local relay-policy override. Exercise the
+    // actual client executor, wallet startup and scheduled recovery against an
+    // otherwise valid, absent final, retaining exact authorization and fees.
+    {
+        auto offline = std::make_shared<wallet::CWallet>(client.chain().context()->chain.get(),
+            "offline-exact-final", DuplicateSecurityFixtureDatabase(client.GetDatabase()));
+        BOOST_REQUIRE(offline->LoadWallet() == DBErrors::LOAD_OK);
+        offline->SetBroadcastTransactions(false);
+        ProviderAttempt expected_attempt;
+        PaymentSession expected_session;
+        BOOST_REQUIRE(PaymasterStore{*offline}.GetAttempt(original.attempt.attempt_id, expected_attempt));
+        BOOST_REQUIRE(PaymasterStore{*offline}.GetSessionByRequestId(session.request_id, expected_session));
+        const auto check_protection = [&] {
+            BOOST_CHECK(!client.chain().context()->mempool->get(final.GetHash()));
+            BOOST_CHECK(!client.chain().context()->stempool->get(final.GetHash()));
+            BOOST_CHECK(!client.chain().context()->mempool->GetUnbroadcastTxs().count(final.GetHash()));
+            BOOST_CHECK(IsPaymasterInputReserved(*offline, session.user_inputs.front()));
+            ProviderAttempt saved;
+            ClientFeeLedger saved_fees;
+            BOOST_REQUIRE(PaymasterStore{*offline}.GetAttempt(original.attempt.attempt_id, saved));
+            BOOST_CHECK(SerializePaymasterSecurityObject(saved) == SerializePaymasterSecurityObject(expected_attempt));
+            BOOST_CHECK(saved.final_transaction == bytes);
+            BOOST_CHECK(saved.user_signed_psbt == original.attempt.user_signed_psbt);
+            PaymentSession saved_session;
+            BOOST_REQUIRE(PaymasterStore{*offline}.GetSessionByRequestId(session.request_id, saved_session));
+            BOOST_CHECK(SerializePaymasterSecurityObject(saved_session) == SerializePaymasterSecurityObject(expected_session));
+            BOOST_REQUIRE(WalletBatch{offline->GetDatabase()}.ReadPaymasterClientFeeLedger(saved_fees));
+            BOOST_CHECK(SerializePaymasterSecurityObject(saved_fees) == spent_fees);
+        };
+        for (const auto mode : {ExactFinalBroadcastMode::SUBMIT_LOCAL, ExactFinalBroadcastMode::RELAY}) {
+            BOOST_CHECK_EXCEPTION(paymaster_app::ExecuteDurableClientFinal(*offline, final.GetHash(), now + 1,
+                nullptr, ExactFinalTxIndexMode::NONBLOCKING, mode), ApplicationError,
+                [](const ApplicationError& failure) {
+                    return failure.kind == ErrorKind::WALLET &&
+                        failure.code == "PAYMASTER_WALLET_BROADCAST_DISABLED";
+                });
+            check_protection();
+        }
+        const auto startup_now = GetTime();
+        offline->postInitProcess();
+        // Tip reconciliation normalizes a durable absent final to pending
+        // network state even when broadcasting is disabled; it retains every
+        // authorization byte and reservation rather than marking a conflict.
+        expected_attempt.state = AttemptState::BROADCAST;
+        expected_attempt.updated_at = std::max(expected_attempt.updated_at, startup_now);
+        expected_session.state = SessionState::PENDING_PROVIDER;
+        expected_session.pending_phase = PendingPhase::PENDING_NETWORK;
+        expected_session.updated_at = std::max(expected_session.updated_at, startup_now);
+        check_protection();
+        WalletContext background;
+        background.wallets.push_back(offline);
+        MaybeResendWalletTxs(background);
+        check_protection();
+        offline->SetBroadcastTransactions(true);
+        BOOST_CHECK_EXCEPTION(paymaster_app::ExecuteDurableClientFinal(*offline, final.GetHash(), now + 1,
+            nullptr, ExactFinalTxIndexMode::NONBLOCKING, ExactFinalBroadcastMode::OBSERVE_ONLY), ApplicationError,
+            [](const ApplicationError& failure) {
+                return failure.kind == ErrorKind::WALLET && failure.code == "PAYMASTER_FINAL_BROADCAST_DEFERRED";
+            });
+        check_protection();
+        {
+            struct ImportScope {
+                std::atomic<bool>& flag;
+                const bool before;
+                explicit ImportScope(std::atomic<bool>& value) : flag{value}, before{flag.exchange(true)} {}
+                ~ImportScope() { flag.store(before); }
+            } importing{client.chain().context()->chainman->m_blockman.m_importing};
+            BOOST_CHECK_EXCEPTION(paymaster_app::ExecuteDurableClientFinal(*offline, final.GetHash(), now + 1,
+                nullptr, ExactFinalTxIndexMode::NONBLOCKING, ExactFinalBroadcastMode::RELAY), ApplicationError,
+                [](const ApplicationError& failure) {
+                    return failure.kind == ErrorKind::WALLET && failure.code == "PAYMASTER_FINAL_BROADCAST_DEFERRED";
+                });
+            check_protection();
+        }
+        // Re-enable submission using startup's local-only mode. The exact
+        // bytes reach the pool without entering its relay/unbroadcast set.
+        {
+            struct DandelionScope {
+                ArgsManager& args;
+                const bool before;
+                explicit DandelionScope(ArgsManager& value) : args{value}, before{args.GetBoolArg("-dandelion", DEFAULT_DANDELION)}
+                { args.ForceSetArg("-dandelion", "1"); }
+                ~DandelionScope() { args.ForceSetArg("-dandelion", before ? "1" : "0"); }
+            } dandelion{*client.chain().context()->args};
+            const auto local = paymaster_app::ExecuteDurableClientFinal(*offline, final.GetHash(), now + 1,
+                nullptr, ExactFinalTxIndexMode::NONBLOCKING, ExactFinalBroadcastMode::SUBMIT_LOCAL);
+            BOOST_REQUIRE(local.transaction);
+            BOOST_CHECK(SerializePaymasterSecurityObject(*local.transaction) == bytes);
+            BOOST_CHECK(!client.chain().context()->connman->isTxDandelionEmbargoed(final.GetHash()));
+            BOOST_CHECK(!client.chain().context()->stempool->get(final.GetHash()));
+            BOOST_REQUIRE(client.chain().context()->mempool->get(final.GetHash()));
+            BOOST_CHECK(!client.chain().context()->mempool->GetUnbroadcastTxs().count(final.GetHash()));
+            // The scheduled relay must also resume an already accepted final
+            // with Dandelion enabled and no viable stem destination.
+            const auto resumed = paymaster_app::ExecuteDurableClientFinal(*offline, final.GetHash(), now + 2,
+                nullptr, ExactFinalTxIndexMode::NONBLOCKING, ExactFinalBroadcastMode::RELAY);
+            BOOST_REQUIRE(resumed.transaction);
+            BOOST_CHECK(SerializePaymasterSecurityObject(*resumed.transaction) == bytes);
+            BOOST_CHECK(client.chain().context()->connman->isTxDandelionEmbargoed(final.GetHash()));
+        }
+        BOOST_REQUIRE(client.chain().context()->mempool->get(final.GetHash()));
+        BOOST_CHECK(!client.chain().context()->mempool->GetUnbroadcastTxs().count(final.GetHash()));
+        const auto relayed = paymaster_app::ExecuteDurableClientFinal(*offline, final.GetHash(), now + 2,
+            nullptr, ExactFinalTxIndexMode::NONBLOCKING, ExactFinalBroadcastMode::RELAY);
+        BOOST_REQUIRE(relayed.transaction);
+        BOOST_CHECK(SerializePaymasterSecurityObject(*relayed.transaction) == bytes);
+        client.chain().context()->mempool->RemoveUnbroadcastTx(final.GetHash());
+        WITH_LOCK(client.chain().context()->mempool->cs,
+            client.chain().context()->mempool->removeRecursive(final, MemPoolRemovalReason::CONFLICT));
+    }
     // An unavailable index is a local retry, without a conflict marker or a
     // change to the original signed bytes or input protection.
     auto saved_index = std::move(g_txindex);
@@ -7819,6 +7963,7 @@ static void ExerciseClientRecoveryResult(ClientRecoveryReadSetup& setup, bool co
     // validation; no unchecked mempool insertion or synthetic known-final path.
     wallet::CWallet client_wallet{m_node.chain.get(), "recovery-result-client", CreateMockableWalletDatabase()};
     BOOST_REQUIRE(client_wallet.LoadWallet() == DBErrors::LOAD_OK);
+    client_wallet.SetBroadcastTransactions(true);
     wallet::CWallet& client = client_wallet;
     struct OracleCleanup {
         ~OracleCleanup()

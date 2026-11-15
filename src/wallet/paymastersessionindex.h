@@ -17,13 +17,28 @@ class WalletDatabase;
 
 /** Disposable scheduling progress, never financial authority. Independent
  * scans must not advance one another. Wallet unload discards all progress. */
-enum class PaymasterScan { QUOTE_EXPIRY, RECONCILIATION, CLIENT_FINALS, CAPACITY_SNAPSHOTS, RECOVERIES, PROVIDER_COMMITS, SIGNED_ATTEMPTS, POOL_SUCCESSORS };
+enum class PaymasterScan { QUOTE_EXPIRY, RECONCILIATION, CLIENT_FINALS, CAPACITY_SNAPSHOTS, RECOVERIES, PROVIDER_COMMITS, SIGNED_ATTEMPTS, POOL_SUCCESSORS,
+                          RELAY_PROVIDER_COMMITS, RELAY_SIGNED_ATTEMPTS, RELAY_CLIENT_FINALS };
 struct PaymasterScanPosition {
     std::string request;
     uint256 record;
 };
 PaymasterScanPosition GetPaymasterScanPosition(WalletDatabase& database, PaymasterScan scan);
 void SetPaymasterScanPosition(WalletDatabase& database, PaymasterScan scan, const PaymasterScanPosition& position);
+/** One randomized relay opportunity drains bounded pages across later ticks.
+ * Observations have separate cursors; this disposable progress grants no
+ * payment authority and is discarded on wallet unload or policy cancellation. */
+struct PaymasterRelayRound {
+    bool active{false};
+    bool provider_commits_complete{false};
+    bool signed_attempts_complete{false};
+    bool client_finals_complete{false};
+    bool Complete() const { return active && provider_commits_complete && signed_attempts_complete && client_finals_complete; }
+};
+PaymasterRelayRound GetPaymasterRelayRound(WalletDatabase& database);
+bool BeginPaymasterRelayRound(WalletDatabase& database);
+void SetPaymasterRelayRound(WalletDatabase& database, const PaymasterRelayRound& round);
+void ResetPaymasterRelayRound(WalletDatabase& database);
 /** Take and reset progress before reading. Publish a continuation only after
  * the entire page succeeds; any early return restarts failed work. */
 class PaymasterScanPage {
