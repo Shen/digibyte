@@ -96,7 +96,7 @@ bool ValidateAnnouncementEnvelope(const Announcement& announcement,
         error = "PAYMASTER_INVALID_DISPLAY_NAME";
         return false;
     }
-    if (TimeDeltaExceeds(announcement.created_at, now, 60) || announcement.expires_at <= now ||
+    if (!IsValidPaymasterPeerTimestamp(announcement.created_at, now) || announcement.expires_at <= now ||
         announcement.expires_at <= announcement.created_at ||
         TimeDeltaExceeds(announcement.expires_at, announcement.created_at,
                          ANNOUNCEMENT_TTL_SECONDS)) {

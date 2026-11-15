@@ -1258,8 +1258,10 @@ bool ValidateAlternativeRecoveryRecordShape(
         recovery.accepted_recovery_authorization_commitment ==
             recovery.recovery_authorization.authorization_commitment &&
         recovery.recovery_authorization_accepted_at > 0 &&
-        recovery.recovery_authorization_accepted_at >=
-            recovery.recovery_response.created_at &&
+        recovery.recovery_authorization_accepted_at >= recovery.created_at &&
+        recovery.recovery_authorization_accepted_at <= recovery.updated_at &&
+        IsValidPaymasterPeerTimestamp(recovery.recovery_response.created_at,
+            recovery.recovery_authorization_accepted_at) &&
         recovery.recovery_authorization_accepted_at <=
             recovery.recovery_authorization.expires_at;
     if (recovery.provider_side && has_recovery_acceptance) {

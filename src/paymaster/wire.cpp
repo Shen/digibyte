@@ -30,7 +30,7 @@ bool IsP2TR(const CScript& script)
 
 bool ValidWindow(int64_t created_at, int64_t expires_at, int64_t now)
 {
-    return created_at > 0 && !TimeDeltaExceeds(created_at, now, 60) && expires_at > now &&
+    return IsValidPaymasterPeerTimestamp(created_at, now) && expires_at > now &&
            expires_at > created_at &&
            !TimeDeltaExceeds(expires_at, created_at, MAX_DIRECT_MESSAGE_TTL_SECONDS);
 }
@@ -81,7 +81,7 @@ bool ValidQuoteShape(const PaymasterQuote& quote, const uint256& expected_genesi
            !quote.offer_id.IsNull() && !quote.policy_hash.IsNull() && quote.fee_rate_bps <= MAX_RATE_BPS &&
            quote.fee_rate_bps % 10 == 0 && quote.service_fee.value >= 0 &&
            quote.service_fee.value <= MAX_DD_OUTPUT_CENTS && quote.network_fee.value > 0 &&
-           !TimeDeltaExceeds(quote.created_at, now, 60) && quote.expires_at > now &&
+           IsValidPaymasterPeerTimestamp(quote.created_at, now) && quote.expires_at > now &&
            quote.expires_at > quote.created_at &&
            !TimeDeltaExceeds(quote.expires_at, quote.created_at,
                              MAX_DIRECT_MESSAGE_TTL_SECONDS) &&
@@ -482,7 +482,7 @@ bool ValidateResultMessageEnvelope(const PaymasterResultMessage& message,
 {
     if (!IsSupportedDirectProtocolVersion(message.version) || !IsCanonicalRequestId(message.request_id) ||
         message.session_id.IsNull() || message.result.genesis_hash != expected_genesis ||
-        TimeDeltaExceeds(message.result.updated_at, now, 60) ||
+        !IsValidPaymasterPeerTimestamp(message.result.updated_at, now) ||
         !ValidatePaymasterResultShape(message.result, error)) {
         if (error.empty()) error = "PAYMASTER_INVALID_RESULT_MESSAGE";
         return false;

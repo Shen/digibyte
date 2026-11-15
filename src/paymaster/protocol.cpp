@@ -85,7 +85,7 @@ bool ValidateQuoteResources(const PaymasterQuote& quote, int64_t quote_ttl,
         error = "PAYMASTER_INVALID_FUNDING_MODEL_OR_SCOPE";
         return false;
     }
-    if (TimeDeltaExceeds(quote.created_at, now, 60) || quote.expires_at <= now ||
+    if (!IsValidPaymasterPeerTimestamp(quote.created_at, now) || quote.expires_at <= now ||
         quote.expires_at <= quote.created_at || TimeDeltaExceeds(quote.expires_at, quote.created_at, quote_ttl) ||
         quote.retry_until < quote.expires_at ||
         TimeDeltaExceeds(quote.retry_until, quote.created_at, DEFAULT_RETRY_SECONDS) ||

@@ -90,6 +90,7 @@ static constexpr int64_t MAX_DD_OUTPUT_CENTS{10000000};
 static constexpr int64_t ANNOUNCEMENT_TTL_SECONDS{600};
 static constexpr int64_t DEFAULT_QUOTE_TTL_SECONDS{60};
 static constexpr int64_t DEFAULT_RETRY_SECONDS{24 * 60 * 60};
+static constexpr int64_t MAX_PEER_CLOCK_SKEW_SECONDS{60};
 static constexpr int DEFAULT_REORG_SAFETY_DEPTH{240};
 
 /** Return whether later is more than max_delta seconds after earlier without
@@ -101,6 +102,16 @@ constexpr bool TimeDeltaExceeds(int64_t later, int64_t earlier, int64_t max_delt
     if (max_delta < 0) return true;
     return static_cast<uint64_t>(later) - static_cast<uint64_t>(earlier) >
            static_cast<uint64_t>(max_delta);
+}
+
+/** Validate a timestamp from the other party's clock against a local observation.
+ * This permits bounded clock skew, not extra lifetime: callers must still check
+ * the signed expiry and every local authorization/signing deadline separately.
+ * Historical callers use their recorded observation or acceptance time. */
+constexpr bool IsValidPaymasterPeerTimestamp(int64_t peer_time, int64_t observation_time)
+{
+    return peer_time > 0 && observation_time > 0 &&
+           !TimeDeltaExceeds(peer_time, observation_time, MAX_PEER_CLOCK_SKEW_SECONDS);
 }
 
 /** Add seconds to a timestamp, clamping at the int64_t limits. */

@@ -32,6 +32,7 @@
 #ifdef ENABLE_WALLET
 #include <wallet/db.h>
 #include <wallet/paymasterprovider.h>
+#include <wallet/paymasterstore_internal.h>
 #include <wallet/test/util.h>
 #include <wallet/wallet.h>
 #endif
@@ -135,7 +136,8 @@ struct RecoveryFixtureBase : Setup {
     }
 
     PaymasterCapacityProof CapacityProof(
-        const PaymasterCapacityRequest& request, bool include_carrier) const
+        const PaymasterCapacityRequest& request, bool include_carrier,
+        int64_t lifetime = 30) const
     {
         PaymasterCapacityProof proof;
         proof.genesis_hash = request.genesis_hash;
@@ -147,7 +149,7 @@ struct RecoveryFixtureBase : Setup {
         proof.requires_carrier = request.requires_carrier;
         proof.snapshot_id = uint256S("a1");
         proof.created_at = NOW;
-        proof.expires_at = NOW + 30;
+        proof.expires_at = NOW + lifetime;
 
         PaymasterLiquiditySlot slot;
         CapacityDGBInput dgb;
@@ -479,6 +481,136 @@ using RecoveryChainstateFixture = RecoveryFixtureBase<TestingSetup>;
 } // namespace
 
 BOOST_FIXTURE_TEST_SUITE(paymaster_recovery_tests, RecoveryFixture)
+
+BOOST_AUTO_TEST_CASE(recovery_envelopes_share_peer_clock_skew_and_strict_expiry)
+{
+    auto parameters = Parameters();
+    parameters.expires_at = NOW + MAX_DIRECT_MESSAGE_TTL_SECONDS;
+    auto request = Request(parameters);
+    // The envelope checks deliberately do not grant transaction authority.
+    // Use a real signed response/PSBT and vary only the observing clock.
+    auto template_parameters = Parameters();
+    AlternativeRecoveryTemplate recovery;
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(BuildAlternativeRecoveryTemplate(template_parameters,
+        Params(), coins, Chainstate(), NOW, recovery, error), error);
+    auto response = Response(template_parameters, Request(template_parameters), recovery);
+    response.expires_at = NOW + MAX_DIRECT_MESSAGE_TTL_SECONDS;
+    response.manifest.expires_at = response.expires_at;
+    response.manifest.manifest_id = GetAlternativeRecoveryManifestId(response.manifest);
+    response.recovery_commit_key = GetAlternativeRecoveryCommitKey(response);
+    ResignResponse(response);
+    const auto final = FullySignedTransaction(recovery);
+    const auto result = ResultMessage(response, final);
+    for (const int64_t offset : {-61, -60, -59, -1, 0, 1, 59, 60, 61}) {
+        const int64_t observer = NOW - offset;
+        BOOST_TEST_CONTEXT("peer ahead of observer by " << offset) {
+            const bool live = offset <= 60 && observer < request.expires_at;
+            BOOST_CHECK_EQUAL(ValidateAlternativeRecoveryRequestEnvelope(
+                request, parameters.genesis_hash, observer, error), live);
+            BOOST_CHECK_EQUAL(ValidateAlternativeRecoveryResponseEnvelope(
+                response, parameters.genesis_hash, observer, error), live);
+            // Signed results remain historical evidence after quote expiry.
+            BOOST_CHECK_EQUAL(ValidateAlternativeRecoveryResultEnvelope(
+                result, parameters.genesis_hash, observer, error), offset <= 60);
+        }
+    }
+    BOOST_CHECK(!ValidateRecoveryAuthorizationManifest({}, request, response,
+        response.expires_at, error));
+}
+
+BOOST_AUTO_TEST_CASE(recovery_request_response_chronology_handles_distinct_clocks)
+{
+    for (const int64_t offset : {-59, -1, 0, 1, 59}) {
+        BOOST_TEST_CONTEXT("provider clock offset " << offset) {
+            auto provider_parameters = Parameters();
+            const int64_t provider_now = NOW + offset;
+            provider_parameters.expires_at = std::min(NOW, provider_now) + 60;
+            const auto proof = CapacityProof(provider_parameters.capacity_request, false, 60);
+            provider_parameters.capacity_snapshot.capacity_proof = SerializeExact(proof);
+            provider_parameters.capacity_snapshot.expires_at = proof.expires_at;
+            provider_parameters.capacity_snapshot.validated_at = provider_now;
+            const auto request = Request(provider_parameters);
+            std::string error;
+            BOOST_REQUIRE_MESSAGE(ValidateAlternativeRecoveryRequestEnvelope(
+                request, provider_parameters.genesis_hash, provider_now, error), error);
+            AlternativeRecoveryTemplate recovery;
+            BOOST_REQUIRE_MESSAGE(BuildAlternativeRecoveryTemplate(provider_parameters,
+                Params(), coins, Chainstate(), provider_now, recovery, error), error);
+            auto response = Response(provider_parameters, request, recovery);
+            response.created_at = provider_now;
+            ResignResponse(response);
+            BOOST_REQUIRE_MESSAGE(ValidateAlternativeRecoveryResponse(response, request,
+                provider_parameters.recovery_provider_identity_key, NOW, error), error);
+
+            auto client_parameters = provider_parameters;
+            client_parameters.capacity_snapshot.validated_at = NOW;
+            AlternativeRecoveryTemplate trusted;
+            PartiallySignedTransaction unsigned_psbt;
+            BOOST_REQUIRE_MESSAGE(ValidateAlternativeRecoveryResponseTemplate(response, request,
+                client_parameters.recovery_provider_identity_key, client_parameters, Params(),
+                coins, Chainstate(), NOW, trusted, unsigned_psbt, error), error);
+            RecoveryAuthorizationManifest authorization;
+            BOOST_REQUIRE_MESSAGE(BuildRecoveryAuthorizationManifest(request, response, authorization, error), error);
+            BOOST_REQUIRE_MESSAGE(ValidateRecoveryAuthorizationManifest(authorization,
+                request, response, NOW, error), error);
+            BOOST_CHECK(!ValidateRecoveryAuthorizationManifest(authorization,
+                request, response, response.expires_at, error));
+            BOOST_CHECK(!ValidateAlternativeRecoveryResponseTemplate(response, request,
+                client_parameters.recovery_provider_identity_key, client_parameters, Params(),
+                coins, Chainstate(), response.expires_at, trusted, unsigned_psbt, error));
+
+#ifdef ENABLE_WALLET
+            // The persisted validator must not compare the provider's clock
+            // strictly with the client's acceptance clock after deserialization.
+            AlternativeRecoveryRecord record;
+            record.phase = AlternativeRecoveryPhase::RESPONSE_VALIDATED;
+            record.request_id = request.request_id;
+            record.session_id = request.session_id;
+            record.recovery_id = response.recovery_id;
+            record.original_provider_id = request.original_provider_id;
+            record.recovery_provider_id = request.recovery_provider_id;
+            record.recovery_provider_identity_key = client_parameters.recovery_provider_identity_key;
+            record.recovery_provider_endpoint = "127.0.0.1:12025";
+            record.offer_id = request.offer_id;
+            record.policy_hash = request.policy_hash;
+            record.original_commit_key = request.original_commit_key;
+            record.original_template_commitment = request.original_template_commitment;
+            record.selected_maximum_service_fee = request.maximum_service_fee;
+            record.selected_service_fee = request.service_fee;
+            record.client_nonce = request.client_nonce;
+            record.capacity_request = request.capacity_request;
+            record.capacity_snapshot = client_parameters.capacity_snapshot;
+            record.recovery_request = request;
+            record.recovery_request_hash = response.recovery_request_hash;
+            record.recovery_response = response;
+            record.recovery_authorization = authorization;
+            record.accepted_recovery_authorization_commitment = authorization.authorization_commitment;
+            record.recovery_authorization_accepted_at = NOW;
+            record.created_at = record.updated_at = NOW;
+            const auto bytes = SerializeExact(record);
+            SpanReader stream{::PROTOCOL_VERSION, bytes};
+            AlternativeRecoveryRecord reloaded;
+            stream >> reloaded;
+            BOOST_REQUIRE(stream.empty());
+            BOOST_REQUIRE_MESSAGE(wallet::paymaster_store::internal::ValidateAlternativeRecoveryRecordShape(
+                reloaded, error), error);
+            auto invalid_local_time = reloaded;
+            invalid_local_time.recovery_authorization_accepted_at = record.created_at - 1;
+            BOOST_CHECK(!wallet::paymaster_store::internal::ValidateAlternativeRecoveryRecordShape(
+                invalid_local_time, error));
+            invalid_local_time.recovery_authorization_accepted_at = record.updated_at + 1;
+            BOOST_CHECK(!wallet::paymaster_store::internal::ValidateAlternativeRecoveryRecordShape(
+                invalid_local_time, error));
+            if (offset > 0) {
+                reloaded.recovery_authorization_accepted_at = provider_now - 61;
+                BOOST_CHECK(!wallet::paymaster_store::internal::ValidateAlternativeRecoveryRecordShape(
+                    reloaded, error));
+            }
+#endif
+        }
+    }
+}
 
 BOOST_AUTO_TEST_CASE(recovery_preserves_large_principal_with_bounded_return_outputs)
 {

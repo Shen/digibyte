@@ -88,7 +88,7 @@ bool DecodeCapacitySnapshot(const AlternativeRecoveryParameters& parameters,
         snapshot.requires_carrier !=
             (parameters.service_fee.value > 0 &&
              parameters.service_fee.value < 100) ||
-        snapshot.created_at <= 0 || snapshot.validated_at < snapshot.created_at ||
+        !IsValidPaymasterPeerTimestamp(snapshot.created_at, snapshot.validated_at) ||
         snapshot.validated_at > now || snapshot.expires_at <= now) {
         error = "PAYMASTER_RECOVERY_INVALID_CAPACITY_SNAPSHOT";
         return false;
@@ -473,7 +473,7 @@ bool ValidateAlternativeRecoveryRequestEnvelope(
         error = "PAYMASTER_RECOVERY_CAPACITY_REQUEST_MISMATCH";
         return false;
     }
-    if (now <= 0 || request.created_at <= 0 || request.created_at > now ||
+    if (!IsValidPaymasterPeerTimestamp(request.created_at, now) ||
         request.expires_at <= now || request.expires_at <= request.created_at ||
         TimeDeltaExceeds(request.expires_at, request.created_at,
                          MAX_DIRECT_MESSAGE_TTL_SECONDS)) {
@@ -567,7 +567,7 @@ bool ValidateAlternativeRecoveryResponseEnvelope(
         error = "PAYMASTER_INVALID_RECOVERY_RESPONSE_SHAPE";
         return false;
     }
-    if (now <= 0 || response.created_at <= 0 || response.created_at > now ||
+    if (!IsValidPaymasterPeerTimestamp(response.created_at, now) ||
         response.expires_at <= now || response.expires_at <= response.created_at ||
         TimeDeltaExceeds(response.expires_at, response.created_at,
                          MAX_DIRECT_MESSAGE_TTL_SECONDS) ||
@@ -806,8 +806,8 @@ bool ValidateAlternativeRecoveryResultEnvelope(
         !IsCanonicalRequestId(message.request_id) || message.session_id.IsNull() ||
         message.recovery_id.IsNull() ||
         message.recovery_request_hash.IsNull() ||
-        message.result.genesis_hash != expected_genesis || now <= 0 ||
-        message.result.updated_at > now ||
+        message.result.genesis_hash != expected_genesis ||
+        !IsValidPaymasterPeerTimestamp(message.result.updated_at, now) ||
         !ValidatePaymasterResultShape(message.result, error)) {
         if (error.empty()) error = "PAYMASTER_INVALID_RECOVERY_RESULT";
         return false;

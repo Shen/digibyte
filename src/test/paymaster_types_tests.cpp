@@ -158,4 +158,21 @@ BOOST_AUTO_TEST_CASE(time_arithmetic_handles_int64_boundaries)
     BOOST_CHECK_EQUAL(SaturatingAddSeconds(100, 60), 160);
 }
 
+BOOST_AUTO_TEST_CASE(peer_timestamps_allow_bounded_skew_without_overflow)
+{
+    constexpr int64_t now{100000};
+    for (const int64_t offset : {-61, -60, -59, -1, 0, 1, 59, 60, 61}) {
+        BOOST_TEST_CONTEXT("peer clock offset " << offset) {
+            BOOST_CHECK_EQUAL(IsValidPaymasterPeerTimestamp(now + offset, now), offset <= 60);
+        }
+    }
+    constexpr int64_t maximum{std::numeric_limits<int64_t>::max()};
+    BOOST_CHECK(IsValidPaymasterPeerTimestamp(maximum, maximum - 60));
+    BOOST_CHECK(!IsValidPaymasterPeerTimestamp(maximum, maximum - 61));
+    BOOST_CHECK(!IsValidPaymasterPeerTimestamp(0, now));
+    BOOST_CHECK(!IsValidPaymasterPeerTimestamp(-1, now));
+    BOOST_CHECK(!IsValidPaymasterPeerTimestamp(now, 0));
+    BOOST_CHECK(!IsValidPaymasterPeerTimestamp(maximum, std::numeric_limits<int64_t>::min()));
+}
+
 BOOST_AUTO_TEST_SUITE_END()
