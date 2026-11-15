@@ -3590,6 +3590,40 @@ BOOST_AUTO_TEST_CASE(provider_history_observation_bounds_raw_pages_and_tracks_co
     CompleteProviderHistoryObservation(m_wallet);
 }
 
+BOOST_AUTO_TEST_CASE(provider_first_acceptance_obeys_exclusive_capacity_deadline)
+{
+    constexpr int64_t now{1500};
+    const std::string request_id{"550e8400-e29b-41d4-a716-446655441006"};
+    auto environment = MakeProviderEnvironment(now, 2000);
+    ProviderQuoteFixture fixture;
+    std::string error;
+    BOOST_REQUIRE_MESSAGE(BuildProviderQuoteFixture(environment, request_id, uint256S("1502"), now,
+        fixture, error, nullptr, {}, DGBSatoshis{500}, 5500, {},
+        /*intent_ttl=*/60, /*quote_ttl=*/60, /*capacity_ttl=*/20), error);
+    BOOST_REQUIRE(fixture.capacity_proof.expires_at < fixture.attempt.quote_expires_at);
+    BOOST_REQUIRE(PersistProviderQuoteEnvironment(m_wallet, environment, {fixture.pool_entry}));
+    PaymasterStore store{m_wallet};
+    BOOST_REQUIRE_MESSAGE(store.CommitProviderQuote(fixture.attempt, fixture.request.intent.genesis_hash, now, error), error);
+    BOOST_REQUIRE_MESSAGE(store.TransitionSession(request_id, SessionState::AUTHORIZED, PendingPhase::NONE, {}, now + 1, error), error);
+    auto user_signed = fixture.attempt;
+    user_signed.state = AttemptState::USER_SIGNED;
+    user_signed.user_signed_psbt = {0x50, 0x4d, 0x41, 0x55, 0x54, 0x48};
+    user_signed.updated_at = now + 2;
+    BOOST_REQUIRE_MESSAGE(store.UpdateAttempt(request_id, user_signed, error), error);
+    for (const int offset : {-1, 0, 1}) {
+        wallet::CWallet copy{m_node.chain.get(), "capacity-first-acceptance",
+            DuplicateSecurityFixtureDatabase(m_wallet.GetDatabase())};
+        AlignSecurityFixtureCheckpoint(copy.GetDatabase());
+        const auto before = GetMockableDatabase(copy).m_records;
+        const bool accepted = PaymasterStore{copy}.AcceptUserAuthorization(request_id,
+            user_signed.attempt_id, Hash(user_signed.user_signed_psbt), fixture.capacity_proof.expires_at + offset, error);
+        BOOST_CHECK_EQUAL(accepted, offset == -1);
+        if (!accepted) BOOST_CHECK(GetMockableDatabase(copy).m_records == before);
+        else BOOST_CHECK(PaymasterStore{copy}.AcceptUserAuthorization(request_id, user_signed.attempt_id,
+            Hash(user_signed.user_signed_psbt), fixture.capacity_proof.expires_at + 1, error));
+    }
+}
+
 BOOST_AUTO_TEST_CASE(
     provider_user_authorization_honors_exact_reserved_safety_binding)
 {
