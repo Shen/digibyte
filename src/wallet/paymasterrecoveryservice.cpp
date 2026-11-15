@@ -67,17 +67,6 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
     using namespace DigiDollar::Paymaster;
     std::string error;
     int64_t now{GetTime()};
-    if (!CheckPaymasterClientReadiness(wallet, context, error) ||
-        !CheckPaymasterPrivacyReadiness(
-            original_attempt.privacy_profile, context, error)) {
-        throw ApplicationError(ErrorKind::WALLET, error);
-    }
-    node::NodeContext* node = wallet.chain().context();
-    if (!node || !node->connman || !node->chainman || !context.paymaster) {
-        throw ApplicationError(ErrorKind::INTERNAL,
-                           "PAYMASTER_NODE_CONTEXT_UNAVAILABLE");
-    }
-
     const auto& requested_provider = options.provider_id;
     const auto& requested_offer = options.offer_id;
     const bool prepare_only = options.prepare_only;
@@ -90,6 +79,32 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
         throw ApplicationError(ErrorKind::WALLET,
             recovery_status == DatabaseReadStatus::UNSUPPORTED_VERSION
                 ? "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION" : "PAYMASTER_RECOVERY_DATABASE_READ");
+    }
+    std::optional<DirectMessageLease> result_lease;
+    const auto retain_result = [&] {
+        if (!context.paymaster) return;
+        if (!result_lease) {
+            result_lease.emplace(context.paymaster->LeaseRecoveryResults(
+                recovery.request_id, recovery.session_id, recovery.recovery_provider_id, 1));
+        }
+        const auto& messages = result_lease->Messages();
+        if (!messages.empty() && RetainAuthenticatedClientResult(
+                *context.paymaster, messages.front(), session, recovery, now, error) == ClientResultRetention::FAILED) {
+            throw ApplicationError(ErrorKind::WALLET, error);
+        }
+    };
+    if (recovery_status == DatabaseReadStatus::FOUND && recovery.phase == AlternativeRecoveryPhase::USER_SIGNED) {
+        retain_result();
+    }
+    if (!CheckPaymasterClientReadiness(wallet, context, error) ||
+        !CheckPaymasterPrivacyReadiness(
+            original_attempt.privacy_profile, context, error)) {
+        throw ApplicationError(ErrorKind::WALLET, error);
+    }
+    node::NodeContext* node = wallet.chain().context();
+    if (!node || !node->connman || !node->chainman || !context.paymaster) {
+        throw ApplicationError(ErrorKind::INTERNAL,
+                           "PAYMASTER_NODE_CONTEXT_UNAVAILABLE");
     }
     if (recovery_status == DatabaseReadStatus::NOT_FOUND) {
         if (session.state != SessionState::PENDING_PROVIDER ||
@@ -721,10 +736,8 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
         submit.template_commitment =
             recovery.recovery_response.manifest.template_commitment;
         submit.user_psbt = recovery.user_signed_psbt;
-        const auto result_lease = context.paymaster->LeaseRecoveryResults(
-            recovery.request_id, recovery.session_id,
-            recovery.recovery_provider_id, 1);
-        const auto& messages = result_lease.Messages();
+        retain_result();
+        const auto& messages = result_lease->Messages();
         const AlternativeRecoveryResultMessage* message{nullptr};
         CTransactionRef observed_final;
         FinalTransactionPresence observed_presence{
@@ -733,28 +746,6 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
         if (!messages.empty()) {
             message = std::get_if<AlternativeRecoveryResultMessage>(
                 &messages.front().payload);
-            // The accepted manifest can authenticate a result for retention
-            // even when another local recovery artifact is damaged. This
-            // grants no execution authority; the complete record and final
-            // transaction still have to pass the checks below.
-            const auto& authorization = recovery.recovery_authorization;
-            std::string retention_error;
-            if (message &&
-                authorization.version == RecoveryAuthorizationManifest::CURRENT_VERSION &&
-                authorization.authorization_commitment == recovery.accepted_recovery_authorization_commitment &&
-                authorization.authorization_commitment == GetRecoveryAuthorizationCommitment(authorization) &&
-                authorization.request_id == recovery.request_id &&
-                authorization.session_id == recovery.session_id &&
-                authorization.recovery_provider_id == recovery.recovery_provider_id &&
-                message->recovery_id == authorization.recovery_id &&
-                message->recovery_request_hash == authorization.recovery_request_hash &&
-                ValidateAlternativeRecoveryResultEnvelope(*message, Params().GenesisBlock().GetHash(), now, retention_error) &&
-                ValidatePaymasterResult(message->result, Params().GenesisBlock().GetHash(),
-                    authorization.recovery_provider_id, authorization.recovery_commit_key,
-                    recovery.recovery_provider_identity_key, 1, retention_error) &&
-                !context.paymaster->RetainAuthenticatedResult(messages.front())) {
-                throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_DIRECT_INBOX_RETAIN_CONFLICT");
-            }
             // Local corruption must not turn a valid remote result into an
             // acknowledged binding failure. Validate at historical creation
             // times so an already signed recovery survives quote expiry.
@@ -772,9 +763,6 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
                 throw ApplicationError(
                     ErrorKind::INVALID_INPUT,
                     rejection);
-            }
-            if (!context.paymaster->RetainAuthenticatedResult(messages.front())) {
-                throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_DIRECT_INBOX_RETAIN_CONFLICT");
             }
             observed_final = MakeTransactionRef(
                 *message->result.final_transaction);

@@ -2605,6 +2605,13 @@ PaymentResult ProcessPaymasterResult(WalletContext& context, CWallet& target, co
     }
     const int64_t operation_now{GetTime()};
     std::string error;
+    const auto result_lease = context.paymaster->LeaseResults(
+        request_id, session.session_id, attempt.provider_id, 1);
+    const auto& messages = result_lease.Messages();
+    if (!messages.empty() && RetainAuthenticatedClientResult(
+            *context.paymaster, messages.front(), session, attempt, operation_now, error) == ClientResultRetention::FAILED) {
+        throw ApplicationError(ErrorKind::WALLET, error);
+    }
     if (!DrainClientAttemptEquivocations(
             *context.paymaster, store, session, attempt, error,
             EquivocationBlockPolicy::OBSERVE_ONLY)) {
@@ -2629,16 +2636,17 @@ PaymentResult ProcessPaymasterResult(WalletContext& context, CWallet& target, co
             error.empty() ? "PAYMASTER_CLIENT_AUTHORIZATION_NOT_ACCEPTED" : error);
     }
     const bool observed_payment = ReconcileConfirmedClientPayment(*wallet, session, attempt);
-    const auto result_lease = context.paymaster->LeaseResults(
-        request_id, session.session_id, attempt.provider_id, observed_payment ? 0 : 1);
-    const auto& messages = result_lease.Messages();
+    // Exact local confirmation has durably completed this payment. Retire its
+    // leased response without treating the peer's claim as authority.
+    if (observed_payment && !messages.empty() &&
+        !context.paymaster->AcknowledgeDirectMessagesIfPresent({messages.front().message_id})) {
+        throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_DIRECT_INBOX_ACK_CONFLICT");
+    }
     const PaymasterResultMessage* message{nullptr};
-    if (!messages.empty()) {
+    if (!observed_payment && !messages.empty()) {
         message = std::get_if<PaymasterResultMessage>(&messages.front().payload);
         if (!message) throw ApplicationError(ErrorKind::INTERNAL, "PAYMASTER_RESULT_QUEUE_CORRUPT");
-        // Authenticate against this wallet's own durable attempt before a
-        // local predecessor read can fail. Retention grants no authority: the
-        // latest sequence and full final transaction are still checked below.
+        // Early retention never replaces full local authority or peer checks.
         if (!ValidatePaymasterResult(message->result, Params().GenesisBlock().GetHash(),
                                      attempt.provider_id, attempt.commit_key,
                                      attempt.provider_identity_key, 1, error)) {
@@ -2647,9 +2655,6 @@ PaymentResult ProcessPaymasterResult(WalletContext& context, CWallet& target, co
                 throw ApplicationError(ErrorKind::WALLET, error);
             }
             throw ApplicationError(ErrorKind::INVALID_INPUT, rejection);
-        }
-        if (!context.paymaster->RetainAuthenticatedResult(messages.front())) {
-            throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_DIRECT_INBOX_RETAIN_CONFLICT");
         }
     }
     uint64_t minimum_sequence{1};

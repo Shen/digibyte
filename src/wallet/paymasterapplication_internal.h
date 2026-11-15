@@ -180,6 +180,24 @@ bool AcknowledgeRejectedDirectMessage(
     const DigiDollar::Paymaster::DirectMessage& message,
     std::string& error);
 
+enum class ClientResultRetention { UNAUTHENTICATED, RETAINED, FAILED };
+/** Protect an authenticated reply using only the accepted local manifest and
+ * its identity bindings. Unavailable local evidence or an unauthenticated peer
+ * reply is left for the caller's full validation; neither is acknowledged here.
+ * Retention grants no signing, payment, persistence or broadcast authority. */
+ClientResultRetention RetainAuthenticatedClientResult(
+    DigiDollar::Paymaster::Manager& manager,
+    const DigiDollar::Paymaster::DirectMessage& message,
+    const DigiDollar::Paymaster::PaymentSession& session,
+    const DigiDollar::Paymaster::ProviderAttempt& attempt,
+    int64_t now, std::string& error);
+ClientResultRetention RetainAuthenticatedClientResult(
+    DigiDollar::Paymaster::Manager& manager,
+    const DigiDollar::Paymaster::DirectMessage& message,
+    const DigiDollar::Paymaster::PaymentSession& session,
+    const DigiDollar::Paymaster::AlternativeRecoveryRecord& recovery,
+    int64_t now, std::string& error);
+
 // Drain conflicting signed messages into durable evidence before acknowledging
 // their inbox leases, so a crash cannot erase an observed equivocation.
 bool IsPermanentCapacityContinuationError(const std::string& error);

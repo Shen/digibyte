@@ -237,10 +237,20 @@ bool ReconcileConfirmedClientPayment(
 {
     ReleaseClosedClientConnections(wallet, session);
     if (session.provider_side || session.attempt_ids.empty() ||
-        session.attempt_ids.back() != attempt.attempt_id ||
-        attempt.user_signed_psbt.empty() || !attempt.final_transaction.empty() ||
-        !session.final_txid.IsNull()) return false;
+        session.attempt_ids.back() != attempt.attempt_id) return false;
     PaymasterStore store{wallet};
+    if (session.state == SessionState::CONFIRMED && !session.final_txid.IsNull()) {
+        // A terminal row alone is not a receipt. Reuse the exact artifact,
+        // authorization and current wallet observation checks on every poll.
+        PaymasterSessionObservation observation;
+        std::string observation_error;
+        if (!store.GetSessionObservation(session, observation, observation_error))
+            throw ApplicationError(ErrorKind::WALLET, observation_error);
+        return observation.PaymentConfirmed(session.state) &&
+               observation.payment.confirmations >= DEFAULT_REORG_SAFETY_DEPTH;
+    }
+    if (attempt.user_signed_psbt.empty() || !attempt.final_transaction.empty() ||
+        !session.final_txid.IsNull()) return false;
     // A spend with no wallet change output may not have been
     // inserted in mapWallet before the provider result arrived.
     // Recover only a fully validated, deeply confirmed exact
@@ -411,6 +421,105 @@ bool AcknowledgeRejectedDirectMessage(
         return false;
     }
     return true;
+}
+
+namespace {
+struct ClientResultBinding {
+    std::string request_id;
+    uint256 session_id;
+    PaymasterId provider_id;
+    XOnlyPubKey identity_key;
+    uint256 commit_key;
+    std::optional<uint256> recovery_id;
+    uint256 recovery_request_hash;
+};
+
+ClientResultRetention RetainClientResult(
+    Manager& manager, const DirectMessage& message,
+    const ClientResultBinding& binding, int64_t now, std::string& error)
+{
+    error.clear();
+    const PaymasterResult* result{nullptr};
+    std::string authentication_error;
+    if (binding.recovery_id) {
+        const auto* received = std::get_if<AlternativeRecoveryResultMessage>(&message.payload);
+        if (!received || received->request_id != binding.request_id ||
+            received->session_id != binding.session_id || received->recovery_id != *binding.recovery_id ||
+            received->recovery_request_hash != binding.recovery_request_hash ||
+            !ValidateAlternativeRecoveryResultEnvelope(*received, Params().GenesisBlock().GetHash(), now, authentication_error)) {
+            return ClientResultRetention::UNAUTHENTICATED;
+        }
+        result = &received->result;
+    } else {
+        const auto* received = std::get_if<PaymasterResultMessage>(&message.payload);
+        if (!received || received->request_id != binding.request_id || received->session_id != binding.session_id) {
+            return ClientResultRetention::UNAUTHENTICATED;
+        }
+        result = &received->result;
+    }
+    if (!binding.identity_key.IsFullyValid() ||
+        !ValidatePaymasterResult(*result, Params().GenesisBlock().GetHash(), binding.provider_id,
+            binding.commit_key, binding.identity_key, 1, authentication_error)) {
+        return ClientResultRetention::UNAUTHENTICATED;
+    }
+    if (!manager.RetainAuthenticatedResult(message)) {
+        error = "PAYMASTER_DIRECT_INBOX_RETAIN_CONFLICT";
+        return ClientResultRetention::FAILED;
+    }
+    return ClientResultRetention::RETAINED;
+}
+} // namespace
+
+ClientResultRetention RetainAuthenticatedClientResult(
+    Manager& manager, const DirectMessage& message,
+    const PaymentSession& session, const ProviderAttempt& attempt,
+    int64_t now, std::string& error)
+{
+    error.clear();
+    const auto& manifest = attempt.client_manifest;
+    // Authenticate the accepted commitment without decoding its independently
+    // stored quote/template/capacity artifacts. A failure to read those artifacts
+    // later must not let this provider's already received reply expire.
+    if (session.version != PaymentSession::CURRENT_VERSION || session.provider_side ||
+        attempt.version != ProviderAttempt::CURRENT_VERSION ||
+        manifest.version != ClientAuthorizationManifest::CURRENT_VERSION ||
+        manifest.manifest_id.IsNull() || manifest.manifest_id != GetClientAuthorizationManifestId(manifest) ||
+        attempt.accepted_client_manifest_id != manifest.manifest_id ||
+        attempt.client_manifest_accepted_at <= 0 || attempt.client_manifest_accepted_at > session.updated_at ||
+        manifest.request_id != session.request_id || manifest.session_id != session.session_id ||
+        attempt.session_id != session.session_id || manifest.provider_id != attempt.provider_id ||
+        manifest.canonical_request_hash != session.canonical_request_hash ||
+        attempt.commit_key.IsNull()) {
+        return ClientResultRetention::UNAUTHENTICATED;
+    }
+    return RetainClientResult(manager, message,
+        {session.request_id, session.session_id, manifest.provider_id, attempt.provider_identity_key,
+         attempt.commit_key, std::nullopt, {}}, now, error);
+}
+
+ClientResultRetention RetainAuthenticatedClientResult(
+    Manager& manager, const DirectMessage& message,
+    const PaymentSession& session, const AlternativeRecoveryRecord& recovery,
+    int64_t now, std::string& error)
+{
+    error.clear();
+    const auto& manifest = recovery.recovery_authorization;
+    if (session.version != PaymentSession::CURRENT_VERSION || session.provider_side ||
+        recovery.version != AlternativeRecoveryRecord::CURRENT_VERSION || recovery.provider_side ||
+        manifest.version != RecoveryAuthorizationManifest::CURRENT_VERSION ||
+        manifest.authorization_commitment.IsNull() ||
+        manifest.authorization_commitment != GetRecoveryAuthorizationCommitment(manifest) ||
+        recovery.accepted_recovery_authorization_commitment != manifest.authorization_commitment ||
+        recovery.recovery_authorization_accepted_at <= 0 ||
+        recovery.request_id != session.request_id || recovery.session_id != session.session_id ||
+        manifest.request_id != session.request_id || manifest.session_id != session.session_id ||
+        manifest.recovery_id != recovery.recovery_id ||
+        manifest.recovery_provider_id != recovery.recovery_provider_id) {
+        return ClientResultRetention::UNAUTHENTICATED;
+    }
+    return RetainClientResult(manager, message,
+        {session.request_id, session.session_id, manifest.recovery_provider_id, recovery.recovery_provider_identity_key,
+         manifest.recovery_commit_key, manifest.recovery_id, manifest.recovery_request_hash}, now, error);
 }
 
 /** Return whether an immutable quote continuation can never become valid on a

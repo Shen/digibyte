@@ -234,13 +234,21 @@ template or persistence failures retain the reply; acknowledgement follows its
 durable acceptance. Their ordinary quote/inbox expiry still applies. The extended
 authenticated retention described below applies to complete signed results.
 Persisted predecessor results and recovery authority are authenticated before
-they can justify rejecting an incoming result. An intact accepted recovery
-manifest can authenticate retention while another local recovery artifact is damaged.
+they can justify rejecting an incoming result. Payment and recovery use the shared
+native `RetainAuthenticatedClientResult` operation before deeper local artifact
+reads and validation. An intact accepted current manifest and its local identity
+bindings can authenticate retention while the separately stored quote, PSBT or
+capacity data is damaged. This does not grant financial authority: complete local
+authorization, remote-artifact and chainstate checks still precede acceptance or
+execution. Unknown manifest versions and unauthenticated replies gain no retention.
 After authenticating the expected provider and the wallet's own commit binding,
 the exact queue incarnation remains protected beyond the transport TTL, including
 between failed processing calls. It still consumes the existing inbox byte/count
 quotas. This retention is in memory; restart continues to rely on durable evidence
-and the existing provider replay/recovery paths.
+and the existing provider replay/recovery paths. Successful exact local payment
+completion retires the leased response without accepting its remote status.
+Subsequent polls repeat the canonical durable-artifact and current-confirmation
+proof before retiring another obsolete response; a terminal state alone is insufficient.
 
 Client unsigned cancellation closes only work proven unsigned. Late responses
 cannot revive approval after closure. Signed or ambiguous client work remains
