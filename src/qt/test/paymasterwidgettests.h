@@ -93,6 +93,9 @@ private Q_SLOTS:
     void paymasterOverviewAutostart();
     void paymasterOverviewRefill_data();
     void paymasterOverviewRefill();
+    void paymasterLiquidityObservationContract_data();
+    void paymasterLiquidityObservationContract();
+    void paymasterLiquidityUnavailableStillAllowsRevocation();
     void paymasterCapitalOverview_data();
     void paymasterCapitalOverview();
     void paymasterOverviewFinanceWalletAndPrivacyBinding();

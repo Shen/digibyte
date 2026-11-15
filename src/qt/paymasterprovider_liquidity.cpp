@@ -595,15 +595,15 @@ void ProviderLiquidity::liquidityPolicySaved(const UniValue& policy, bool reduce
     // its confirmed revision before opening the separate release preview.
     m_panel.call("getpaymasterliquiditystatus", {}, false, nullptr,
         [this, policy](const UniValue& status) {
-            if (!IsCompleteLiquidityStatus(status) || !status.find_value("policy_configured").isTrue() ||
+            if (!applyLiquidityStatus(status) || !status.find_value("policy_configured").isTrue() ||
                 !IsExactLiquidityPolicyAcknowledgement(policy, status.find_value("policy")) ||
                 policy.find_value("updated_at").write() != status.find_value("policy").find_value("updated_at").write()) {
                 m_liquidity_policy_status->setText(tr("The smaller target was saved, but its current revision could not be verified. Refresh before reviewing excess reserves."));
                 return;
             }
-            applyLiquidityStatus(status);
             beginGuidedTask("reduce_reserves");
         }, false, [this](const QString& error) {
+            invalidateOverviewSnapshot();
             m_liquidity_policy_status->setText(tr("The smaller target was saved. Excess reserves were not released; refresh to review them.\n%1").arg(error));
         });
 }
@@ -620,15 +620,21 @@ void ProviderLiquidity::reconcileLiquidityPolicySave(const UniValue& requested, 
     };
     m_panel.call("getpaymasterliquiditystatus", {}, false, nullptr,
         [this, requested, unconfirmed, reduced_targets](const UniValue& status) {
+            if (!applyLiquidityStatus(status)) {
+                unconfirmed();
+                return;
+            }
             const auto& policy = status.find_value("policy");
-            if (IsCompleteLiquidityPolicy(policy)) m_saved_liquidity_policy = policy;
             if (status.find_value("policy_configured").isTrue() &&
                 IsExactLiquidityPolicyAcknowledgement(requested, policy)) {
                 liquidityPolicySaved(policy, reduced_targets);
             } else {
                 unconfirmed();
             }
-        }, false, [unconfirmed](const QString& error) { unconfirmed(error); });
+        }, false, [this, unconfirmed](const QString& error) {
+            invalidateOverviewSnapshot();
+            unconfirmed(error);
+        });
 }
 
 void ProviderLiquidity::approveSuggestedLiquidityMaintenance()
@@ -668,11 +674,43 @@ void ProviderLiquidity::approveSuggestedLiquidityMaintenance()
     saveLiquidityPolicy();
 }
 
-void ProviderLiquidity::applyLiquidityStatus(const UniValue& result)
+void ProviderLiquidity::invalidateOverviewSnapshot()
 {
+    m_overview_liquidity_snapshot = UniValue{};
+    m_liquidity_snapshot_available = false;
+    m_liquidity_snapshot_representable = false;
+    m_liquidity_targets_satisfy_provider_policy = false;
+    m_pool_status_loaded = false;
+    m_pool_preparation = UniValue{};
+    m_maintenance_state = QStringLiteral("unavailable");
+    invalidatePoolPreviews();
+    setLiquidityPolicyMutationEnabled(false);
+    m_panel.overview().clearOverviewCapital();
+    m_liquidity_current_status->setText(tr("Current pool capacity is unavailable. Refresh before acting."));
+    m_liquidity_slot_status->setText(tr("Current reserve counts are unavailable."));
+    m_liquidity_budget_status->setText(tr("Maintenance fee use is unavailable."));
+    m_panel.setStatusLabel(m_liquidity_maintenance_state, tr("Liquidity maintenance status unavailable"), QStringLiteral("neutral"));
+    m_panel.setStatusKind(m_liquidity_maintenance_card, QStringLiteral("neutral"));
+    m_liquidity_maintenance_next_step->setText(tr("Refresh the provider status before changing liquidity."));
+    m_liquidity_maintenance_cost->setText(tr("Current reserve and maintenance costs are unavailable."));
+    m_approve_liquidity_maintenance->setVisible(false);
+    m_panel.recovery().invalidateCarrierBalances();
+    updateQuickAutomation();
+    m_panel.overview().updateProviderButtons();
+    updateLiquidityDisplay();
+}
+
+bool ProviderLiquidity::applyLiquidityStatus(const UniValue& result)
+{
+    // Every caller, including mutation-result reconciliation and test adapters,
+    // crosses this same observation boundary. A policy alone is not a status.
+    if (!IsCompleteLiquidityStatus(result)) {
+        invalidateOverviewSnapshot();
+        m_liquidity_policy_status->setText(tr("Core returned an incomplete or unknown liquidity status. Refresh before acting; existing approvals remain protected."));
+        return false;
+    }
     m_overview_liquidity_snapshot = result;
     m_saved_liquidity_policy = result.find_value("policy");
-    renderOverviewPool();
     const UniValue& policy = result.find_value("policy");
     const bool configured =
         result.find_value("policy_configured").isBool() &&
@@ -703,18 +741,14 @@ void ProviderLiquidity::applyLiquidityStatus(const UniValue& result)
     } else {
         m_liquidity_policy_configured = configured;
     }
+    renderOverviewPool();
     const UniValue& state = result.find_value("maintenance_state");
     m_maintenance_state = state.isStr()
         ? QString::fromStdString(state.get_str())
         : QStringLiteral("unavailable");
     const UniValue& targets_satisfy =
         result.find_value("targets_satisfy_provider_policy");
-    // Treat the field as true when talking to an older test fixture, but
-    // use the explicit Core result whenever it is present. Core owns this
-    // invariant because a locally valid zero carrier target can still be
-    // insufficient for an active USER_PAID offer.
-    m_liquidity_targets_satisfy_provider_policy =
-        !targets_satisfy.isBool() || targets_satisfy.get_bool();
+    m_liquidity_targets_satisfy_provider_policy = targets_satisfy.get_bool();
 
     const QStringList slot_lines{
         ProviderOverview::slotStatusText(tr("Admission DGB"),
@@ -919,31 +953,21 @@ void ProviderLiquidity::applyLiquidityStatus(const UniValue& result)
     m_panel.recovery().applyCarrierBalances(poolNumber(result, "carrier_base_cents"),
         poolNumber(result, "carrier_withdrawable_excess_cents"), configured);
     m_panel.overview().updateProviderButtons();
+    return representable;
 }
 
 void ProviderLiquidity::refreshLiquidityStatus()
 {
     m_panel.call("getpaymasterliquiditystatus", {}, false, nullptr,
          [this](const UniValue& result) {
-             if (!IsCompleteLiquidityStatus(result)) {
-                 m_liquidity_snapshot_available = false;
-                 m_liquidity_snapshot_representable = false;
-                 setLiquidityPolicyMutationEnabled(false);
-                 m_liquidity_policy_status->setText(tr(
-                     "Core returned an incomplete liquidity status. Guided setup remains unavailable until a complete refresh succeeds."));
+             if (!applyLiquidityStatus(result)) {
                  m_panel.configuration().refreshProviderSafetyStatus();
                  return;
              }
-             applyLiquidityStatus(result);
              refreshLiquidityPoolEntries();
          }, false,
          [this](const QString& error) {
-             m_liquidity_snapshot_available = false;
-             m_liquidity_snapshot_representable = false;
-             setLiquidityPolicyMutationEnabled(false);
-             m_maintenance_state = QStringLiteral("unavailable");
-             m_liquidity_maintenance_state->setText(tr(
-                 "Liquidity maintenance status unavailable"));
+             invalidateOverviewSnapshot();
              m_liquidity_maintenance_next_step->setText(error);
              m_liquidity_policy_status->setText(tr(
                  "Core did not return a liquidity policy. No paid maintenance action is available."));
@@ -1202,11 +1226,16 @@ void ProviderLiquidity::saveQuickRefill(bool enabled)
     };
     const auto verify = [this, requested, finish](const QString&) {
         m_panel.call("getpaymasterliquiditystatus", {}, false, nullptr, [this, finish](const UniValue& status) {
-            applyLiquidityStatus(status);
+            if (!applyLiquidityStatus(status)) {
+                m_refill_save_pending = false;
+                m_refill_message = tr("The save result is unknown. Refresh the complete status before trying again.");
+                updateQuickAutomation();
+                return;
+            }
             finish(status.find_value("policy"));
         }, false, [this](const QString&) {
             m_refill_save_pending = false;
-            m_saved_liquidity_policy = UniValue{};
+            invalidateOverviewSnapshot();
             m_refill_message = tr("The save result is unknown. Refresh the status before trying again.");
             updateQuickAutomation();
         });
@@ -1644,8 +1673,9 @@ void ProviderLiquidity::updateSavedReserveState()
     if (m_reserve_state) {
         const auto target = savedRefillCapacity();
         qint64 available{0};
-        const bool known = GetInt64Field(m_panel.overview().operatorSnapshot().find_value("provider").find_value("pool"), "complete_operational_slots", available) && available >= 0;
-        QString state = target ? tr("Saved refill target: %1 payment(s).").arg(*target) : tr("Refill target not configured.");
+        const bool known = m_liquidity_snapshot_available && GetInt64Field(m_panel.overview().operatorSnapshot().find_value("provider").find_value("pool"), "complete_operational_slots", available) && available >= 0;
+        QString state = !m_liquidity_snapshot_available ? tr("Current reserve status is unavailable.") :
+            target ? tr("Saved refill target: %1 payment(s).").arg(*target) : tr("Refill target not configured.");
         state += known ? tr(" Available payment reserves: %1.").arg(available) : tr(" Current payment reserves are unavailable.");
         if (hasExcessSavedReserves()) state += tr("\nExtra reserves remain above the saved target. Release requires a separate preview and confirmation.");
         m_reserve_state->setText(m_panel.maskNumericText(state));

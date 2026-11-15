@@ -6141,6 +6141,8 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
                 add_slot("operational_carriers",
                          "target_operational_carriers");
                 result.pushKV("maintenance_fee_reserved_satoshis", 0);
+                result.pushKV("maintenance_fee_planned_satoshis", 0);
+                result.pushKV("maintenance_fee_broadcast_satoshis", 0);
                 result.pushKV(
                     "maintenance_fee_spent_last_hour_satoshis", 0);
                 result.pushKV(
@@ -13064,6 +13066,164 @@ void PaymasterWidgetTests::paymasterOverviewRefill()
     }
 }
 
+void PaymasterWidgetTests::paymasterLiquidityObservationContract_data()
+{
+    QTest::addColumn<QString>("ingress");
+    QTest::addColumn<QString>("payload");
+    for (const char* source : {"direct", "operator", "refresh", "quick_error", "quick_malformed", "policy_reconcile", "target_reduction"}) {
+        for (const char* value : {"complete", "false_targets", "missing_targets", "wrong_targets", "unknown_state", "missing_cost", "negative_count", "negative_reserved", "missing_planned", "standalone", "automation_off", "unknown_automation"}) {
+            QTest::newRow(qPrintable(QStringLiteral("%1-%2").arg(QString::fromLatin1(source), QString::fromLatin1(value)))) << QString::fromLatin1(source) << QString::fromLatin1(value);
+        }
+    }
+}
+
+void PaymasterWidgetTests::paymasterLiquidityObservationContract()
+{
+    QFETCH(QString, ingress);
+    QFETCH(QString, payload);
+    std::unique_ptr<DigiDollarPaymasterWidget> panel{CreatePaymasterWidget(nullptr)};
+    auto* impl = static_cast<PaymasterWidgetImpl*>(panel.get());
+    auto snapshot = GuidedOperatorSnapshot();
+    auto provider = snapshot.find_value("provider");
+    auto status = provider.find_value("liquidity");
+    auto policy = status.find_value("policy");
+    policy.pushKV("updated_at", 100);
+    policy.pushKV("automatic_replenishment", false);
+    status.pushKV("policy", policy);
+    provider.pushKV("liquidity", status);
+    snapshot.pushKV("provider", provider);
+    UniValue observed = status;
+    int writes{0}, releases{0};
+    panel->setRpcExecutorForTesting([&](const std::string& command, const UniValue& params) {
+        if (command == "getpaymasteroperatorinfo") return snapshot;
+        if (command == "getpaymasterfinancestatus") return PaymasterOverviewFinance();
+        if (command == "getpaymasterliquiditystatus") return observed;
+        if (command == "getpaymasterpoolinfo") return PaymasterLiquidityPoolStatus();
+        if (command == "rebalancepaymasterpool") { ++releases; return UniValue{UniValue::VOBJ}; }
+        if (command == "setpaymasterliquiditypolicy") {
+            ++writes;
+            auto saved = params[0];
+            saved.pushKV("updated_at", 101);
+            observed.pushKV("policy", saved);
+            if (ingress == QLatin1String("quick_error")) throw std::runtime_error("injected lost setter reply");
+            return UniValue{UniValue::VOBJ}; // A malformed setter reply also requires readback.
+        }
+        throw std::runtime_error("Unexpected liquidity observation RPC");
+    });
+    panel->refreshStatus();
+    QVERIFY(impl->hasCompleteMutationSnapshots());
+    const auto replace = [](UniValue& object, const char* key, const UniValue& replacement) {
+        UniValue next{UniValue::VOBJ};
+        for (const auto& name : object.getKeys()) if (name != key) next.pushKV(name, object.find_value(name));
+        if (!replacement.isNull()) next.pushKV(key, replacement);
+        object = std::move(next);
+    };
+    if (payload == QLatin1String("false_targets")) observed.pushKV("targets_satisfy_provider_policy", false);
+    if (payload == QLatin1String("missing_targets")) replace(observed, "targets_satisfy_provider_policy", {});
+    if (payload == QLatin1String("wrong_targets")) observed.pushKV("targets_satisfy_provider_policy", "false");
+    if (payload == QLatin1String("unknown_state")) observed.pushKV("maintenance_state", "future_state");
+    if (payload == QLatin1String("missing_cost")) replace(observed, "maintenance_fee_spent_last_day_satoshis", {});
+    if (payload == QLatin1String("missing_planned")) replace(observed, "maintenance_fee_planned_satoshis", {});
+    if (payload == QLatin1String("negative_count") || payload == QLatin1String("negative_reserved") || payload == QLatin1String("standalone")) {
+        auto counts = observed.find_value("operational_dgb");
+        if (payload == QLatin1String("negative_count")) counts.pushKV("missing", -1);
+        else if (payload == QLatin1String("negative_reserved")) counts.pushKV("reserved", -1);
+        else replace(counts, "reserved", {});
+        observed.pushKV("operational_dgb", counts);
+    }
+    if (payload == QLatin1String("automation_off") || payload == QLatin1String("unknown_automation")) {
+        UniValue automation{UniValue::VOBJ};
+        automation.pushKV("configured", true);
+        automation.pushKV("enabled", false);
+        automation.pushKV("paid_maintenance_approved", true);
+        automation.pushKV("pending_transaction", false);
+        automation.pushKV("reason", "");
+        automation.pushKV("state", payload == QLatin1String("automation_off") ? "off" : "future_state");
+        observed.pushKV("automation_status", automation);
+    }
+    const bool valid = payload == QLatin1String("complete") || payload == QLatin1String("false_targets") ||
+        payload == QLatin1String("standalone") || payload == QLatin1String("automation_off");
+    provider.pushKV("liquidity", observed);
+    snapshot.pushKV("provider", provider);
+    if (ingress == QLatin1String("operator")) {
+        panel->refreshStatus();
+    } else if (ingress == QLatin1String("refresh")) {
+        impl->liquidity().refreshLiquidityStatus();
+    } else if (ingress.startsWith(QLatin1String("quick_"))) {
+        impl->liquidity().saveQuickRefill(true);
+        QCOMPARE(writes, 1);
+    } else if (ingress == QLatin1String("policy_reconcile")) {
+        impl->liquidity().reconcileLiquidityPolicySave(policy, "injected lost setter reply");
+    } else if (ingress == QLatin1String("target_reduction")) {
+        impl->liquidity().liquidityPolicySaved(policy, true);
+    } else {
+        QCOMPARE(impl->liquidity().applyLiquidityStatus(observed), valid);
+    }
+    QCOMPARE(impl->liquidity().snapshotAvailable(), valid);
+    QCOMPARE(impl->liquidity().targetsSatisfyProviderPolicy(), valid && payload != QLatin1String("false_targets"));
+    if (!valid) {
+        QVERIFY(!impl->hasCompleteMutationSnapshots());
+        QVERIFY(impl->liquidity().overviewSnapshot().isNull());
+        QCOMPARE(releases, 0); // Invalid target readback cannot start a release preview.
+        const auto* costs = panel->findChild<QLabel*>("paymasterLiquidityMaintenanceCost");
+        const auto* budget = panel->findChild<QLabel*>("paymasterLiquidityBudgetStatus");
+        const auto* reserves = panel->findChild<QLabel*>("paymasterReserveState");
+        const auto* save = panel->findChild<QPushButton*>("paymasterSaveLiquidityPolicyPrimary");
+        QVERIFY(costs && budget && reserves && save);
+        QVERIFY(costs->text().contains("unavailable"));
+        QVERIFY(budget->text().contains("unavailable"));
+        QVERIFY(reserves->text().contains("unavailable"));
+        QVERIFY(!budget->text().contains("0.00000000"));
+        QVERIFY(!save->isEnabled());
+        impl->liquidity().saveQuickRefill(true);
+        QCOMPARE(writes, ingress.startsWith(QLatin1String("quick_")) ? 1 : 0);
+        // A later complete observation restores normal status, including known zero.
+        status.pushKV("maintenance_fee_reserved_satoshis", 0);
+        status.pushKV("maintenance_fee_planned_satoshis", 0);
+        status.pushKV("maintenance_fee_broadcast_satoshis", 0);
+        QVERIFY(impl->liquidity().applyLiquidityStatus(status));
+        QVERIFY(budget->text().contains("0.00000000"));
+    }
+}
+
+void PaymasterWidgetTests::paymasterLiquidityUnavailableStillAllowsRevocation()
+{
+    std::unique_ptr<DigiDollarPaymasterWidget> panel{CreatePaymasterWidget(nullptr)};
+    auto* impl = static_cast<PaymasterWidgetImpl*>(panel.get());
+    auto snapshot = GuidedOperatorSnapshot();
+    auto provider = snapshot.find_value("provider");
+    auto status = provider.find_value("liquidity");
+    auto policy = status.find_value("policy");
+    policy.pushKV("updated_at", 100);
+    status.pushKV("policy", policy);
+    provider.pushKV("liquidity", status);
+    snapshot.pushKV("provider", provider);
+    int writes{0};
+    panel->setRpcExecutorForTesting([&](const std::string& command, const UniValue& params) {
+        if (command == "getpaymasteroperatorinfo") return snapshot;
+        if (command == "getpaymasterfinancestatus") return PaymasterOverviewFinance();
+        if (command == "setpaymasterliquiditypolicy") {
+            ++writes;
+            if (!params[0].find_value("automatic_replenishment").isFalse()) throw std::runtime_error("New authority is forbidden while unavailable");
+            auto saved = params[0];
+            saved.pushKV("updated_at", 101);
+            status.pushKV("policy", saved);
+            provider.pushKV("liquidity", status);
+            snapshot.pushKV("provider", provider);
+            return saved;
+        }
+        throw std::runtime_error("Unexpected liquidity revocation RPC");
+    });
+    panel->refreshStatus();
+    QVERIFY(impl->hasCompleteMutationSnapshots());
+    QVERIFY(!impl->liquidity().applyLiquidityStatus(UniValue{UniValue::VOBJ}));
+    auto* control = panel->findChild<QCheckBox*>("paymasterOverviewRefill");
+    QVERIFY(control && control->isChecked() && control->isEnabled());
+    control->setChecked(false);
+    QCOMPARE(writes, 1);
+    QVERIFY(!control->isChecked());
+}
+
 void PaymasterWidgetTests::paymasterCapitalOverview_data()
 {
     QTest::addColumn<QString>("scenario");
@@ -15842,10 +16002,37 @@ void PaymasterWidgetTests::paymasterLiquiditySaveAcrossRefresh()
         QVERIFY(!pending);
         QVERIFY(automatic->isChecked() && approved->isChecked());
         QCOMPARE(fee->text(), QStringLiteral("0.30000000"));
-        QVERIFY(save->isEnabled());
+        QCOMPARE(hour->text(), QStringLiteral("0.70000000"));
+        QCOMPARE(day->text(), QStringLiteral("2.40000000"));
+        // A complete unchanged readback permits another reviewed save. A
+        // failed readback leaves the current observation unavailable.
+        QCOMPARE(save->isEnabled(), scenario != QLatin1String("read_error"));
         QVERIFY(status->text().contains("Your edits have been kept"));
         QVERIFY(status->text().contains("injected"));
         QVERIFY(targets->text().contains("Not saved"));
+        if (scenario == QLatin1String("read_error")) {
+            auto* impl = static_cast<PaymasterWidgetImpl*>(panel.get());
+            QVERIFY(!impl->liquidity().snapshotAvailable());
+            QVERIFY(!impl->hasCompleteMutationSnapshots());
+            const int reads_before_retry = reads;
+            save->click();
+            impl->liquidity().saveLiquidityPolicy();
+            QCOMPARE(writes, 1);
+            QCOMPARE(reads, reads_before_retry);
+            QVERIFY(!pending);
+            panel->refreshStatus();
+            QVERIFY(!save->isEnabled());
+            refresh_reply();
+            QVERIFY(!pending);
+            QVERIFY(impl->hasCompleteMutationSnapshots());
+            QVERIFY(save->isEnabled());
+            QVERIFY(automatic->isChecked() && approved->isChecked());
+            QCOMPARE(fee->text(), QStringLiteral("0.30000000"));
+            QCOMPARE(hour->text(), QStringLiteral("0.70000000"));
+            QCOMPARE(day->text(), QStringLiteral("2.40000000"));
+            QVERIFY(targets->text().contains("Not saved"));
+            QCOMPARE(writes, 1);
+        }
         return;
     }
     refresh_reply();

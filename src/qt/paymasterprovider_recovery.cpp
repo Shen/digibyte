@@ -61,6 +61,14 @@ void ProviderRecovery::applyCarrierBalances(qint64 base, qint64 excess, bool con
     updateEarningsWithdrawalHint();
 }
 
+void ProviderRecovery::invalidateCarrierBalances()
+{
+    m_carrier_value_status->setText(tr("Carrier base and withdrawable excess are unavailable. Refresh before acting."));
+    invalidateCarrierWithdrawalPreviews();
+    disableWithdrawalControls();
+    updateEarningsWithdrawalHint();
+}
+
 void ProviderRecovery::applyCarrierChoices(const std::vector<CarrierChoice>& choices, bool release_enabled)
 {
     const auto previous = m_release_carrier_select->currentData().toString();

@@ -2414,7 +2414,7 @@ void ProviderOverview::refreshOperatorStatus(bool background)
                  bool unchanged = !m_operator_snapshot.isNull();
                  for (const auto* key : {"provider", "safety", "diagnostics", "wallet_generation", "unlocked_until", "encrypted", "node_settings", "node_setting_overrides"})
                      unchanged &= m_operator_snapshot.find_value(key).write() == snapshot.find_value(key).write();
-                 if (background && unchanged) {
+                 if (background && unchanged && m_panel.liquidity().snapshotAvailable()) {
                      m_operator_snapshot = snapshot;
                      markProviderStatusCurrent();
                      m_panel.liquidity().observeOperation(snapshot);
@@ -2430,9 +2430,8 @@ void ProviderOverview::refreshOperatorStatus(bool background)
                  applyProviderInfo(provider);
                  m_panel.configuration().applyProviderSafetyStatus(snapshot.find_value("safety"));
                  if (!m_panel.configuration().providerSafetyAvailable()) throw std::runtime_error("PAYMASTER_SAFETY_STATUS_INCOMPLETE");
-                 if (!IsCompleteLiquidityStatus(provider.find_value("liquidity")))
+                 if (!m_panel.liquidity().applyLiquidityStatus(provider.find_value("liquidity")))
                      throw std::runtime_error("PAYMASTER_LIQUIDITY_STATUS_INCOMPLETE");
-                 m_panel.liquidity().applyLiquidityStatus(provider.find_value("liquidity"));
                  m_panel.liquidity().applyPreparationSnapshot(provider.find_value("preparation"));
                  m_panel.liquidity().updatePoolPreparationStatus();
                  m_panel.liquidity().observeOperation(snapshot);

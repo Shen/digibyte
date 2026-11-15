@@ -293,19 +293,25 @@ bool IsCompleteLiquidityPolicy(const UniValue& policy)
 
 bool IsCompleteLiquiditySlotStatus(const UniValue& status)
 {
-    return HasInt64Fields(
-        status,
-        {"target", "ready", "pending", "counted_toward_target",
-         "missing"});
+    for (const char* key : {"target", "ready", "pending", "counted_toward_target", "missing"}) {
+        qint64 value{0};
+        if (!GetInt64Field(status, key, value) || value < 0 || value > std::numeric_limits<int>::max()) return false;
+    }
+    // Operator snapshots enrich the standalone liquidity RPC with this
+    // count. The standalone contract leaves it unknown, which renders as —.
+    qint64 reserved{0};
+    return status.find_value("reserved").isNull() ||
+        (GetInt64Field(status, "reserved", reserved) && reserved >= 0 && reserved <= std::numeric_limits<int>::max());
 }
 
 bool IsCompleteLiquidityStatus(const UniValue& result)
 {
-    return result.isObject() &&
+    const bool complete = result.isObject() &&
         result.find_value("policy_configured").isBool() &&
         result.find_value("targets_satisfy_provider_policy").isBool() &&
-        result.find_value("maintenance_state").isStr() &&
-        !result.find_value("maintenance_state").get_str().empty() &&
+        IsEnumString(result.find_value("maintenance_state"),
+            {"ready", "waiting_for_target_configuration", "waiting_for_maintenance_approval",
+             "waiting_for_liquidity_confirmation", "replenishing_liquidity"}) &&
         IsCompleteLiquidityPolicy(result.find_value("policy")) &&
         IsCompleteLiquiditySlotStatus(result.find_value("admission_dgb")) &&
         IsCompleteLiquiditySlotStatus(
@@ -317,11 +323,25 @@ bool IsCompleteLiquidityStatus(const UniValue& result)
         HasInt64Fields(
             result,
             {"maintenance_fee_reserved_satoshis",
+             "maintenance_fee_planned_satoshis",
+             "maintenance_fee_broadcast_satoshis",
              "maintenance_fee_spent_last_hour_satoshis",
              "maintenance_fee_spent_last_day_satoshis",
              "carrier_base_cents",
              "carrier_withdrawable_excess_cents"}) &&
         IsStringArray(result.find_value("readiness_errors"));
+    if (!complete) return false;
+    for (const char* key : {"maintenance_fee_reserved_satoshis", "maintenance_fee_planned_satoshis",
+                           "maintenance_fee_broadcast_satoshis", "maintenance_fee_spent_last_hour_satoshis",
+                           "maintenance_fee_spent_last_day_satoshis", "carrier_base_cents", "carrier_withdrawable_excess_cents"}) {
+        if (result.find_value(key).getInt<qint64>() < 0) return false;
+    }
+    const auto& automation = result.find_value("automation_status");
+    return automation.isNull() ||
+        (automation.isObject() && automation.find_value("configured").isBool() &&
+         automation.find_value("enabled").isBool() && automation.find_value("paid_maintenance_approved").isBool() &&
+         automation.find_value("pending_transaction").isBool() && automation.find_value("reason").isStr() &&
+         IsEnumString(automation.find_value("state"), {"off", "ready", "working", "waiting_confirmation", "paused", "blocked"}));
 }
 
 bool IsCompleteProviderPoolInfo(const UniValue& result)

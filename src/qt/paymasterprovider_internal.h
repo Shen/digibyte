@@ -712,7 +712,7 @@ public:
     void observePoolCounts(const UniValue& pool);
     void seedPoolCountsForTesting();
     void setMutationSnapshotForTesting(bool available);
-    void invalidateOverviewSnapshot() { m_overview_liquidity_snapshot = UniValue{}; }
+    void invalidateOverviewSnapshot();
     void applyPreparationSnapshot(const UniValue& preparation) { m_pool_preparation = preparation; }
     void disableMutationControls();
     void redactPrivacyText();
@@ -783,7 +783,9 @@ public:
 
     void approveSuggestedLiquidityMaintenance();
 
-    void applyLiquidityStatus(const UniValue& result);
+    /** Validate the complete observation before changing any presentation or
+     * capability. Invalid observations retain only separately saved policy. */
+    bool applyLiquidityStatus(const UniValue& result);
 
     void refreshLiquidityStatus();
 
@@ -1040,6 +1042,7 @@ public:
     void focusBackupControls();
     using CarrierChoice = std::pair<QString, QString>;
     void applyCarrierBalances(qint64 base, qint64 excess, bool configured);
+    void invalidateCarrierBalances();
     void applyCarrierChoices(const std::vector<CarrierChoice>& choices, bool release_enabled);
     void clearCarrierChoices();
     std::vector<CarrierChoice> carrierChoices() const;
