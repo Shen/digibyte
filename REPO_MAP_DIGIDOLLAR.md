@@ -1003,6 +1003,10 @@ and loaded-wallet lifetime handling.
   signing for payment, recovery and provider control proofs.
 
 ### src/wallet/paymasterprovider.{h,cpp}
+- `ExactFinalWalletObservation` and `ApplyExactPaymasterFinalObservation` bind the
+  shared preflight to current chain/pool state through exact native wallet mutation.
+- `PaymasterFinalizationFailure` carries producer-established failures; local
+  authority/read failures never acquire conflict permission through error text.
 - `GetPaymasterProviderPoolReadiness` applies shared domain readiness with ordinary/manual wallet locks excluded; new slot reservation and the provider signing boundary recheck that lock ownership.
 - `CancelPaymasterMaintenance` provides wallet-bound, reviewed cancellation of
   selected uncreated DGB/DD setup/refill operations. It rejects signing evidence

@@ -149,13 +149,25 @@ send row. A history-write failure retains payment authority and can be retried.
 row when the corresponding wallet transaction is absent; unrelated history stays.
 
 Client refresh shares normal and alternative-recovery result receipt with the
-explicit result/retry operations. It authenticates and retains both inbox
-families before local validation or index waits, durably commits the exact final
-and fee accounting, then acknowledges the message. Receipt alone never signs,
+explicit result/retry operations. The authenticated network adapter quarantines
+expected final replies at enqueue, before any wallet read, within the existing
+inbox byte, peer, session and rate limits. This process-local evidence survives
+transport TTL and disconnect; it is not financial authentication or acceptance.
+Both inbox families still require the complete wallet/signature checks before
+authenticated retention, the durable exact final and fee commit, and acknowledgement.
+Receipt alone never signs,
 submits or broadcasts; the explicit operations separately execute saved finals.
 A GUI timeout can therefore continue collecting a late provider result without
 restarting payment execution. Local failures preserve authenticated results
 beyond their ordinary transport TTL.
+
+Exact-final wallet insertion consumes an opaque `ExactFinalWalletObservation`
+issued by the shared preflight. The insertion rechecks its immutable transaction,
+tip and current pool membership under the wallet/chain/pool locks through the
+native wallet write; it never waits for txindex in that section. Public presence
+fields alone cannot authorize an insertion. Confirmation observations verify the
+native record's active block hash, and settlement keeps that chain binding through
+its database commit. A later preflight is not a substitute for this atomic check.
 
 Authorization-bearing transitions share
 `CommitWithPaymasterAuthorizationProtection`: the mandatory
@@ -722,7 +734,10 @@ reloads exact bytes, calls `ValidateClientDurableFinalForBroadcast`, drains sign
 equivocation evidence, executes the existing exact preflight/broadcast path and
 reconciles a fresh observation. The store validator reuses the durable accepted
 manifest time rule and session binding; local availability failures preserve the
-final for retry, while permanent failures retain evidence in a conflict state.
+final for retry. Producing operations return typed finalization failures; neither
+an unreadable/damaged local authority record nor a rejected transaction creates
+a financial conflict marker. Only an observed native exact-transaction/witness
+mismatch permits that marker. Diagnostic strings are not transition authority.
 Startup uses nonblocking index checks. Neither entry point renews authorization
 or permits safety-depth pruning.
 `PersistExactPaymasterWalletTransaction` is shared by exact final insertion,
@@ -751,10 +766,15 @@ Finance snapshots preserve pool and maintenance read statuses: an unreadable
 record is a failed observation, never an absent record or known zero capital.
 Qt revokes observed actions and reviewed approvals on read/decode failure while
 retaining request identity and financial artifacts. A fresh valid observation
-restores actions. Reputation get/clear adapters distinguish absent history from
+restores actions. Every liquidity-status ingress, including setter readback,
+uses the same completeness/type/known-state check before atomically publishing
+availability and costs. Failed reads invalidate those observations; a separately
+confirmed saved policy remains available only to revoke existing automation.
+Optional standalone reserved counts remain unknown, never known zero.
+Reputation get/clear adapters distinguish absent history from
 unreadable or unsupported persisted history; only absence returns an empty result.
-Typed finalization classification preserves the narrower pre-commit retry set
-and the additional retryable storage/observation failures for durable results.
+Typed finalization outcomes distinguish local availability/authority failures,
+transaction rejection and observed exact-byte conflict at their producing boundary.
 
 Client payment and alternative-recovery transport keys share the prefix
 `<session_id>:` under the wallet's existing transport owner. Canonical completion

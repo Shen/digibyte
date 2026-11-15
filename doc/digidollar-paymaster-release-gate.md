@@ -4,6 +4,46 @@ There is **no complete current-revision release certification** in this record.
 The candidate below and historical checkpoints identify actual verification;
 implemented behavior alone does not establish release acceptance.
 
+## Current observations, early result retention and liquidity (2026-11-15)
+
+Review baseline: `498c6c584300be76929b665cf83c82f27c354532`. Corrections:
+Qt ingress `0407cce288`, expected-result quarantine `730b2c17ef`, shared exact
+wallet execution and typed failures `0adfed546d`. AP1-AP5 bind wallet insertion
+to an immutable preflight plus current chain/pool checks, require active native
+block evidence through client settlement, preserve expected network finals
+before local reads, and validate every Qt liquidity observation at one ingress.
+Local read/authority failures retain exact retry state; only a native observed
+exact/witness mismatch permits an execution conflict marker. Inbox limits,
+financial validation and checkpoint guarantees remain in force.
+
+| Actual local check | Result and scope |
+| --- | --- |
+| Native, final partial link | **25 distinct selected cases / 4,811 assertions, exit 0**, in two nonoverlapping selections on the same executable. Includes real disconnect callbacks before stale insertion, immutable snapshot/witness substitution, mempool/stempool changes, initial and second-stage authority read failures, normal/alternative exact retry, TTL/disconnect retention through the authenticated BIP324 handler, unchanged inbox quotas, active-anchor/reorg settlement, atomic budget/fee accounting, checkpoint replay and ordinary wallet/DD lock regressions. Unselected cases were not run. |
+| Qt, partial links | **Ten distinct selected functions / 171 test rows, exit 0**, excluding init/cleanup, Windows/Fusion. Includes the 84-row matrix across seven liquidity ingresses, revocation while unavailable, readback repair, refill/capital/reserve controls, maintenance states and ordinary DGB send/balance/validation. The final link runs 13 rows in five functions; the other 158 rows passed with identical production objects before strengthening the existing readback test. Existing icon-property and balance QSignalSpy metatype warnings remain; assertions pass. |
+| Compilation | **23 translation units freshly compiled**: all 11 changed production units, five changed test units, regenerated Qt-test MOC and six directly affected consumers. All 11 changed production units also pass C++17 `/Zs`. Final source/object fingerprints match. MSVC 19.43/toolset 14.43, C++20 objects, static Qt 5.15.10. These are isolated partial links; retained dependencies lack complete transitive rebuild provenance. |
+| Architecture and records | Working-tree dependency/cycle checks, six positive/negative boundary fixtures, change-record JSON and whitespace checks pass. Each product commit passes changed-path/shared-Core checks against trusted task baseline `498c6c5843`. No boundary policy or shared-Core scope was expanded. The original task baseline remains historical, as explained in the canonical boundaries/change record. |
+
+Final partial-link SHA256: native
+`a850b1d16f43e0ca9db61c32a59f4494339037c0b0b723d507a48ab4dd374a5a`;
+Qt `cff1e7dd6dc2e16d3f97da27279df89088dfa29e6c198d27bdc6bf1c6551da52`.
+Commands, complete failed/passing logs, selections, source/object and link
+provenance remain locally in ignored `.ai/implement-review498/`, including
+`runs.jsonl` and `verification-final.json`. Isolated wallets use short
+`TEMP`/`TMP` and the fixed random-context seed recorded with each command.
+An isolated old-Manager producer comparison fails all three new admission/
+authenticated-handler cases at TTL retention; the current producer passes.
+This comparison is not a clean historical build. Retests corrected synthetic
+positive confirmation anchors, standardness/index-readiness fixture setup,
+native repair persistence and the authorization-flag write baseline. Financial,
+rollback, exact-once and unavailable-readback assertions were retained or
+strengthened.
+
+Repository baseline, current DD architecture, wallet/Qt/test guidance and the
+canonical Paymaster boundaries governed the work. Complete clean daemon/GUI
+builds, full native/functional/platform suites, Tidy and sanitizers were **not
+run**; they remain operator gates with commands/prerequisites/runtime criteria
+in the [runbook](digidollar-paymaster-testing.md#independent-review-regressions).
+
 ## Provider conflict and late-result corrections (2026-11-15)
 
 Review baseline: `69de9b63846109fd449ec22fc134115dc6139d87`; product/test

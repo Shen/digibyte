@@ -46,6 +46,23 @@ these targeted controls does not establish repository-wide strict C++17 support.
 
 Authorization and serving regressions (after rebuilding the selected tests):
 
+For exact observation and early result failure boundaries, select
+`paymaster_wallet_security_tests/exact_final_observation_rechecks_chain_pools_and_snapshot`,
+`durable_client_final_executor_revalidates_authority_and_replays_exact_payment`
+and `client_recovery_result_commit_failure_survives_ttl_and_exact_retry`;
+`paymaster_wallet_store_tests/client_expected_result_quarantine_survives_initial_authority_read_failure`
+and the adjacent confirmed-payment/current-tip cases;
+`paymaster_admission_tests/expected_final_result_quarantine_precedes_wallet_reads_and_survives_disconnect,quarantined_final_results_preserve_class_session_and_byte_limits`;
+and `paymaster_transport_tests/authenticated_expected_final_reply_is_quarantined_before_wallet_access`.
+The observation test uses real admission and completed disconnect callbacks;
+record/budget tests separately retain their explicit persistence-fixture scope.
+Require no stale receipt or new conflict from local read failures, unchanged
+reservations, exact same-tip retry and bounded quarantine before wallet authentication.
+For Qt select `paymasterLiquidityObservationContract` and
+`paymasterLiquidityUnavailableStillAllowsRevocation`, then neighboring refill,
+reserve-reduction and capital cases. Partial readbacks must leave availability
+and costs unknown while previously confirmed automation remains revocable.
+
 Native write recovery includes first-insert and state-update failures followed by
 an unchanged pool observation, corrupt native-row reads and exact witness/metadata
 reload. Run `durable_client_final_executor_revalidates_authority_and_replays_exact_payment`

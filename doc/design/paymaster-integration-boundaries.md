@@ -140,6 +140,13 @@ for multiline include/cycle checks. The default invocation checks working-tree
 dependencies and cycles relative to HEAD. A selected base must contain the
 policy and cycle helper to support a committed comparison.
 
+A task baseline remains the baseline of that task, not a retrospective approval
+of later integration paths. For a follow-up, check its candidate against its
+recorded starting revision and keep earlier scope decisions in the change record.
+A comparison spanning those decisions can report historical path mismatches;
+explain their concrete changes and authorization rather than extending the
+current policy merely to make that cumulative comparison pass.
+
 The policy's `controls` list identifies the architecture-check files. Changes
 to them follow the normal contribution and review process, with the same
 dependency and shared-Core checks. Paymaster imposes no additional GitHub
