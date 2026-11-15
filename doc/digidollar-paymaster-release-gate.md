@@ -4,6 +4,46 @@ There is **no complete current-revision release certification** in this record.
 The candidate below and historical checkpoints identify actual verification;
 implemented behavior alone does not establish release acceptance.
 
+## Native intent, client retention and ordinary DD actions (2026-11-15)
+
+Review baseline: `fb28e17dc7`. Approved shared-adapter scope: `2c3ffe8656`.
+Corrections: client result retention `63737fd209`, native checkpoint intent
+`9d1e613ba9`, ordinary DD availability `71140d39a9`.
+The initial native intent now precedes external authority; exact predecessor
+binding and adjacent DB-only repair retain the fence across repeated failures.
+Authenticated client results survive damaged local artifacts, while independent
+local confirmation retires only the matching leased response after durable
+completion. Ordinary DD send/redemption preserve unknown availability through
+amount validation and the confirmation/unlock boundary.
+
+| Actual local check | Result and scope |
+| --- | --- |
+| Native, final cumulative partial link | **36 distinct selected cases / 2,070 assertions, exit 0**: 20 checkpoint cases / 580 assertions; ten client-result cases / 848; one recovery commit-failure case / 172; five adjacent ordinary selection, capital release, carrier refill, recurring reversal and retirement restart cases / 470. Includes real SQLite close/reopen, repeated initial/resume/completion failures, strict legacy/binding/tamper handling, unresolved-intent fee-input protection, damaged local artifacts, enqueue/TTL retention, failed local completion and exact retry. Unselected cases were not run. |
+| Qt, final cumulative partial link | **Ten distinct selected functions, exit 0**, Windows/Fusion; init/cleanup excluded. Seven DD functions cover real zero/positive/manual/pool/unknown/repaired availability, encrypted locked stale-button refusal, overview, watch-only, redemption unlock/readiness, canonical health and ordinary DD coin control. Three `WalletTests` functions cover ordinary sending, DGB balance breakdown and send validation. The balance test emits an existing QSignalSpy metatype warning; its assertions pass. |
+| Compilation | **Eight changed production translation units freshly compiled**, plus the three changed test units and regenerated DD-test MOC. All eight production units also pass C++17 `/Zs`. Four unchanged diagnostic units (RPC DD, DD health/validation and coins) were freshly compiled separately. Source/object and final binary hashes match. MSVC 19.43/toolset 14.43, C++20 objects, Qt 5.15.10 static. Retained dependencies lack complete transitive rebuild provenance. |
+| Architecture and records | Working-tree dependency/cycle check, six positive/negative fixtures, change-record JSON and whitespace checks pass. Each correction commit passes changed-path/shared-Core checks against approved scope `2c3ffe8656`; the scope-only commit passed the prior `fb28e17dc7` policy. No dependency, financial-validation or checkpoint rule was relaxed. |
+
+Final partial-link SHA256: native
+`f1c72675312640914e7acd7f370fac405f53c54679b32c70a6dfbabc14099b60`;
+Qt `28959b7624885b2748590e6b97143834602322ea6f28394579cc846fb7b62676`.
+Exact commands, failed/passing logs, test selections and source/object hashes
+remain in local ignored `.ai/implement-review-fb28/`, including
+`verification-final.json` and `runs.jsonl`.
+The retention regression fails with the old processing/recovery caller objects
+and the new nonmutating authentication helper, then passes with the corrected
+callers; this is an isolated partial-link comparison, not a complete baseline build.
+The first security-test compile required qualifying `wallet::CWallet`.
+An adjacent canonical-health Qt failure reproduced in the retained earlier
+binary and the current link: the isolated fixture called RPC during warmup.
+It now finishes warmup after context setup and keeps the exact invalid-token
+metadata assertion, with the actual RPC response/error in failure diagnostics.
+
+Repository baseline, wallet/Qt/test guidance, current DD architecture and the
+canonical Paymaster boundaries/change records governed these corrections.
+Complete daemon/GUI rebuilds, complete suites, functional/platform matrices,
+sanitizers and Tidy were **not run** and remain operator/release checks in the
+[runbook](digidollar-paymaster-testing.md#independent-review-regressions).
+
 ## Approved Mint availability follow-up (2026-11-15)
 
 Baseline: `c4503a3c31`; operator-approved scope commit: `77f6180dcc`;
