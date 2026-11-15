@@ -9183,4 +9183,80 @@ BOOST_FIXTURE_TEST_CASE(deferred_capacity_preserves_request_and_yields_next_turn
     BOOST_CHECK(CheckpointBytes() == checkpoint_before);
 }
 
+BOOST_AUTO_TEST_CASE(exact_wallet_persistence_requires_durable_receive_history)
+{
+    LOCK(m_wallet.cs_wallet);
+    m_wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+    m_wallet.SetupDescriptorScriptPubKeyMans();
+    m_wallet.EnsureDDWallet();
+    auto* dd_wallet = m_wallet.GetDDWallet();
+    BOOST_REQUIRE(dd_wallet);
+    const auto destination = m_wallet.GetNewDestination(OutputType::BECH32M, "receive persistence");
+    BOOST_REQUIRE(destination);
+
+    CMutableTransaction incoming;
+    incoming.SetDigiDollarType(::DD_TX_TRANSFER);
+    incoming.vin.emplace_back(COutPoint{uint256::ONE, 2});
+    incoming.vout.emplace_back(0, GetScriptForDestination(*destination));
+    incoming.vout.emplace_back(0, CScript{} << OP_RETURN << std::vector<unsigned char>{'D', 'D'}
+        << CScriptNum(::DD_TX_TRANSFER) << CScriptNum(1000));
+    const auto transaction = MakeTransactionRef(incoming);
+    const auto txid = transaction->GetHash();
+    auto& database = GetMockableDatabase(m_wallet);
+    DataStream history_key;
+    history_key << std::make_pair(DBKeys::DD_TRANSACTION, txid);
+    size_t refused{0};
+    database.m_refuse_write = [&](Span<const std::byte> key) {
+        if (key.size() == history_key.size() && std::equal(key.begin(), key.end(), history_key.begin())) {
+            ++refused;
+            return true;
+        }
+        return false;
+    };
+
+    // Uses the ordinary AddToWallet incoming-history callback before the
+    // exact Paymaster persistence operation is asked to verify durability.
+    BOOST_REQUIRE(m_wallet.AddToWallet(transaction, TxStateInMempool{}));
+    BOOST_REQUIRE_EQUAL(refused, 1U);
+    DDTransaction stored;
+    BOOST_CHECK(!WalletBatch{database}.ReadDDTransaction(txid, stored));
+    const auto history = dd_wallet->GetDDTransactionHistory();
+    BOOST_CHECK_EQUAL(std::count_if(history.begin(), history.end(), [&](const auto& row) {
+        return row.txid == txid.GetHex() && row.incoming && row.category == "receive";
+    }), 0);
+
+    std::string error;
+    BOOST_CHECK(!PersistExactPaymasterWalletTransaction(m_wallet, transaction, error));
+    BOOST_CHECK(!error.empty());
+    BOOST_CHECK(!WalletBatch{database}.ReadDDTransaction(txid, stored));
+    BOOST_CHECK_EQUAL(refused, 2U);
+
+    database.m_refuse_write = {};
+    BOOST_CHECK_MESSAGE(PersistExactPaymasterWalletTransaction(m_wallet, transaction, error), error);
+    BOOST_REQUIRE(WalletBatch{database}.ReadDDTransaction(txid, stored));
+    BOOST_CHECK(stored.incoming);
+    BOOST_CHECK_EQUAL(stored.amount, 1000);
+    const auto receive_timestamp = stored.timestamp;
+    // Existing memory rows must repair missing durable rows, including the
+    // send classification/metadata after observing wallet-owned change.
+    BOOST_REQUIRE(WalletBatch{database}.EraseDDTransaction(txid));
+    dd_wallet->ProcessIncomingTransaction(transaction, txid);
+    BOOST_REQUIRE(WalletBatch{database}.ReadDDTransaction(txid, stored));
+    BOOST_CHECK_EQUAL(stored.timestamp, receive_timestamp);
+    BOOST_REQUIRE(dd_wallet->RecordPaymasterSendHistory(txid, GetScriptForDestination(*destination), 900, error,
+                                                        "preserved send", false));
+    BOOST_REQUIRE(WalletBatch{database}.EraseDDTransaction(txid));
+    BOOST_REQUIRE(PersistExactPaymasterWalletTransaction(m_wallet, transaction, error));
+    BOOST_REQUIRE(WalletBatch{database}.ReadDDTransaction(txid, stored));
+    BOOST_CHECK(!stored.incoming);
+    BOOST_CHECK_EQUAL(stored.amount, 900);
+    BOOST_CHECK_EQUAL(stored.comment, "preserved send");
+    BOOST_CHECK_EQUAL(stored.timestamp, receive_timestamp);
+    BOOST_CHECK(!dd_wallet->ProcessIncomingTransaction(transaction, uint256::ONE, error));
+    CAmount received{0};
+    BOOST_REQUIRE(WalletBatch{database}.ReadDDUTXO(COutPoint{txid, 0}, received));
+    BOOST_CHECK_EQUAL(received, 1000);
+}
+
+
 BOOST_AUTO_TEST_SUITE_END()

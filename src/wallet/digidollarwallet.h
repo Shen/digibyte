@@ -1229,6 +1229,8 @@ public:
      * @param txid Transaction ID
      */
     void ProcessIncomingTransaction(const CTransactionRef& tx, const uint256& txid);
+    /** Idempotent receive-history persistence; failure leaves memory unchanged. */
+    bool ProcessIncomingTransaction(const CTransactionRef& tx, const uint256& txid, std::string& error);
 
     // ====================================================================
     // PHASE 6: RECEIVE OPERATIONS (Tasks 6.1-6.3)

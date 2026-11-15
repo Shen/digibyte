@@ -49,6 +49,28 @@ static constexpr CAmount MIN_DD_TRANSFER_FEE_RATE{35000000}; // 0.35 DGB/kB
 static constexpr CAmount MIN_DD_TRANSFER_FEE{10000000};       // 0.1 DGB
 static constexpr CAmount TRANSFER_BUILDER_PRICE_UNUSED{1};    // Transfers are price-independent.
 
+/** Verify the serialized row as well as the in-memory view on replay. */
+bool PersistDDHistory(wallet::CWallet& wallet, const DDTransaction& row, std::string& error)
+{
+    DDTransaction stored;
+    const auto status = wallet.GetDatabase().MakeBatch()->ReadWithStatus(
+        std::make_pair(wallet::DBKeys::DD_TRANSACTION, uint256S(row.txid)), stored);
+    if (status != wallet::DatabaseReadStatus::FOUND && status != wallet::DatabaseReadStatus::NOT_FOUND) {
+        error = "DigiDollar transaction history database read failed";
+        return false;
+    }
+    DataStream expected_bytes, stored_bytes;
+    expected_bytes << row;
+    if (status == wallet::DatabaseReadStatus::FOUND) stored_bytes << stored;
+    if (status == wallet::DatabaseReadStatus::FOUND && expected_bytes.size() == stored_bytes.size() &&
+        std::equal(expected_bytes.begin(), expected_bytes.end(), stored_bytes.begin())) return true;
+    if (!wallet::WalletBatch{wallet.GetDatabase()}.WriteDDTransaction(row)) {
+        error = "DigiDollar transaction history database write failed";
+        return false;
+    }
+    return true;
+}
+
 std::vector<wallet::COutput> AvailableDDTransferFeeCoins(const wallet::CWallet& wallet)
     EXCLUSIVE_LOCKS_REQUIRED(wallet.cs_wallet);
 
@@ -2445,7 +2467,7 @@ bool DigiDollarWallet::RecordPaymasterSendHistory(const uint256& txid,
                    existing.address == outgoing.address &&
                    existing.comment == outgoing.comment;
         });
-    if (exact_send != transaction_history.end()) return true;
+    if (exact_send != transaction_history.end()) return PersistDDHistory(*m_wallet, *exact_send, error);
 
     wallet::WalletBatch batch(m_wallet->GetDatabase());
     if (!batch.WriteDDTransaction(outgoing)) {
@@ -9281,14 +9303,26 @@ std::vector<uint256> DigiDollarWallet::GetUnconfirmedDDTransactions() const {
     return unconfirmed;
 }
 
-void DigiDollarWallet::ProcessIncomingTransaction(const CTransactionRef& tx, const uint256& txid) {
+void DigiDollarWallet::ProcessIncomingTransaction(const CTransactionRef& tx, const uint256& txid)
+{
+    std::string error;
+    if (!ProcessIncomingTransaction(tx, txid, error)) LogPrintf("DigiDollar: %s\n", error);
+}
+
+bool DigiDollarWallet::ProcessIncomingTransaction(const CTransactionRef& tx, const uint256& txid, std::string& error) {
+    error.clear();
     auto locks = LockDDWallet();
     if (!m_wallet) {
-        LogPrintf("DigiDollar: ProcessIncomingTransaction called but no wallet pointer\n");
-        return;
+        error = "DigiDollar wallet is not initialized";
+        return false;
     }
     if (!tx || GetDigiDollarTxType(*tx) == DD_TX_NONE) {
-        return;
+        return true;
+    }
+
+    if (tx->GetHash() != txid) {
+        error = "DigiDollar transaction history txid mismatch";
+        return false;
     }
 
     try {
@@ -9303,7 +9337,7 @@ void DigiDollarWallet::ProcessIncomingTransaction(const CTransactionRef& tx, con
         // builds CScriptNum(push, 8) over every trailing push -- 32 > 8 threw
         // "script number overflow" on every mint (caught below, but noisy and fragile).
         if (txType == DD_TX_MINT || txType == DD_TX_REDEEM) {
-            return;
+            return true;
         }
 
         // Extract DD amounts from OP_RETURN (same logic as DetectIncomingDDOutputs)
@@ -9338,13 +9372,13 @@ void DigiDollarWallet::ProcessIncomingTransaction(const CTransactionRef& tx, con
         }
 
         if (dd_amounts.empty()) {
-            return; // No DD amounts in this transaction
+            return true; // No DD amounts in this transaction
         }
 
         if (pending_outgoing_dd_txs.count(txid) > 0) {
             LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Skipping incoming-history scan for outgoing DD tx %s during wallet commit\n",
                       txid.GetHex());
-            return;
+            return true;
         }
 
         // Now check P2TR outputs we own
@@ -9385,19 +9419,12 @@ void DigiDollarWallet::ProcessIncomingTransaction(const CTransactionRef& tx, con
 
                 // Check if we already have a transaction with this txid (e.g., from a send)
                 // This prevents "receive" for change from overwriting our "send" transaction
-                bool txExists = false;
-                for (const auto& existing : transaction_history) {
-                    if (existing.txid == txid.GetHex()) {
-                        txExists = true;
-                        LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Skipping duplicate transaction %s (already exists as %s)\n",
-                                  txid.GetHex(), existing.category);
-                        break;
-                    }
-                }
-
-                if (txExists) {
-                    // Skip - this is likely our change from a send we already recorded
-                    continue;
+                const auto existing = std::find_if(transaction_history.begin(), transaction_history.end(),
+                    [&](const DDTransaction& row) { return row.txid == txid.GetHex(); });
+                if (existing != transaction_history.end()) {
+                    // Preserve send/change classification and metadata, including
+                    // rows created before a previous persistence failure.
+                    return PersistDDHistory(*m_wallet, *existing, error);
                 }
 
                 // Add to transaction history (txType already checked above, only TRANSFER here)
@@ -9410,15 +9437,8 @@ void DigiDollarWallet::ProcessIncomingTransaction(const CTransactionRef& tx, con
                 ddtx.address = ""; // Could extract sender address if needed
                 ddtx.category = "receive";
 
+                if (!PersistDDHistory(*m_wallet, ddtx, error)) return false;
                 transaction_history.push_back(ddtx);
-
-                // Persist to database
-                if (m_wallet) {
-                    wallet::WalletBatch batch(m_wallet->GetDatabase());
-                    if (!batch.WriteDDTransaction(ddtx)) {
-                        LogPrintf("DigiDollar: WARNING - Failed to persist received transaction to database\n");
-                    }
-                }
 
                 LogPrint(BCLog::DIGIDOLLAR, "DigiDollar: Added receive transaction to history - TxID: %s, Amount: %d cents\n",
                           txid.GetHex(), dd_amount);
@@ -9428,8 +9448,10 @@ void DigiDollarWallet::ProcessIncomingTransaction(const CTransactionRef& tx, con
             }
         }
     } catch (const std::exception& e) {
-        LogPrintf("DigiDollar: ProcessIncomingTransaction exception - %s\n", e.what());
+        error = strprintf("DigiDollar incoming history failed: %s", e.what());
+        return false;
     }
+    return true;
 }
 
 // =============================================================================
