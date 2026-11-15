@@ -2,6 +2,24 @@
   "task_baseline": "33c680cba1",
   "official_baseline": "d7265fb05e26e1e799876bcd526225e4826c3ba8",
   "shared_changes": {
+    "src/qt/digidollarredeemwidget.cpp": {
+      "purpose": "Operator-authorized review AP3: preserve unknown DD availability in ordinary redemption instead of reporting a known zero balance or requesting additional DD after unreadable Paymaster safety data.",
+      "reused_api": "Existing WalletModel::DigiDollarBalanceSummary and canonical wallet availability classification; the existing redemption validation returns its availability error to the disabled-reason view.",
+      "ordinary_callers": "Ordinary DD redemption validation, click-time preflight and disabled-button explanation. No redemption, consensus, amount, signing or unlock rule changes.",
+      "regressions": "Real wallet zero, positive, manual-lock, pool-reserved, unknown-version and repaired availability; reject unknown before confirmation or unlock and retain ordinary balance and redemption behavior. Targeted Qt compiles/tests; clean full products remain operator checks."
+    },
+    "src/qt/digidollarredeemwidget.h": {
+      "purpose": "Operator-authorized review AP3: expose the existing redemption validation error so unknown availability and insufficient known balance remain distinct without a second balance observation.",
+      "reused_api": "Existing validateDDBalance helper with an optional error output, keeping one balance validation for the caller and its explanation.",
+      "ordinary_callers": "Ordinary DD redemption button validation and disabled reason; no new payment authority or wallet API.",
+      "regressions": "Compile the redemption widget and current header consumers; real unknown/zero/positive availability and ordinary redemption tests."
+    },
+    "src/qt/test/digidollarwidgettests.h": {
+      "purpose": "Operator-authorized review AP3: register a focused real-wallet regression for ordinary DD send and redemption availability.",
+      "reused_api": "Existing DigiDollarWidgetTests fixture and Qt test-slot registration.",
+      "ordinary_callers": "Qt test registration only; exercises existing ordinary DD frontend adapters alongside Paymaster pool safety state.",
+      "regressions": "Regenerate this test header's MOC, compile and run the new availability case plus adjacent ordinary DD and balance tests; complete Qt suite remains an operator check."
+    },
     "src/qt/digidollarsendwidget.cpp": {
       "purpose": "Review b63 AP3: keep the shared DD send form coherent when the user combines Use available balance with manual coin selection. The explicitly authorized AP1-AP5 implementation requires this existing form integration point; accepted immutable payment orders retain their original input intent. Review 027 AP3: refresh fee funding and Send eligibility when only DGB availability changes, including locks and unreadable safety state.",
       "reused_api": "Existing DDCoinControl dialog and selection object, PaymasterSendWidget::beginSweep and selectedInputsChanged, current input-enabled/wallet checks and offer invalidation. The modal edits a copy and applies it only on acceptance. Existing WalletModel::dgbBalanceChanged signal and the existing updateFeeDisplay/updateSendButton callback.",
