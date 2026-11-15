@@ -382,7 +382,7 @@ PaymentResult SubmitPaymasterTransactionWithGuard(CWallet& target, PartiallySign
     }
 
     if (!already_committed && attempt.state == DigiDollar::Paymaster::AttemptState::QUOTED) {
-        if (now > attempt.quote_expires_at) {
+        if (!IsPaymasterAuthorizationCurrent(attempt.quote_expires_at, now)) {
             throw ProviderSubmitExpired{"Paymaster quote expired"};
         }
         if (session.state == DigiDollar::Paymaster::SessionState::INPUTS_RESERVED ||

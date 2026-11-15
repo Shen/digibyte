@@ -143,7 +143,7 @@ bool PaymasterStore::AcceptUserAuthorization(
     PaymasterCapacityRequest capacity_request;
     PaymasterCapacityProof capacity_proof;
     uint256 capacity_request_hash;
-    if (now < attempt.created_at || now > attempt.quote_expires_at ||
+    if (now < attempt.created_at || !IsPaymasterAuthorizationCurrent(attempt.quote_expires_at, now) ||
         !batch.ReadPaymasterIdentity(identity) ||
         !batch.ReadPaymasterProviderPool(pool) ||
         !ReadProviderCapacityRequestForContinuation(

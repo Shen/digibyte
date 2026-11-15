@@ -3601,7 +3601,8 @@ BOOST_AUTO_TEST_CASE(
     std::string error;
     BOOST_REQUIRE_MESSAGE(BuildProviderQuoteFixture(
                               environment, request_id, uint256S("1501"), now,
-                              fixture, error),
+                              fixture, error, nullptr, {}, DGBSatoshis{500}, 5500, {},
+                              /*intent_ttl=*/60, /*quote_ttl=*/20, /*capacity_ttl=*/60),
                           error);
     BOOST_REQUIRE(PersistProviderQuoteEnvironment(
         m_wallet, environment, {fixture.pool_entry}));
@@ -3623,16 +3624,21 @@ BOOST_AUTO_TEST_CASE(
     user_signed.updated_at = now + 2;
     BOOST_REQUIRE_MESSAGE(
         store.UpdateAttempt(request_id, user_signed, error), error);
-    {
+    for (const int offset : {-1, 0, 1}) {
         wallet::CWallet late_wallet{m_node.chain.get(), "late-first-acceptance",
                            DuplicateSecurityFixtureDatabase(m_wallet.GetDatabase())};
         AlignSecurityFixtureCheckpoint(late_wallet.GetDatabase());
         const auto before = GetMockableDatabase(late_wallet).m_records;
-        BOOST_CHECK(!PaymasterStore{late_wallet}.AcceptUserAuthorization(request_id,
+        const bool accepted = PaymasterStore{late_wallet}.AcceptUserAuthorization(request_id,
             user_signed.attempt_id, Hash(user_signed.user_signed_psbt),
-            fixture.capacity_proof.expires_at, error));
-        BOOST_CHECK(GetMockableDatabase(late_wallet).m_records == before);
+            fixture.attempt.quote_expires_at + offset, error);
+        BOOST_CHECK_EQUAL(accepted, offset == -1);
+        if (!accepted) BOOST_CHECK(GetMockableDatabase(late_wallet).m_records == before);
+        else BOOST_CHECK(PaymasterStore{late_wallet}.AcceptUserAuthorization(request_id,
+            user_signed.attempt_id, Hash(user_signed.user_signed_psbt),
+            fixture.attempt.quote_expires_at + 1, error));
     }
+    AlignSecurityFixtureCheckpoint(m_wallet.GetDatabase());
     const uint256 user_psbt_hash{Hash(user_signed.user_signed_psbt)};
 
     // Preserve the exact pre-authorization state for the stale-policy branch.
