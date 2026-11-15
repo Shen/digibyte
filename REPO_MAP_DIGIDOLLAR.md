@@ -945,6 +945,9 @@ orchestration. RPC/GUI callers cannot substitute displayed state for the backend
 execution-time checks. Structured errors originate in `src/paymaster/error.h`.
 Recovery quote intake uses `Manager::LeaseRecoveryResponses` until durable
 acceptance; local failures retain the reply for retry.
+`ReceiveAvailableClientResults` shares receipt-only normal and recovery intake
+with explicit result processing. Refresh retains both families before local
+failures, commits exact finals before ACK, and performs no payment execution.
 `LoadClientPaymentReplay` in `paymasterclient.cpp` binds the original order before
 preparation effects; `SelectCreatedClientPaymentInputs` rechecks its original
 inputs for both ordinary payments and sweeps.

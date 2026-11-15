@@ -952,6 +952,55 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
 }
 
 
+void ReceiveAvailableClientResults(WalletContext& context, CWallet& wallet,
+    const PaymentSession& session, int64_t now)
+{
+    if (!context.paymaster || !context.paymaster->Enabled() || session.provider_side ||
+        session.attempt_ids.empty()) return;
+    PaymasterStore store{wallet};
+    ProviderAttempt attempt;
+    {
+        LOCK(wallet.cs_wallet);
+        const auto status = WalletBatch{wallet.GetDatabase()}.ReadPaymasterAttemptWithStatus(session.attempt_ids.back(), attempt);
+        if (status != DatabaseReadStatus::FOUND || attempt.session_id != session.session_id)
+            throw ApplicationError(ErrorKind::WALLET, status == DatabaseReadStatus::UNSUPPORTED_VERSION
+                ? "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION" : "PAYMASTER_ATTEMPT_DATABASE_READ");
+    }
+    const bool payment_signed = !attempt.user_signed_psbt.empty() || !attempt.final_transaction.empty();
+    std::string error;
+    // Retain both families before any deeper local validation or index wait.
+    // Leases are incarnation-bound and refcounted, not payment authority.
+    if (payment_signed) {
+        const auto lease = context.paymaster->LeaseResults(session.request_id, session.session_id, attempt.provider_id, 1);
+        if (!lease.Messages().empty() && RetainAuthenticatedClientResult(*context.paymaster,
+                lease.Messages().front(), session, attempt, now, error) == ClientResultRetention::FAILED)
+            throw ApplicationError(ErrorKind::WALLET, error);
+    }
+    AlternativeRecoveryRecord recovery;
+    const auto recovery_status = store.GetAlternativeRecoveryWithStatus(session.request_id, recovery);
+    if (recovery_status != DatabaseReadStatus::FOUND && recovery_status != DatabaseReadStatus::NOT_FOUND)
+        throw ApplicationError(ErrorKind::WALLET, recovery_status == DatabaseReadStatus::UNSUPPORTED_VERSION
+            ? "PAYMASTER_UNSUPPORTED_PERSISTED_VERSION" : "PAYMASTER_RECOVERY_DATABASE_READ");
+    const bool recovery_signed = recovery_status == DatabaseReadStatus::FOUND &&
+        !recovery.provider_side && recovery.phase == AlternativeRecoveryPhase::USER_SIGNED;
+    if (recovery_signed) {
+        const auto lease = context.paymaster->LeaseRecoveryResults(session.request_id, session.session_id, recovery.recovery_provider_id, 1);
+        if (!lease.Messages().empty() && RetainAuthenticatedClientResult(*context.paymaster,
+                lease.Messages().front(), session, recovery, now, error) == ClientResultRetention::FAILED)
+            throw ApplicationError(ErrorKind::WALLET, error);
+    }
+    std::exception_ptr failure;
+    if (payment_signed) {
+        try { ReceivePaymasterResult(context, wallet, session.request_id); }
+        catch (...) { failure = std::current_exception(); }
+    }
+    if (recovery_signed) {
+        try { ReceiveAlternativePaymasterResult(context, wallet, store, session, recovery, now); }
+        catch (...) { if (!failure) failure = std::current_exception(); }
+    }
+    if (failure) std::rethrow_exception(failure);
+}
+
 ClientRecoveryResult ResolvePaymasterSession(WalletContext& context, CWallet& target,
     const ClientSessionLookup& lookup, const std::string& action, const ClientRecoveryOptions& options)
 {
@@ -966,7 +1015,10 @@ ClientRecoveryResult ResolvePaymasterSession(WalletContext& context, CWallet& ta
         throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_SESSION_NOT_FOUND",
             "PAYMASTER_SESSION_NOT_FOUND: Paymaster session not found", ErrorDisposition::RECONCILE, true);
     }
-    if (action == "refresh") wallet->BlockUntilSyncedToCurrentChain();
+    if (action == "refresh") {
+        ReceiveAvailableClientResults(context, *wallet, session, GetTime());
+        wallet->BlockUntilSyncedToCurrentChain();
+    }
     if (context.paymaster && context.paymaster->Enabled()) {
         std::string equivocation_error;
         if (!DrainClientSessionEquivocations(

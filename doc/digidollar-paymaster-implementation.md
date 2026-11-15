@@ -148,6 +148,15 @@ send row. A history-write failure retains payment authority and can be retried.
 `EraseUnsubmittedPaymasterSendHistory` removes only the exact legacy recipient
 row when the corresponding wallet transaction is absent; unrelated history stays.
 
+Client refresh shares normal and alternative-recovery result receipt with the
+explicit result/retry operations. It authenticates and retains both inbox
+families before local validation or index waits, durably commits the exact final
+and fee accounting, then acknowledges the message. Receipt alone never signs,
+submits or broadcasts; the explicit operations separately execute saved finals.
+A GUI timeout can therefore continue collecting a late provider result without
+restarting payment execution. Local failures preserve authenticated results
+beyond their ordinary transport TTL.
+
 Authorization-bearing transitions share
 `CommitWithPaymasterAuthorizationProtection`: the mandatory
 `WALLET_FLAG_PAYMASTER_AUTHORIZATION` downgrade fence is written in the same

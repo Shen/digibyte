@@ -8024,7 +8024,7 @@ static void ExerciseFirstProviderRecoveryCommit(node::NodeContext& node,
 static void ExerciseDurablePaymentExecutor(TestChain100Setup& chain_setup,
     wallet::CWallet& client, ProviderQuoteFixture& original,
     PaymentSession session, const PaymasterResult& result, const CMutableTransaction& final_transaction,
-    int64_t now, WalletContext& context)
+    int64_t now, WalletContext& context, bool receive_only = false)
 {
     BOOST_REQUIRE(context.paymaster);
     auto& manager = *context.paymaster;
@@ -8066,6 +8066,61 @@ static void ExerciseDurablePaymentExecutor(TestChain100Setup& chain_setup,
     }
     auto& database = GetMockableDatabase(client);
     const auto retained = database.m_records;
+    if (receive_only) {
+        auto signed_attempt = original.attempt;
+        signed_attempt.state = AttemptState::USER_SIGNED;
+        signed_attempt.final_txid.SetNull();
+        signed_attempt.final_transaction.clear();
+        signed_attempt.provider_signed_result.clear();
+        signed_attempt.provider_signed_at = 0;
+        session.state = SessionState::PENDING_PROVIDER;
+        session.pending_phase = PendingPhase::PENDING_NETWORK;
+        session.final_txid.SetNull();
+        fees.reservations.front().state = BudgetReservationState::RESERVED;
+        {
+            LOCK(client.cs_wallet);
+            WalletBatch batch{client.GetDatabase()};
+            BOOST_REQUIRE(batch.WritePaymasterAttempt(signed_attempt));
+            BOOST_REQUIRE(batch.WritePaymasterSession(session));
+            BOOST_REQUIRE(batch.ErasePaymasterResult(result.commit_key));
+            BOOST_REQUIRE(batch.WritePaymasterClientFeeLedger(fees));
+        }
+        PaymasterResultMessage message;
+        message.request_id = session.request_id;
+        message.session_id = session.session_id;
+        message.result = result;
+        const auto encoded = SerializePaymasterSecurityObject(message);
+        BOOST_REQUIRE(manager.EnqueueDirectMessage(45, Hash(encoded), encoded.size(), DirectPayload{message}, now));
+        const auto outbound = manager.OutboundDirectMessageCount();
+        const auto before = database.m_records;
+        database.FailCommit();
+        BOOST_CHECK_EXCEPTION(paymaster_app::ResolvePaymasterSession(context, client, session.request_id,
+            "refresh", {}), ApplicationError, [](const auto& failure) { return failure.code == "PAYMASTER_DATABASE_COMMIT"; });
+        database.ClearFailureInjection();
+        BOOST_CHECK(database.m_records == before);
+        SetMockTime(now + MAX_DIRECT_MESSAGE_TTL_SECONDS + 1);
+        manager.PruneDirectMessages(GetTime());
+        BOOST_CHECK_EQUAL(manager.DirectMessageCount(), 1U);
+        const auto refreshed = paymaster_app::ResolvePaymasterSession(context, client, session.request_id, "refresh", {});
+        BOOST_CHECK(!refreshed.broadcast.value_or(false));
+        BOOST_CHECK_EQUAL(manager.DirectMessageCount(), 0U);
+        BOOST_CHECK_EQUAL(manager.OutboundDirectMessageCount(), outbound);
+        BOOST_CHECK(!client.chain().context()->mempool->get(final.GetHash()));
+        BOOST_CHECK(WITH_LOCK(client.cs_wallet, return client.GetWalletTx(final.GetHash()) == nullptr));
+        ProviderAttempt accepted;
+        BOOST_REQUIRE(store.GetAttempt(signed_attempt.attempt_id, accepted));
+        BOOST_CHECK(accepted.final_transaction == bytes);
+        BOOST_CHECK(accepted.user_signed_psbt == signed_attempt.user_signed_psbt);
+        const auto received = database.m_records;
+        paymaster_app::ResolvePaymasterSession(context, client, session.request_id, "refresh", {});
+        BOOST_CHECK(database.m_records == received);
+        wallet::CWallet reopened{client.chain().context()->chain.get(), "payment-receipt-reopened",
+            DuplicateSecurityFixtureDatabase(database)};
+        BOOST_REQUIRE(reopened.LoadWallet() == DBErrors::LOAD_OK);
+        BOOST_REQUIRE(PaymasterStore{reopened}.GetAttempt(signed_attempt.attempt_id, accepted));
+        BOOST_CHECK(accepted.final_transaction == bytes);
+        return;
+    }
     client.SetBroadcastTransactions(true);
     // A durable signature is not a local relay-policy override. Exercise the
     // actual client executor, wallet startup and scheduled recovery against an
@@ -8568,7 +8623,8 @@ static void ExerciseClientRecoveryResult(ClientRecoveryReadSetup& setup, bool co
                                          bool observe_without_result = false,
                                          bool permanent_provider_loss = false,
                                          bool exercise_payment_executor = false,
-                                         bool exercise_background_cleanup = false)
+                                         bool exercise_background_cleanup = false,
+                                         bool receive_only = false)
 {
     auto& m_node = setup.m_node;
     auto& context = setup.context;
@@ -8744,7 +8800,7 @@ static void ExerciseClientRecoveryResult(ClientRecoveryReadSetup& setup, bool co
                 BOOST_REQUIRE(client.AddToWallet(minted.vtx.at(1),
                     TxStateConfirmed{minted.GetHash(), mint_height, 1}));
             }
-            ExerciseDurablePaymentExecutor(setup, client, original, session, unused_result, unused_final, now, context);
+            ExerciseDurablePaymentExecutor(setup, client, original, session, unused_result, unused_final, now, context, receive_only);
             return;
         }
         attempt.state = AttemptState::USER_SIGNED;
@@ -9054,7 +9110,7 @@ static void ExerciseClientRecoveryResult(ClientRecoveryReadSetup& setup, bool co
     if (!confirmed_before_result) {
         ExerciseFirstProviderRecoveryCommit(m_node, recovery, provider_key, funding.vtx.at(2), result.result, now);
     }
-    if (confirmed_before_result) {
+    if (confirmed_before_result && !receive_only) {
         const CBlock confirmed = setup.CreateAndProcessBlock({final_transaction}, CScript() << OP_TRUE);
         BOOST_REQUIRE(confirmed.GetHash() == WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Tip()->GetBlockHash()));
         IndexWaitSynced(*g_txindex);
@@ -9086,7 +9142,7 @@ static void ExerciseClientRecoveryResult(ClientRecoveryReadSetup& setup, bool co
         BOOST_CHECK(!already_confirmed);
         BOOST_REQUIRE(m_node.mempool->get(CTransaction{final_transaction}.GetHash()));
     }
-    if (confirmed_before_result || observe_without_result) {
+    if ((confirmed_before_result && !receive_only) || observe_without_result) {
         // No provider reply exists yet, and all inputs are spent. The exact
         // local final must allow the same USER_SIGNED recovery to resume even
         // after expiry; it must not manufacture a result or consume fees.
@@ -9238,6 +9294,46 @@ static void ExerciseClientRecoveryResult(ClientRecoveryReadSetup& setup, bool co
     const auto encoded = SerializePaymasterSecurityObject(result);
     const uint256 message_id{Hash(encoded)};
     BOOST_REQUIRE(manager.EnqueueDirectMessage(45, message_id, encoded.size(), DirectPayload{result}, now));
+    if (receive_only) {
+        BOOST_REQUIRE(session.attempt_ids.size() == 1);
+        BOOST_CHECK(!m_node.mempool->get(*result.result.txid));
+        const auto outbound = manager.OutboundDirectMessageCount();
+        auto& database = GetMockableDatabase(client);
+        const auto before = database.m_records;
+        database.FailCommit();
+        BOOST_CHECK_EXCEPTION(paymaster_app::ResolvePaymasterSession(context, client,
+            session.request_id, "refresh", {}), ApplicationError, [](const auto& failure) {
+                return failure.code == "PAYMASTER_DATABASE_COMMIT";
+            });
+        database.ClearFailureInjection();
+        BOOST_CHECK(database.m_records == before);
+        SetMockTime(now + MAX_DIRECT_MESSAGE_TTL_SECONDS + 1);
+        manager.PruneDirectMessages(GetTime());
+        BOOST_REQUIRE_EQUAL(manager.DirectMessageCount(), 1U);
+        const auto refreshed = paymaster_app::ResolvePaymasterSession(context, client, session.request_id, "refresh", {});
+        BOOST_CHECK(!refreshed.broadcast.value_or(false));
+        BOOST_CHECK_EQUAL(manager.DirectMessageCount(), 0U);
+        BOOST_CHECK_EQUAL(manager.OutboundDirectMessageCount(), outbound);
+        BOOST_CHECK(!m_node.mempool->get(*result.result.txid));
+        BOOST_CHECK(WITH_LOCK(client.cs_wallet, return client.GetWalletTx(*result.result.txid) == nullptr));
+        BOOST_REQUIRE(store.GetAlternativeRecovery(session.request_id, recovery));
+        BOOST_CHECK(recovery.phase == AlternativeRecoveryPhase::FINAL_COMMITTED);
+        BOOST_CHECK(recovery.final_transaction == SerializePaymasterSecurityObject(final_transaction));
+        ClientFeeLedger received_fees;
+        BOOST_REQUIRE(WalletBatch{client.GetDatabase()}.ReadPaymasterClientFeeLedger(received_fees));
+        const auto charged = std::count_if(received_fees.reservations.begin(), received_fees.reservations.end(),
+            [&](const auto& fee) { return fee.commit_key == response.recovery_commit_key && fee.state == BudgetReservationState::SPENT; });
+        BOOST_CHECK_EQUAL(charged, 1);
+        const auto received = database.m_records;
+        paymaster_app::ResolvePaymasterSession(context, client, session.request_id, "refresh", {});
+        BOOST_CHECK(database.m_records == received);
+        wallet::CWallet reopened{m_node.chain.get(), "receipt-only-reopened", DuplicateSecurityFixtureDatabase(database)};
+        BOOST_REQUIRE(reopened.LoadWallet() == DBErrors::LOAD_OK);
+        AlternativeRecoveryRecord durable;
+        BOOST_REQUIRE(PaymasterStore{reopened}.GetAlternativeRecovery(session.request_id, durable));
+        BOOST_CHECK(durable.final_transaction == recovery.final_transaction);
+        return;
+    }
     const auto invoke = [&] {
         return paymaster_app::ResolveAlternativePaymasterRecovery(context, client, store, session, original_attempt, {});
     };
@@ -9440,6 +9536,18 @@ static void ExerciseClientRecoveryResult(ClientRecoveryReadSetup& setup, bool co
         BOOST_REQUIRE(WalletBatch{reopened.GetDatabase()}.ReadPaymasterClientFeeLedger(reloaded_ledger));
         BOOST_CHECK(SerializePaymasterSecurityObject(reloaded_ledger) == spent_ledger);
     }
+}
+
+BOOST_FIXTURE_TEST_CASE(client_refresh_accepts_late_payment_without_execution,
+                        ClientRecoveryReadSetup)
+{
+    ExerciseClientRecoveryResult(*this, true, false, false, false, false, true, false, true);
+}
+
+BOOST_FIXTURE_TEST_CASE(client_refresh_accepts_late_recovery_without_execution,
+                        ClientRecoveryReadSetup)
+{
+    ExerciseClientRecoveryResult(*this, true, false, false, false, false, false, false, true);
 }
 
 BOOST_FIXTURE_TEST_CASE(client_recovery_result_commit_failure_survives_ttl_and_exact_retry,

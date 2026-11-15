@@ -316,6 +316,10 @@ ClientResultReceipt ReceivePaymasterResult(WalletContext& context, CWallet& wall
 ClientResultReceipt ReceiveAlternativePaymasterResult(WalletContext& context, CWallet& wallet,
     PaymasterStore& store, const DigiDollar::Paymaster::PaymentSession& session,
     DigiDollar::Paymaster::AlternativeRecoveryRecord& recovery, int64_t now);
+/** Retain both result families before deeper local validation can fail, then
+ * accept already received evidence. Disabled transport preserves local reads. */
+void ReceiveAvailableClientResults(WalletContext& context, CWallet& wallet,
+    const DigiDollar::Paymaster::PaymentSession& session, int64_t now);
 /** Observe an already authorized exact payment; never sign, submit, or broadcast.
  * Returns true on completion and copies the full records before pruning can run.
  * Throws an ApplicationError on failed validation or persistence. */
