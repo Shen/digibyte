@@ -69,6 +69,7 @@ TransactionError BroadcastTransaction(NodeContext& node, const CTransactionRef t
         LogPrintf("BroadcastTransaction: Transaction %s NOT in chain, checking mempool/stempool\n", txid.ToString());
 
         if (auto mempool_tx = node.mempool->get(txid); mempool_tx) {
+            already_in_mempool = true;
             LogPrintf("BroadcastTransaction: Transaction %s found in mempool, reannouncing\n", txid.ToString());
             // There's already a transaction in the mempool with this txid. Don't
             // try to submit this transaction to the mempool (since it'll be

@@ -12,8 +12,10 @@
 #include <net.h>
 #include <net_processing.h>
 #include <netmessagemaker.h>
+#include <node/transaction.h>
 #include <protocol.h>
 #include <script/script.h>
+#include <script/standard.h>
 #include <streams.h>
 #include <sync.h>
 #include <test/util/net.h>
@@ -705,6 +707,68 @@ BOOST_AUTO_TEST_CASE(inventory_history_preserves_exact_stem_requests)
     request(CInv(MSG_DANDELION_TX, unknown->GetHash()), false);
     peerman.FinalizeNode(*peer);
     connman.ClearTestNodes();
+}
+
+
+BOOST_FIXTURE_TEST_CASE(already_pooled_transaction_reannounces_without_stem_destination, TestChain100Setup)
+{
+    auto& connman = static_cast<ConnmanTestMsg&>(*m_node.connman);
+    auto& mempool = *m_node.mempool;
+    auto& stempool = *m_node.stempool;
+    BOOST_REQUIRE(connman.DandelionRoutingEmpty());
+    BOOST_REQUIRE_EQUAL(mempool.size(), 0U);
+    BOOST_REQUIRE_EQUAL(stempool.size(), 0U);
+
+    // Spend a mature mined coin through real admission, then spend its P2WSH
+    // output so reannouncement also exercises an actual witness transaction.
+    const CScript witness_script = CScript() << OP_TRUE;
+    const CScript output_script = GetScriptForDestination(WitnessV0ScriptHash{witness_script});
+    const CAmount funding_amount = m_coinbase_txns.front()->vout[0].nValue - COIN;
+    const auto funding = MakeTransactionRef(CreateValidMempoolTransaction(
+        m_coinbase_txns.front(), 0, 1, coinbaseKey, output_script, funding_amount, /*submit=*/false));
+    {
+        LOCK(cs_main);
+        const auto accepted = m_node.chainman->ProcessTransaction(funding, /*test_accept=*/false);
+        BOOST_REQUIRE_MESSAGE(accepted.m_result_type == MempoolAcceptResult::ResultType::VALID, accepted.m_state.ToString());
+    }
+    CMutableTransaction spending;
+    spending.vin.emplace_back(COutPoint{funding->GetHash(), 0});
+    spending.vin[0].scriptWitness.stack.emplace_back(witness_script.begin(), witness_script.end());
+    spending.vout.emplace_back(funding_amount - CENT, output_script);
+    const auto transaction = MakeTransactionRef(spending);
+    BOOST_REQUIRE(transaction->HasWitness());
+    {
+        LOCK(cs_main);
+        const auto accepted = m_node.chainman->ProcessTransaction(transaction, /*test_accept=*/false);
+        BOOST_REQUIRE_MESSAGE(accepted.m_result_type == MempoolAcceptResult::ResultType::VALID, accepted.m_state.ToString());
+    }
+    const auto pooled = mempool.get(transaction->GetHash());
+    BOOST_REQUIRE(pooled);
+    std::vector<uint256> before;
+    mempool.queryHashes(before);
+    std::sort(before.begin(), before.end());
+    BOOST_REQUIRE_EQUAL(before.size(), 2U);
+
+    // With no Dandelion destination, the native fallback must reannounce the
+    // existing mempool transaction without attempting admission a second time.
+    m_node.args->ForceSetArg("-dandelion", "1");
+    BOOST_REQUIRE(m_node.args->GetBoolArg("-dandelion", false));
+    std::string error;
+    const auto result = node::BroadcastTransaction(m_node, transaction, error,
+        /*max_tx_fee=*/0, /*relay=*/true, /*wait_callback=*/false);
+    BOOST_CHECK_MESSAGE(result == TransactionError::OK, error);
+    BOOST_CHECK(error.empty());
+    std::vector<uint256> after;
+    mempool.queryHashes(after);
+    std::sort(after.begin(), after.end());
+    BOOST_CHECK(before == after);
+    const auto reannounced = mempool.get(transaction->GetHash());
+    BOOST_REQUIRE(reannounced);
+    BOOST_CHECK(reannounced == pooled);
+    BOOST_CHECK_EQUAL(reannounced->GetWitnessHash(), transaction->GetWitnessHash());
+    BOOST_CHECK(reannounced->vin[0].scriptWitness.stack == transaction->vin[0].scriptWitness.stack);
+    BOOST_CHECK_EQUAL(stempool.size(), 0U);
+    BOOST_CHECK(connman.DandelionRoutingEmpty());
 }
 
 BOOST_AUTO_TEST_SUITE_END()
