@@ -996,8 +996,8 @@ class PaymasterRPCContractsTest(DigiByteTestFramework):
         assert_raises_rpc_error(
             -4, "PAYMASTER_PROVIDER_SIGNATURE_MAY_EXIST",
             provider.cancelpaymasterquote, provider_quote["attempt_id"])
-        assert_equal(value_snapshot(
-            self.nodes[0], provider, client, recipient_wallet), signed_snapshot)
+        assert_snapshot_equal(signed_snapshot, value_snapshot(
+            self.nodes[0], provider, client, recipient_wallet))
 
         def check_public_transaction_metadata():
             # Durable commit/recovery markers remain in the wallet database,

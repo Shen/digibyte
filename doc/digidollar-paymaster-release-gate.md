@@ -6,48 +6,43 @@ implemented behavior alone does not establish release acceptance.
 
 ## Independent review follow-up (2026-11-15)
 
-Baseline: `027ece20ef158d8034c604b633fb4ad69f4d0fed`. Exact-final preflight now
-defers incomplete index/tip observations before recording a permanent conflict.
-The real-index delayed-notification regression failed against retained baseline
-product objects and passes after freshly compiling `paymasterprovider.cpp`,
-`paymasterapplication.cpp` and the wallet-security test unit: **1 case, 347
-assertions, exit 0**, including same-height reorganization and unchanged wallet
-rows/reservations while waiting. Native partial-link SHA256:
-`8ef97598a0f47d4ba8d9f53fcd17816eaac1eee054cba44e4876ba0650ea1489`.
-Commands, source/object hashes and complete failed/passing logs are retained in
-local ignored `.ai/implement-review-027/`. Retained dependencies lack complete
-transitive rebuild provenance. Full product/platform builds, full suites,
-sanitizers and Tidy remain operator/release checks.
+Baseline: `027ece20ef158d8034c604b633fb4ad69f4d0fed`; product code through
+`eef58fce8e`. The five work packages share coherent exact-final index checks,
+a guarded capacity/quote/recovery replay operation, status-bearing Qt DGB
+availability, bounded provider history observations and explicit CLI wallet
+opening. Closed quotes are not re-offered; locked exact retries add no authority.
+AUTO retains selected fallback offers while Core checks exact fee inputs.
 
-Provider replay follow-up: the capacity/quote/recovery application operation
-checks saved response authority before using one cancellation-serialized queue
-path. Six focused native cases pass with **276 assertions**, covering closed
-quotes, encrypted-wallet exact replay/new-admission refusal, drain restart,
-promoted capacity, recovery read failure and damaged capacity indexes. The
-processing, discovery-RPC and test units were freshly compiled. Native partial
-link: `8332e2c2622e6366326e3e51c1fcd5eb901c45791bd044227e0dd2b490e9110c`.
-The RPC functional cancellation assertion now uses the provider's attempt ID
-after signing and checks unchanged financial state; full functional execution
-requires an operator build of the changed daemon.
-Two subsequent focused runs also pass after freshly compiling the test unit:
-recovery-signature corruption/retained request (**83 assertions**) and closure
-after accepted user authorization (**62 assertions**). These rerun existing
-cases and are not additional independent cases. Functional Python syntax passes.
+| Actual local check | Result and scope |
+| --- | --- |
+| Native | **62 distinct selected cases, 29625 assertions, exit 0** across isolated partial-link checkpoints; counts use the latest successful run of each case. Includes 8192-entry combined quotas, bounded client-history pages, committed deltas/abort/read-failure reset, source reload, depth-239/240 archival and reorgs, user-only closure/provider-signature protection, locked replay/new-admission refusal, damaged signatures/indexes, fair dispatch, exact finals and all 38 setup cases. The final native link reran provider final commit/replay: 1 case, 563 assertions; the preceding link passed all 38 setup cases and two replay/read-failure cases (40 cases, 918 assertions). |
+| Qt | **9 distinct selected functions, exit 0**, Windows/Fusion; init/cleanup excluded. Real pool/manual locks and unknown availability retain ownership/offer choice, refresh Send eligibility and prevent a new request. Positive DGB retains the fallback pair. Includes ordinary DGB sending/validation/balance display, mint unlock/balance changes, explicit Own-DGB consent and immutable original-order restore. The final link reran the three offer-binding/consent/restore functions; the other six passed before the final fallback-pair condition change. |
+| Compilation | **18 changed/generated translation units freshly compiled**, including 13 production units, with matching final source/object hashes. All 13 production units also pass C++17 `/Zs`. MSVC 19.43/toolset 14.43, C++20 objects, Qt 5.15.10 static. Retained dependencies lack complete transitive rebuild provenance. |
+| Local controls | Working-tree dependency/cycle checks, trusted policy from `06ee1c7e8c`, all six boundary fixtures, change-record JSON, functional Python syntax and whitespace checks pass. No boundary rule, validation or checkpoint guarantee was weakened. |
 
-CLI wallet opening: freshly compiled CLI/setup-test units and all **38 setup
-cases, 784 assertions, exit 0**. Includes loaded/existing/new selection, declined
-load, concurrent load, lost successful/failed reply, broken inventory and the
-unchanged read-only status contract. Partial-link SHA256:
-`d78e9921197c3269fc8248abeb70b99ec80b35e514c238b807716de189b520a7`.
+Native partial-link SHA256:
+`92ca2ce8479c1eb54ed71013985948c5587dde67875a7972c475cc3608fff952`.
+Final Qt partial-link SHA256:
+`2dac76fd88b25da0bf8c854b69eb120045c742a42f943e8ee16f4d97398c98b7`.
+Commands, complete failed/passing logs, selections and hashes remain in local
+ignored `.ai/implement-review-027/` and `.ai/implement-review-027-qt/`, including
+`verification-final.json`. These are focused checks, not a complete suite run.
 
-Bounded history follow-up: **9 focused native cases, 27022 assertions, exit 0**,
-after freshly compiling the database, provider/recovery store, service, setup
-and affected test units. Covers 8192-entry combined quotas, client-only page
-work, concurrent typed writes, abort/read-failure reset, source candidate reload,
-pruning, atomic quote closure and depth-239/240 recovery archival. The reorg
-fixture explicitly verifies unchanged rows while the index remains ahead of a
-disconnected tip; paged drain waits also preserve all rows. Partial-link SHA256:
-`f594af28c34dd7a1137f0042a8ac14b7ac0da51a04a64393b237e65fc8fd3361`.
+The delayed-index test failed against retained baseline product objects before
+the fix. The provider index-lag fixture now asserts bounded waiting with unchanged
+rows/budget, then successful exact replay after queued index repair; it retains
+the original nonblocking deadline. Qt retests caught stale availability-only button updates and stale fee
+tooltips. Corruption fixtures restore the exact injected row before cleanup and
+explicitly retain the normal API's refusal to overwrite unreadable pool state.
+The functional cancellation assertion uses the actual provider attempt ID after
+provider signing and checks the shared financial snapshot oracle.
+
+Repository baseline, wallet/Qt/test guidance, translation policy and canonical
+Paymaster boundaries/change records governed the work. The legacy mint-widget
+ownership display is unchanged; mint collateral preflight uses explicit DGB
+availability. Complete daemon/GUI rebuilds, full native/functional/platform
+matrices, sanitizers and Tidy were **not run** and remain operator/release checks
+in the [runbook](digidollar-paymaster-testing.md#independent-review-regressions).
 
 ## Exact-final relay, checkpoint recovery and shared setup (2026-11-15)
 

@@ -994,6 +994,51 @@ atomic archive failure/retry, released admission capacity, exact replay, finance
 reconstruction and damaged archive records. This checks bounded active history;
 the retained signed evidence still occupies disk space.
 
+### Independent review regressions
+
+From the repository root after a current build, run the narrow native cases with
+the [unit-test selection](#unit-and-qt-selection) syntax:
+
+- `paymaster_wallet_security_tests/durable_client_final_executor_revalidates_authority_and_replays_exact_payment`:
+  hold real index notifications while confirming the final and after a same-height
+  reorg; require a retry with unchanged rows/reservations until index repair.
+- `closed_provider_quote_is_not_offered_again` and
+  `locked_provider_replays_exact_artifacts_but_cannot_admit_new_capacity` in that
+  suite: accepted user authorization may be closed before provider signing;
+  closed/damaged quotes are not offered; locked exact replay creates no authority.
+- `provider_history_observation_bounds_raw_pages_and_tracks_committed_changes`,
+  `provider_drain_observation_waits_for_client_history_and_reloads_candidates`,
+  both provider-history quota cases and the confirmed-recovery archival case:
+  incomplete pages wait, committed deltas/abort/reload retain correct coverage,
+  and the combined 8192-entry limit and safety depth remain enforced.
+- `paymaster_setup_tests`: CLI wallet inventory, declined/concurrent loading,
+  lost load replies and read-only status alongside existing setup/consent rules.
+
+Qt selections use `DIGIBYTE_QT_TEST_SUITE=PaymasterWidgetTests` and
+`DIGIBYTE_QT_TEST_FUNCTION=paymasterClientAvailableDgbControlsAutomaticBinding`.
+Pair it with `paymasterClientFundingBalanceChanges`,
+`paymasterClientAutomaticDgbRequiresExplicitSelection` and
+`paymasterClientRestoresOriginalOrderFromNativeStatus`. Ordinary regressions are
+`WalletTests::{walletTests,dgbBalanceBreakdown,sendValidationExplainsInvalidFields}`
+and `DigiDollarWidgetTests::{mintWidgetPreservesEncryptedWalletUnlockFlow,mintValidationUpdatesOnBalanceChange}`;
+set each function name separately. Pool/manual locks must leave ownership intact,
+preserve selected offers, refresh Send eligibility and distinguish unknown funds.
+Corruption fixtures restore the exact injected raw row before normal cleanup;
+the normal pool API must still refuse to overwrite unreadable safety state.
+
+The operator functional follow-up, using a freshly built changed daemon and CLI,
+is a multi-minute isolated Regtest run:
+
+```powershell
+# Working directory: repository root; requires the current daemon and CLI.
+python test/functional/test_runner.py --jobs=1 'wallet_paymaster_rpc.py --descriptors'
+```
+
+Require exit 0 and the provider-attempt cancellation veto after provider signing,
+with unchanged financial state. Complete product builds, functional matrices,
+sanitizers and platform checks use the existing sections above; focused partial
+links do not replace those gates.
+
 ## Coverage map
 
 Paths below are relative to `src/test/`, `src/wallet/test/`, `src/qt/test/` or

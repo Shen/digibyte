@@ -6387,6 +6387,7 @@ BOOST_FIXTURE_TEST_CASE(provider_final_commit_spends_budget_atomically,
         ProviderBudgetLedger spent;
         BOOST_REQUIRE(GetPaymasterProviderBudgetLedger(lagging_wallet, spent));
         const auto spent_bytes = SerializePaymasterSecurityObject(spent);
+        const auto before_index_wait = GetMockableDatabase(lagging_wallet).m_records;
         BOOST_REQUIRE_EQUAL(*m_node.chain->getHeight(), 0);
         const auto block = CreateBlockChain(1, Params()).front();
         struct RestoreMockTime {
@@ -6419,15 +6420,19 @@ BOOST_FIXTURE_TEST_CASE(provider_final_commit_spends_budget_atomically,
         const auto recovered = work.get();
         SyncWithValidationInterfaceQueue();
         BOOST_CHECK(ready == std::future_status::ready);
-        BOOST_CHECK_MESSAGE(recovered.broadcast, recovered.error);
-        BOOST_REQUIRE(m_node.mempool->get(final_ref->GetHash()));
+        BOOST_CHECK(!recovered.broadcast);
+        BOOST_CHECK_EQUAL(recovered.error, "PAYMASTER_TXINDEX_NOT_READY");
+        BOOST_CHECK(!m_node.mempool->get(final_ref->GetHash()));
+        BOOST_CHECK(GetMockableDatabase(lagging_wallet).m_records == before_index_wait);
         ProviderCommitRecord saved;
         BOOST_REQUIRE(lagging_store.GetProviderCommit(commit.commit_key, saved));
         BOOST_CHECK(SerializePaymasterSecurityObject(saved) == SerializePaymasterSecurityObject(commit));
         BOOST_REQUIRE(GetPaymasterProviderBudgetLedger(lagging_wallet, spent));
         BOOST_CHECK(SerializePaymasterSecurityObject(spent) == spent_bytes);
+        BOOST_REQUIRE(paymaster_app::ProviderTxIndexIsReady(lagging_wallet, false));
         const auto replay = paymaster_app::RecoverProviderCommit(lagging_wallet, lagging_store, commit, commit.committed_at + 1);
         BOOST_CHECK_MESSAGE(replay.broadcast, replay.error);
+        BOOST_REQUIRE(m_node.mempool->get(final_ref->GetHash()));
         BOOST_REQUIRE(GetPaymasterProviderBudgetLedger(lagging_wallet, spent));
         BOOST_CHECK(SerializePaymasterSecurityObject(spent) == spent_bytes);
         WITH_LOCK(m_node.mempool->cs, m_node.mempool->removeRecursive(*final_ref, MemPoolRemovalReason::CONFLICT));
