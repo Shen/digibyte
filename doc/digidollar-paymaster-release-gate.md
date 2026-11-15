@@ -4,6 +4,50 @@ There is **no complete current-revision release certification** in this record.
 The candidate below and historical checkpoints identify actual verification;
 implemented behavior alone does not establish release acceptance.
 
+## Client closure, transport retirement and durable history (2026-11-15)
+
+Review baseline: `708693223d7fef07e65f0db756b8471e90f2c197`; code through
+`a6d5c9d4b679e9464d899663d52bc60d6f78c5f7`. AP1-AP5 implement a validated
+pruned-order dismissal contract, common payment/recovery transport retirement,
+status-bearing durable DD history, atomic carrier-release backup reminders and
+one finance-event contribution rule for current and legacy aggregation. Follow-up
+checks preserved retryable history failures, ordinary state-update repair and
+the queued Qt closure contract.
+
+| Actual local check | Result and scope |
+| --- | --- |
+| Native checkpoint | **33 selected cases, 5338 assertions, exit 0** before the final ordinary DD callback follow-up; Boost seed `20261115`, fixed random context seed. Covers 300 completed transport sequences in one case, unresolved/other-wallet retention, frontend/background depth-240 recovery, depth-239/reorg/witness/commit vetoes, backup atomicity, legacy finance migration and ordinary DD/wallet database behavior. |
+| Native follow-up | **8 selected cases, 430 assertions, exit 0**, after freshly compiling the ordinary state-update callback and its fault-injection regression. Includes durable client execution, background recovery, ordinary DD confirmation/lifecycle/manual ownership and wallet database checks. These overlap the earlier selection; they are not eight additional independent security cases. |
+| Qt | **24 distinct Paymaster cases/data rows and 2 ordinary DD display cases**, exit 0, Windows/Fusion; init/cleanup excluded. Functions and limits are in the [focused runbook](digidollar-paymaster-testing.md#review-follow-up-regressions). The final partial link reran both controller functions and both ordinary DD display cases; the other GUI rows preceded the final ordinary callback follow-up. |
+| Compilation | **21 changed translation units freshly compiled** (18 native, 3 Qt); source/object SHA256 pairs match the final source. MSVC 19.43/toolset 14.43, Qt 5.15.10 static, `/std:c++20 /W3 /WX /Od /MT`. All **16 changed production units** also pass C++17 `/Zs`. These are isolated partial links with retained dependencies, without complete transitive rebuild provenance. |
+| Local controls | Trusted-base dependency/cycle/shared-Core checks, all six boundary fixtures, change-record JSON and working-tree/range/individual-commit whitespace checks pass. The initial new include cycle was removed through the existing wallet API; no boundary or checkpoint policy was relaxed. |
+
+Native checkpoint SHA256:
+`388397e68860b90b061a1df0535b0e01d0b5f30bf24752f958b6e06b7cb71167`.
+Final native follow-up SHA256:
+`63065d3ab3427c7632bb16901aa604e4eee10bcab56d95aa987d2879e9c32b47`.
+Final Qt SHA256:
+`ed47018390cf30bf089aa4b79c845fdad99c1f84e936c37e621b048d1d8bfc41`.
+Commands, selections, logs and hashes remain in the local ignored
+`.ai/implement-review-708/` and `.ai/implement-review-708-qt/` artifacts,
+including `verification-final.json` and `syntax-selection.json`.
+
+A combined Qt function selector initially ran only init/cleanup and is excluded
+from these results; named functions were subsequently executed individually.
+The lost-cancellation-response test also failed in the retained pre-change Qt
+binary (`a64f3197d723f089eab59bb8877bfd27814e55333576cc650db2dbc78f96b479`).
+It now waits for the actual queued closure operation, retaining its original
+safety/editability assertions and adding an explicit cleared-request assertion;
+all twelve recipientless-cancellation variants pass.
+
+Repository baseline guidance, `src/` and wallet-test conventions, translation
+policy, the canonical Paymaster integration boundaries and shared-Core change
+record governed this work. Complete daemon/GUI rebuilds, complete native or
+functional suites, clean restart-to-payment/network/platform matrices, sanitizers
+and Tidy/plugin jobs were **not run** and remain operator/release gates in the
+[runbook](digidollar-paymaster-testing.md). This evidence does not certify a
+complete current-revision release.
+
 ## Persistence, capacity lifetime and concurrent preparation (2026-11-15)
 
 Review baseline: `3ae51315d43a5e023f20fdca6173f2ff0f4d384f`; code through

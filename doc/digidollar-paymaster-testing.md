@@ -571,6 +571,52 @@ git diff -w $paymasterBases.official_baseline HEAD
 
 ## Review follow-up regressions
 
+For the closure/transport/history/backup/finance follow-up to review `708693223d`,
+use freshly built binaries from the candidate. The following selection covers
+nine distinct native cases, including one 300-session transport sequence:
+
+```powershell
+& ./build_msvc/x64/Release/test_digibyte.exe '--run_test=paymaster_provider_tests/provider_finance_events_are_idempotent_and_reorg_safe,provider_finance_totals_keep_models_and_capital_separate:paymaster_wallet_identity_tests/carrier_withdrawal_preview_owns_wallet_observation_lock,finance_v2_migration_pagination_reorg_and_atomicity:paymaster_application_tests/client_order_replay_uses_persisted_terms_and_existing_hash,closed_client_transport_retires_payment_and_recovery_without_capacity_leak:paymaster_wallet_security_tests/exact_wallet_persistence_requires_durable_receive_history,client_recovery_permanent_provider_loss_settles_only_after_safety_depth,client_recovery_background_completion_retires_both_transport_channels' --report_level=detailed --random=20261115
+if ($LASTEXITCODE -ne 0) { throw 'Closure and persistence regressions failed' }
+```
+
+Keep the short isolated Windows temp directory and fixed random context seed
+from the preparation instructions. Retest ordinary DD confirmation/lifecycle,
+manual ownership and wallet database behavior when changing the shared callback.
+The receive-history case includes ordinary state-update retry after a refused
+write, exact Paymaster replay and repair of missing send/receive rows. Recovery
+cases retain authority at depth 239, cover failed commit, corrupt witness and
+reorg, and settle through frontend/background only at the existing safety depth.
+
+Run Qt functions individually. A colon selects a **data row**, not several test
+functions; a combined selector can exit successfully after init/cleanup without
+executing a requested case. Verify the named PASS rows, excluding init/cleanup.
+These functions cover 24 distinct cases/data rows:
+
+```powershell
+$env:DIGIBYTE_QT_TEST_SUITE = 'PaymasterWidgetTests'
+$env:QT_QPA_PLATFORM = 'windows'
+$env:QT_STYLE_OVERRIDE = 'Fusion'
+foreach ($pmFunction in @(
+    'paymasterSendControllerClosureFreshness',
+    'paymasterSendControllerSnapshotBinding',
+    'paymasterClientNewTransferRechecksClosure',
+    'paymasterClientCompletionNoticeLifetime',
+    'paymasterClientRecipientlessCancellation'
+)) {
+    $env:DIGIBYTE_QT_TEST_FUNCTION = $pmFunction
+    & ./build_msvc/x64/Release/test_digibyte-qt.exe
+    if ($LASTEXITCODE -ne 0) { throw "Qt regression failed: $pmFunction" }
+}
+```
+
+The Core-encoder/controller contract test distinguishes pruned order dismissal
+from payment proof and rejects mixed live artifacts, extra actions and fabricated
+timestamps. The lost-cancellation-response UI test waits for the queued fresh
+observation to finish before asserting editability; it still requires an empty
+selected request and all original safety assertions.
+
+
 For current-observation pruning, maintenance history, compose input intent and
 shared durable client execution (review `b63b5ccd604fce1b7fdbf8d72c397b8c973ec1be`),
 use a freshly built candidate from the repository root, with the short isolated
