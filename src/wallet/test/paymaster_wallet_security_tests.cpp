@@ -36,6 +36,7 @@
 #include <streams.h>
 #include <test/util/index.h>
 #include <test/util/net.h>
+#include <test/util/txmempool.h>
 #include <test/util/validation.h>
 #include <wallet/paymasterintegration.h>
 #include <test/util/mining.h>
@@ -117,6 +118,47 @@ class CapacityEraseFailureDatabase : public MockableDatabase
 public:
     std::optional<size_t> fail_erase_at;
     size_t erase_count{0};
+    std::unique_ptr<DatabaseBatch> MakeBatch(bool flush_on_close = true) override
+    {
+        return std::make_unique<Batch>(*this);
+    }
+};
+
+/** Fail exactly one authority read after artifact lookup has succeeded. */
+class FinalAuthorityReadFailureDatabase : public MockableDatabase
+{
+    class Batch : public MockableBatch {
+        FinalAuthorityReadFailureDatabase& m_database;
+        DatabaseReadStatus ReadKey(DataStream&& key, DataStream& value) override
+        {
+            const SerializeData encoded{key.begin(), key.end()};
+            if (m_database.failed_key && encoded == *m_database.failed_key) {
+                m_database.failed_key.reset();
+                ++m_database.injected_reads;
+                if (m_database.failure == DatabaseReadStatus::FOUND) {
+                    value.clear();
+                    value << uint8_t{0}; // A readable, truncated authority row.
+                }
+                return m_database.failure;
+            }
+            if (!m_database.m_pass) return DatabaseReadStatus::READ_ERROR;
+            const auto found = m_database.m_records.find(encoded);
+            if (found == m_database.m_records.end()) return DatabaseReadStatus::NOT_FOUND;
+            value.clear();
+            value.write(found->second);
+            return DatabaseReadStatus::FOUND;
+        }
+    public:
+        explicit Batch(FinalAuthorityReadFailureDatabase& database)
+            : MockableBatch(database.m_records, database.m_pass, &database.m_on_write,
+                  &database.m_refuse_write, database.m_txn_pass, &database.m_fail_write_at,
+                  &database.m_write_count, &database.m_fail_commit), m_database(database) {}
+    };
+public:
+    using MockableDatabase::MockableDatabase;
+    std::optional<SerializeData> failed_key;
+    DatabaseReadStatus failure{DatabaseReadStatus::READ_ERROR};
+    size_t injected_reads{0};
     std::unique_ptr<DatabaseBatch> MakeBatch(bool flush_on_close = true) override
     {
         return std::make_unique<Batch>(*this);
@@ -7085,6 +7127,124 @@ BOOST_FIXTURE_TEST_CASE(durable_observation_skips_only_unchanged_wallet_state,
     BOOST_CHECK_EQUAL(notifications, 0U);
 }
 
+BOOST_FIXTURE_TEST_CASE(exact_final_observation_rechecks_chain_pools_and_snapshot,
+                        TestChain100Setup)
+{
+    BOOST_REQUIRE(!g_txindex);
+    struct IndexCleanup {
+        ~IndexCleanup()
+        {
+            SyncWithValidationInterfaceQueue();
+            if (g_txindex) g_txindex->Stop();
+            g_txindex.reset();
+        }
+    } index_cleanup;
+    g_txindex = std::make_unique<TxIndex>(interfaces::MakeChain(m_node), 1 << 20, true);
+    BOOST_REQUIRE(g_txindex->Init());
+    BOOST_REQUIRE(g_txindex->StartBackgroundSync());
+    IndexWaitSynced(*g_txindex);
+    wallet::CWallet wallet{m_node.chain.get(), "current-final-observation", CreateMockableWalletDatabase()};
+    BOOST_REQUIRE(wallet.LoadWallet() == DBErrors::LOAD_OK);
+    auto notifications = m_node.chain->handleNotifications(
+        std::shared_ptr<interfaces::Chain::Notifications>{&wallet, [](auto*) {}});
+    const auto transaction = m_coinbase_txns.back();
+    std::string error;
+    ExactFinalTransactionPreflight confirmed;
+    BOOST_REQUIRE_MESSAGE(PreflightExactPaymasterFinalTransaction(wallet, transaction,
+        ExactFinalTxIndexMode::NONBLOCKING, confirmed, error), error);
+    BOOST_REQUIRE(confirmed.presence == ExactFinalTransactionPresence::CONFIRMED);
+    BOOST_REQUIRE(confirmed.wallet_observation);
+    const auto empty_database = GetMockableDatabase(wallet).m_records;
+    auto forged = confirmed;
+    forged.confirmed_position++;
+    BOOST_CHECK(!ApplyExactPaymasterFinalObservation(wallet, transaction, forged, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_EXACT_FINAL_PROOF_STALE");
+    BOOST_CHECK(GetMockableDatabase(wallet).m_records == empty_database);
+    forged = confirmed;
+    forged.presence = ExactFinalTransactionPresence::NONE;
+    BOOST_CHECK(!ApplyExactPaymasterFinalObservation(wallet, transaction, forged, error));
+    BOOST_CHECK(GetMockableDatabase(wallet).m_records == empty_database);
+    CMutableTransaction substituted{*transaction};
+    substituted.vin.front().scriptWitness.stack.push_back({1});
+    BOOST_CHECK(!ApplyExactPaymasterFinalObservation(wallet, MakeTransactionRef(substituted), confirmed, error));
+    BOOST_CHECK(GetMockableDatabase(wallet).m_records == empty_database);
+    BOOST_REQUIRE_MESSAGE(ApplyExactPaymasterFinalObservation(wallet, transaction, confirmed, error), error);
+
+    // Process the real disconnect callback before applying the old preflight.
+    // Neither an existing corrected row nor a missing row may be overwritten.
+    auto* old_tip = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Tip());
+    BlockValidationState disconnected;
+    BOOST_REQUIRE_MESSAGE(m_node.chainman->ActiveChainstate().InvalidateBlock(disconnected, old_tip), disconnected.ToString());
+    SyncWithValidationInterfaceQueue();
+    BOOST_REQUIRE(WITH_LOCK(wallet.cs_wallet, return wallet.GetWalletTx(transaction->GetHash())->isInactive()));
+    const auto disconnected_database = GetMockableDatabase(wallet).m_records;
+    BOOST_CHECK(!ApplyExactPaymasterFinalObservation(wallet, transaction, confirmed, error));
+    BOOST_CHECK(GetMockableDatabase(wallet).m_records == disconnected_database);
+    wallet::CWallet unseen{m_node.chain.get(), "unseen-final-observation", CreateMockableWalletDatabase()};
+    BOOST_REQUIRE(unseen.LoadWallet() == DBErrors::LOAD_OK);
+    const auto unseen_database = GetMockableDatabase(unseen).m_records;
+    BOOST_CHECK(!ApplyExactPaymasterFinalObservation(unseen, transaction, confirmed, error));
+    BOOST_CHECK(GetMockableDatabase(unseen).m_records == unseen_database);
+
+    // Pool membership can change without a tip change. Use real transaction
+    // admission, then remove it before trying to publish its old pool state.
+    // Give txindex a connected replacement after the disconnect; an isolated
+    // disconnect deliberately leaves its old best-block summary unavailable.
+    CreateAndProcessBlock({}, CScript() << OP_TRUE);
+    IndexWaitSynced(*g_txindex);
+    const CScript witness_script = CScript() << OP_TRUE;
+    const CScript output_script = GetScriptForDestination(WitnessV0ScriptHash{witness_script});
+    const auto funding = MakeTransactionRef(CreateValidMempoolTransaction(m_coinbase_txns.front(), 0, 1,
+        coinbaseKey, output_script, m_coinbase_txns.front()->vout[0].nValue - COIN, false));
+    {
+        LOCK(cs_main);
+        const auto accepted = m_node.chainman->ProcessTransaction(funding, false);
+        BOOST_REQUIRE_MESSAGE(accepted.m_result_type == MempoolAcceptResult::ResultType::VALID, accepted.m_state.ToString());
+    }
+    ExactFinalTransactionPreflight pooled;
+    BOOST_REQUIRE_MESSAGE(PreflightExactPaymasterFinalTransaction(unseen, funding,
+        ExactFinalTxIndexMode::NONBLOCKING, pooled, error), error);
+    BOOST_REQUIRE(pooled.presence == ExactFinalTransactionPresence::MEMPOOL);
+    {
+        LOCK(cs_main);
+        LOCK(m_node.mempool->cs);
+        m_node.mempool->removeRecursive(*funding, MemPoolRemovalReason::EXPIRY);
+    }
+    BOOST_CHECK(!ApplyExactPaymasterFinalObservation(unseen, funding, pooled, error));
+    BOOST_CHECK(GetMockableDatabase(unseen).m_records == unseen_database);
+
+    ExactFinalTransactionPreflight absent;
+    BOOST_REQUIRE_MESSAGE(PreflightExactPaymasterFinalTransaction(unseen, funding,
+        ExactFinalTxIndexMode::NONBLOCKING, absent, error), error);
+    BOOST_REQUIRE(absent.presence == ExactFinalTransactionPresence::NONE);
+    {
+        LOCK(cs_main);
+        const auto accepted = m_node.chainman->ProcessTransaction(funding, false);
+        BOOST_REQUIRE_MESSAGE(accepted.m_result_type == MempoolAcceptResult::ResultType::VALID, accepted.m_state.ToString());
+    }
+    BOOST_CHECK(!ApplyExactPaymasterFinalObservation(unseen, funding, absent, error));
+    BOOST_CHECK(GetMockableDatabase(unseen).m_records == unseen_database);
+    {
+        LOCK(cs_main);
+        LOCK(m_node.mempool->cs);
+        m_node.mempool->removeRecursive(*funding, MemPoolRemovalReason::EXPIRY);
+        LOCK(m_node.stempool->cs);
+        TestMemPoolEntryHelper entry;
+        m_node.stempool->addUnchecked(entry.FromTx(funding));
+    }
+    ExactFinalTransactionPreflight stemmed;
+    BOOST_REQUIRE_MESSAGE(PreflightExactPaymasterFinalTransaction(unseen, funding,
+        ExactFinalTxIndexMode::NONBLOCKING, stemmed, error), error);
+    BOOST_REQUIRE(stemmed.presence == ExactFinalTransactionPresence::STEMPOOL);
+    {
+        LOCK(cs_main);
+        LOCK(m_node.stempool->cs);
+        m_node.stempool->removeRecursive(*funding, MemPoolRemovalReason::EXPIRY);
+    }
+    BOOST_CHECK(!ApplyExactPaymasterFinalObservation(unseen, funding, stemmed, error));
+    BOOST_CHECK(GetMockableDatabase(unseen).m_records == unseen_database);
+}
+
 BOOST_FIXTURE_TEST_CASE(quote_prevout_lookup_failure_preserves_local_authority,
                         TestChain100Setup)
 {
@@ -8739,6 +8899,52 @@ static void ExerciseDurablePaymentExecutor(TestChain100Setup& chain_setup,
         return;
     }
     client.SetBroadcastTransactions(true);
+    // The first artifact lookup succeeds. This authority row is read only by
+    // the second, complete firewall, after the native transaction preflight.
+    // A one-shot local failure must not become a durable payment conflict just
+    // because a subsequent attempt to write that conflict can read the row.
+    for (const auto failure : {DatabaseReadStatus::READ_ERROR,
+                              DatabaseReadStatus::NOT_FOUND,
+                              DatabaseReadStatus::FOUND}) {
+        BOOST_TEST_CONTEXT("durable final second authority read " << static_cast<int>(failure)) {
+            auto failing_database = std::make_unique<FinalAuthorityReadFailureDatabase>(database.m_records);
+            auto& failures = *failing_database;
+            wallet::CWallet retry{client.chain().context()->chain.get(), "executor-authority-read",
+                std::move(failing_database)};
+            BOOST_REQUIRE(retry.LoadWallet() == DBErrors::LOAD_OK);
+            retry.SetBroadcastTransactions(true);
+            DataStream authority_key;
+            authority_key << std::make_pair(DBKeys::PAYMASTER_USER_AUTH, original.attempt.commit_key);
+            failures.failed_key = SerializeData{authority_key.begin(), authority_key.end()};
+            failures.failure = failure;
+            const auto before = failures.m_records;
+            const uint256 tip = WITH_LOCK(cs_main,
+                return client.chain().context()->chainman->ActiveChain().Tip()->GetBlockHash());
+            BOOST_CHECK_EXCEPTION(paymaster_app::ExecuteDurableClientFinal(retry, final.GetHash(), now + 1,
+                nullptr, ExactFinalTxIndexMode::NONBLOCKING, ExactFinalBroadcastMode::SUBMIT_LOCAL), ApplicationError,
+                [](const ApplicationError& error) {
+                    return error.kind == ErrorKind::WALLET && error.disposition == ErrorDisposition::RECONCILE &&
+                        error.code == "PAYMASTER_USER_AUTHORIZATION_MISSING";
+                });
+            BOOST_CHECK_EQUAL(failures.injected_reads, 1U);
+            BOOST_CHECK(failures.m_records == before);
+            BOOST_CHECK(IsPaymasterInputReserved(retry, session.user_inputs.front()));
+            BOOST_CHECK(!client.chain().context()->mempool->get(final.GetHash()));
+            BOOST_CHECK(WITH_LOCK(retry.cs_wallet, return retry.GetWalletTx(final.GetHash()) == nullptr));
+            const auto replayed = paymaster_app::ExecuteDurableClientFinal(retry, final.GetHash(), now + 1,
+                nullptr, ExactFinalTxIndexMode::NONBLOCKING, ExactFinalBroadcastMode::SUBMIT_LOCAL);
+            BOOST_REQUIRE(replayed.transaction);
+            BOOST_CHECK(SerializePaymasterSecurityObject(*replayed.transaction) == bytes);
+            BOOST_CHECK(WITH_LOCK(cs_main,
+                return client.chain().context()->chainman->ActiveChain().Tip()->GetBlockHash()) == tip);
+            ClientFeeLedger retry_fees;
+            BOOST_REQUIRE(WalletBatch{retry.GetDatabase()}.ReadPaymasterClientFeeLedger(retry_fees));
+            BOOST_CHECK(SerializePaymasterSecurityObject(retry_fees) == spent_fees);
+            BOOST_CHECK(IsPaymasterInputReserved(retry, session.user_inputs.front()));
+            WITH_LOCK(client.chain().context()->mempool->cs,
+                client.chain().context()->mempool->removeRecursive(final, MemPoolRemovalReason::CONFLICT));
+        }
+    }
     // A durable signature is not a local relay-policy override. Exercise the
     // actual client executor, wallet startup and scheduled recovery against an
     // otherwise valid, absent final, retaining exact authorization and fees.
@@ -9230,6 +9436,14 @@ static void ExerciseDurablePaymentExecutor(TestChain100Setup& chain_setup,
     BOOST_CHECK(!PreflightExactPaymasterFinalTransaction(client, MakeTransactionRef(final_transaction),
         ExactFinalTxIndexMode::NONBLOCKING, observation, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_TXINDEX_NOT_READY");
+    BOOST_CHECK(observation.failure == PaymasterFinalizationFailure::LOCAL_UNAVAILABLE);
+    paymaster_app::FinalTransactionPresence rejected_presence{paymaster_app::FinalTransactionPresence::CONFIRMED};
+    PaymasterFinalizationFailure precommit_failure{PaymasterFinalizationFailure::OBSERVED_CONFLICT};
+    BOOST_CHECK(!paymaster_app::PreflightFinalPaymasterTransaction(client, MakeTransactionRef(final_transaction),
+        rejected_presence, error, ExactFinalTxIndexMode::NONBLOCKING, nullptr, &precommit_failure));
+    BOOST_CHECK(precommit_failure == PaymasterFinalizationFailure::LOCAL_UNAVAILABLE);
+    BOOST_CHECK(IsLocalPaymasterFinalizationFailure(precommit_failure));
+    BOOST_CHECK(rejected_presence == paymaster_app::FinalTransactionPresence::NONE);
     ValidationInterfaceTest::BlockConnected(ChainstateRole::NORMAL, *g_txindex, replacement, replacement_index);
     BOOST_REQUIRE(paymaster_app::ProviderTxIndexIsReady(client, false));
 }
@@ -9924,7 +10138,51 @@ static void ExerciseClientRecoveryResult(ClientRecoveryReadSetup& setup, bool co
     }
     const auto encoded = SerializePaymasterSecurityObject(result);
     const uint256 message_id{Hash(encoded)};
-    BOOST_REQUIRE(manager.EnqueueDirectMessage(45, message_id, encoded.size(), DirectPayload{result}, now));
+    AlternativeRecoverySubmit expected_submit;
+    expected_submit.request_id = session.request_id;
+    expected_submit.session_id = session.session_id;
+    expected_submit.recovery_provider_id = recovery.recovery_provider_id;
+    BOOST_REQUIRE(manager.QueueOutboundDirectMessage(45, SecurityTestId(seed, 129), 100, expected_submit, now));
+    BOOST_REQUIRE_EQUAL(manager.TakeOutboundDirectMessages(45, 1, now).size(), 1U);
+    BOOST_REQUIRE(manager.EnqueueNetworkDirectMessage(45, message_id, encoded.size(), result, now,
+        45, {1, 2, 3}, DirectAdmissionClass::RECOVERY) == DirectEnqueueResult::ACCEPTED);
+    {
+        // The provider's exact signed result arrived while the first local
+        // authority reads are unavailable. Preserve it before any application
+        // lease or historical template validation can run.
+        auto& database = GetMockableDatabase(client);
+        const auto intact = database.m_records;
+        for (int scenario{0}; scenario < 4; ++scenario) {
+            BOOST_TEST_CONTEXT("initial recovery authority read " << scenario) {
+                auto batch = database.MakeBatch();
+                if (scenario < 2) {
+                    BOOST_REQUIRE(batch->Write(std::make_pair(DBKeys::PAYMASTER_SESSION, session.request_id),
+                        uint16_t(PaymentSession::CURRENT_VERSION + scenario)));
+                } else {
+                    BOOST_REQUIRE(batch->Write(std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY, recovery.recovery_id),
+                        uint16_t(AlternativeRecoveryRecord::CURRENT_VERSION + (scenario == 3))));
+                }
+                const auto damaged = database.m_records;
+                if (scenario < 2) {
+                    BOOST_CHECK_THROW(paymaster_app::ResolvePaymasterSession(context, client,
+                        session.request_id, "refresh", {}), ApplicationError);
+                } else {
+                    BOOST_CHECK_THROW(paymaster_app::ResolveAlternativePaymasterRecovery(context,
+                        client, store, session, original_attempt, {}), ApplicationError);
+                }
+                BOOST_CHECK(database.m_records == damaged);
+                manager.PruneDirectMessages(now + DIRECT_REPLAY_TTL_SECONDS + MAX_DIRECT_MESSAGE_TTL_SECONDS + 1);
+                const auto lease = manager.LeaseRecoveryResults(session.request_id, session.session_id,
+                    recovery.recovery_provider_id, 1);
+                BOOST_REQUIRE_EQUAL(lease.Messages().size(), 1U);
+                BOOST_CHECK(lease.Messages().front().quarantined_result);
+                BOOST_CHECK(!lease.Messages().front().retained_result);
+                database.m_records = intact;
+                BOOST_CHECK(IsPaymasterInputReserved(client, session.user_inputs.front()));
+            }
+        }
+        manager.ForgetDirectPeer(45);
+    }
     if (receive_only) {
         BOOST_REQUIRE(session.attempt_ids.size() == 1);
         BOOST_CHECK(!m_node.mempool->get(*result.result.txid));
@@ -10004,7 +10262,9 @@ static void ExerciseClientRecoveryResult(ClientRecoveryReadSetup& setup, bool co
         auto invalid_result = result;
         invalid_result.result.identity_signature.back() ^= 1;
         const auto invalid_bytes = SerializePaymasterSecurityObject(invalid_result);
-        BOOST_REQUIRE(invalid_manager.EnqueueDirectMessage(45, Hash(invalid_bytes), invalid_bytes.size(), DirectPayload{invalid_result}, now));
+        BOOST_REQUIRE(invalid_manager.QueueOutboundDirectMessage(45, SecurityTestId(seed, 130), 100, expected_submit, now));
+        BOOST_REQUIRE(invalid_manager.EnqueueNetworkDirectMessage(45, Hash(invalid_bytes), invalid_bytes.size(), invalid_result,
+            now, 45, {1, 2, 3}, DirectAdmissionClass::RECOVERY) == DirectEnqueueResult::ACCEPTED);
         BOOST_CHECK_EXCEPTION(invoke(), ApplicationError,
             [](const ApplicationError& failure) {
                 return failure.kind == ErrorKind::INVALID_INPUT && failure.code == "PAYMASTER_INVALID_RESULT_SIGNATURE";
@@ -11163,7 +11423,7 @@ BOOST_AUTO_TEST_CASE(exact_wallet_persistence_requires_durable_receive_history)
     std::string error;
     BOOST_CHECK(!PersistExactPaymasterWalletTransaction(m_wallet, transaction, error));
     BOOST_CHECK(!error.empty());
-    BOOST_CHECK(IsTransientPaymasterFinalizationError(error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_WALLET_DD_STATE_UPDATE_FAILED");
     BOOST_CHECK(!WalletBatch{database}.ReadDDTransaction(txid, stored));
     BOOST_CHECK_EQUAL(refused, 2U);
 

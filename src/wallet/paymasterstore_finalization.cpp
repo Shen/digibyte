@@ -13,6 +13,7 @@
 #include <digidollar/digidollar.h>
 #include <digidollar/validation.h>
 #include <hash.h>
+#include <kernel/cs_main.h>
 #include <node/context.h>
 #include <paymaster/protocol.h>
 #include <paymaster/psbt.h>
@@ -1571,6 +1572,10 @@ bool PaymasterStore::CompleteClientConfirmedPayment(
                                          validated, error)) return false;
     ExactFinalArtifact artifact;
     ExactFinalObservation observation;
+    // Keep the active block binding stable through fee/session settlement.
+    // The exact wallet record remains necessary, but its cached depth alone
+    // cannot authorize completion after a reorg.
+    LOCK(cs_main);
     if (!DecodeExactFinalArtifact(attempt.final_transaction, attempt.final_txid, artifact, error) ||
         !ObserveExactWalletArtifact(m_wallet, artifact, observation, error) ||
         observation.confirmation_depth < DEFAULT_REORG_SAFETY_DEPTH) {

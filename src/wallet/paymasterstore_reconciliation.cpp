@@ -63,8 +63,24 @@ bool paymaster_store::internal::ObserveExactWalletArtifact(const CWallet& wallet
         error = "PAYMASTER_OBSERVED_FINAL_WITNESS_MISMATCH";
         return false;
     }
-    observation.confirmation_depth =
-        wallet.GetTxDepthInMainChain(wallet_tx->second);
+    const auto* node = wallet.chain().context();
+    if (!node || !node->chainman) {
+        error = "PAYMASTER_NODE_CONTEXT_UNAVAILABLE";
+        return false;
+    }
+    LOCK(cs_main);
+    const auto& chain = node->chainman->ActiveChain();
+    // Native wallet state may lag a disconnect or contain an interrupted old
+    // observation. Height arithmetic alone is not current confirmation evidence.
+    if (const auto* confirmed = wallet_tx->second.state<TxStateConfirmed>()) {
+        const auto* block = chain[confirmed->confirmed_block_height];
+        if (block && block->GetBlockHash() == confirmed->confirmed_block_hash)
+            observation.confirmation_depth = chain.Height() - block->nHeight + 1;
+    } else if (const auto* conflicted = wallet_tx->second.state<TxStateConflicted>()) {
+        const auto* block = chain[conflicted->conflicting_block_height];
+        if (block && block->GetBlockHash() == conflicted->conflicting_block_hash)
+            observation.confirmation_depth = -(chain.Height() - block->nHeight + 1);
+    }
     observation.in_mempool = wallet_tx->second.InMempool();
     if (observation.confirmation_depth == 0 && !observation.in_mempool) {
         const auto* node = wallet.chain().context();
@@ -212,8 +228,15 @@ bool PaymasterStore::GetSessionObservation(
     observation = {};
     error.clear();
     LOCK(m_wallet.cs_wallet);
+    LOCK(cs_main);
     observation.tip_hash = m_wallet.GetLastBlockHash();
     observation.tip_height = m_wallet.GetLastBlockHeight();
+    if (const auto* node = m_wallet.chain().context(); node && node->chainman) {
+        if (const auto* tip = node->chainman->ActiveChain().Tip()) {
+            observation.tip_hash = tip->GetBlockHash();
+            observation.tip_height = tip->nHeight;
+        }
+    }
     observation.payment.txid = session.final_txid;
     observation.recovery.txid = session.recovery_txid;
     // Tombstones deliberately retain no payment proof. A stored terminal
@@ -730,6 +753,9 @@ bool PaymasterStore::ReconcileCurrentFinalTransaction(const CTransaction& transa
     std::vector<std::string> prune;
     {
         LOCK(m_wallet.cs_wallet);
+        // The same current chain must cover both final observations and the
+        // persisted session transition. No index wait occurs in this section.
+        LOCK(cs_main);
         WalletBatch batch{m_wallet.GetDatabase()};
         std::vector<PaymentSession> sessions;
         if (!ListPaymasterFinalSessions(batch, m_wallet.GetDatabase(), txid, sessions)) {

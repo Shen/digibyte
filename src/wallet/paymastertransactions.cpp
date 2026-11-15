@@ -294,10 +294,11 @@ bool ReconcileConfirmedClientPayment(
     {
         // Copy the completed full records before tip pruning can run.
         LOCK(wallet.cs_wallet);
-        if (observed_transaction && !wallet.GetWalletTx(attempt.unsigned_txid) &&
-            !wallet.AddToWallet(observed_transaction,
-                TxStateConfirmed{observed.confirmed_block, observed.confirmed_height, observed.confirmed_position}))
-            throw ApplicationError(ErrorKind::WALLET, "PAYMASTER_OBSERVED_TRANSACTION_WRITE");
+        if (observed_transaction && !wallet.GetWalletTx(attempt.unsigned_txid)) {
+            std::string observation_error;
+            if (!ApplyExactPaymasterFinalObservation(wallet, observed_transaction, observed, observation_error))
+                throw ApplicationError(ErrorKind::WALLET, observation_error);
+        }
         if (const auto* saved = wallet.GetWalletTx(attempt.unsigned_txid)) {
             std::string persist_error;
             if (!PersistExactPaymasterWalletTransaction(wallet,
@@ -1676,16 +1677,19 @@ bool PreflightFinalPaymasterTransaction(CWallet& wallet,
                                         FinalTransactionPresence& presence,
                                         std::string& error,
                                         ExactFinalTxIndexMode txindex_mode,
-                                        std::optional<ExactFinalTransactionProof>* final_proof)
+                                        std::optional<ExactFinalTransactionProof>* final_proof,
+                                        PaymasterFinalizationFailure* failure)
 {
     if (final_proof) final_proof->reset();
     ExactFinalTransactionPreflight preflight;
     if (!PreflightExactPaymasterFinalTransaction(
             wallet, transaction, txindex_mode,
             preflight, error)) {
+        if (failure) *failure = preflight.failure;
         presence = FinalTransactionPresence::NONE;
         return false;
     }
+    if (failure) *failure = PaymasterFinalizationFailure::NONE;
     presence = preflight.presence;
     if (final_proof) *final_proof = preflight.final_proof;
     return true;
@@ -1755,9 +1759,10 @@ ClientFinalExecutionResult ExecuteDurableClientFinal(
 
     // Only an authenticated, exactly bound final can acquire a conflict marker.
     // Local availability failures leave its durable state intact for retry.
-    const auto fail = [&](const std::string& failure) -> void {
-        if (IsTransientPaymasterFinalizationError(failure)) {
-            throw ApplicationError(ErrorKind::WALLET, failure);
+    const auto fail = [&](PaymasterFinalizationFailure failure, const std::string& diagnostic) -> void {
+        if (failure != PaymasterFinalizationFailure::OBSERVED_CONFLICT) {
+            throw ApplicationError(IsLocalPaymasterFinalizationFailure(failure)
+                ? ErrorKind::WALLET : ErrorKind::REJECTED, diagnostic);
         }
         std::string persistence_error;
         const bool recorded = recovery ?
@@ -1772,17 +1777,19 @@ ClientFinalExecutionResult ExecuteDurableClientFinal(
                 persistence_error.empty() ? "PAYMASTER_FINAL_CONFLICT_NOT_PERSISTED" : persistence_error);
         }
         throw ApplicationError(ErrorKind::REJECTED,
-            failure.empty() ? "PAYMASTER_CLIENT_BROADCAST_AUTHORIZATION_INVALID" : failure);
+            diagnostic.empty() ? "PAYMASTER_CLIENT_BROADCAST_AUTHORIZATION_INVALID" : diagnostic);
     };
 
     const CTransactionRef transaction = MakeTransactionRef(artifact.transaction);
     ExactFinalTransactionPreflight preflight;
     // Index/chain waits remain outside cs_wallet. The store validator is the
     // single financial firewall for both normal and alternative client finals.
-    if (!PreflightExactPaymasterFinalTransaction(wallet, transaction, txindex_mode, preflight, error) ||
-        !store.ValidateClientDurableFinalForBroadcast(
+    if (!PreflightExactPaymasterFinalTransaction(wallet, transaction, txindex_mode, preflight, error)) {
+        fail(preflight.failure, error);
+    }
+    if (!store.ValidateClientDurableFinalForBroadcast(
             *transaction, now, preflight.final_proof ? &*preflight.final_proof : nullptr, error)) {
-        fail(error);
+        fail(PaymasterFinalizationFailure::LOCAL_AUTHORITY_INVALID, error);
     }
     if (manager) {
         if (!DrainClientSessionEquivocations(*manager, store, session, error) ||
@@ -1792,8 +1799,9 @@ ClientFinalExecutionResult ExecuteDurableClientFinal(
         }
     }
     ClientFinalExecutionResult result{transaction};
-    if (!InsertAndBroadcastPaymasterTransaction(wallet, transaction, result.already_confirmed, error, broadcast_mode)) {
-        fail(error.empty() ? "PAYMASTER_FINAL_BROADCAST_UNAVAILABLE" : error);
+    PaymasterFinalizationFailure execution_failure{PaymasterFinalizationFailure::LOCAL_UNAVAILABLE};
+    if (!InsertAndBroadcastPaymasterTransaction(wallet, transaction, result.already_confirmed, error, broadcast_mode, &execution_failure)) {
+        fail(execution_failure, error.empty() ? "PAYMASTER_FINAL_BROADCAST_UNAVAILABLE" : error);
     }
     ExactFinalTransactionPreflight observation;
     if (!PreflightExactPaymasterFinalTransaction(wallet, transaction, txindex_mode, observation, error) ||
@@ -1972,10 +1980,11 @@ bool InsertAndBroadcastPaymasterTransaction(CWallet& wallet,
                                             const CTransactionRef& transaction,
                                             bool& already_confirmed,
                                             std::string& error,
-                                            ExactFinalBroadcastMode broadcast_mode)
+                                            ExactFinalBroadcastMode broadcast_mode,
+                                            PaymasterFinalizationFailure* failure)
 {
     return InsertAndBroadcastExactPaymasterTransaction(
-        wallet, transaction, already_confirmed, error, broadcast_mode);
+        wallet, transaction, already_confirmed, error, broadcast_mode, failure);
 }
 
 // Wallet insertion precedes network broadcast so restart recovery can find the

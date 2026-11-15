@@ -77,11 +77,52 @@ enum class ExactFinalTransactionPresence {
     CONFIRMED,
 };
 
+/** Failure established by the producing operation, never by diagnostic text.
+ * Unreadable or damaged local authority is not a payment conflict. */
+enum class PaymasterFinalizationFailure {
+    NONE,
+    LOCAL_UNAVAILABLE,
+    LOCAL_AUTHORITY_INVALID,
+    TRANSACTION_REJECTED,
+    OBSERVED_CONFLICT,
+};
+
+constexpr bool IsLocalPaymasterFinalizationFailure(PaymasterFinalizationFailure failure)
+{
+    return failure != PaymasterFinalizationFailure::TRANSACTION_REJECTED &&
+           failure != PaymasterFinalizationFailure::OBSERVED_CONFLICT;
+}
+
+struct ExactFinalTransactionPreflight;
+
+/** Immutable observation issued by the exact-final preflight. Its public
+ * snapshot is informational; wallet mutation requires this bound observation
+ * and a fresh chain/pool check under the mutation locks. It grants no signing
+ * or spending authority. */
+class ExactFinalWalletObservation final {
+private:
+    friend class DigiDollar::Paymaster::ExactFinalPreflight;
+    friend bool ApplyExactPaymasterFinalObservation(CWallet&, const CTransactionRef&,
+        const ExactFinalTransactionPreflight&, std::string&, PaymasterFinalizationFailure*);
+    ExactFinalWalletObservation(const CTransactionRef& transaction,
+        const ChainstateManager& chainman, const uint256& tip,
+        const ExactFinalTransactionPreflight& snapshot);
+    CTransactionRef m_transaction;
+    const ChainstateManager* m_chainman;
+    uint256 m_tip;
+    ExactFinalTransactionPresence m_presence;
+    uint256 m_confirmed_block;
+    int m_confirmed_height;
+    int m_confirmed_position;
+    int m_confirmation_depth;
+};
+
 /** Authoritative result of checking an exact final transaction against all
  * local transaction locations and the mempool policy engine. The full raw
  * transaction, txid and wtxid are compared whenever the txid is already
  * known. */
 struct ExactFinalTransactionPreflight {
+    PaymasterFinalizationFailure failure{PaymasterFinalizationFailure::LOCAL_UNAVAILABLE};
     ExactFinalTransactionPresence presence{
         ExactFinalTransactionPresence::NONE};
     uint256 confirmed_block;
@@ -89,6 +130,7 @@ struct ExactFinalTransactionPreflight {
     int confirmed_position{-1};
     int confirmation_depth{0};
     std::optional<DigiDollar::Paymaster::ExactFinalTransactionProof> final_proof;
+    std::optional<ExactFinalWalletObservation> wallet_observation;
 };
 
 /** Shared final-transaction firewall used by RPC, recovery and background
@@ -100,6 +142,13 @@ bool PreflightExactPaymasterFinalTransaction(
     ExactFinalTxIndexMode txindex_mode,
     ExactFinalTransactionPreflight& result,
     std::string& error);
+
+/** Recheck and persist only the exact observation issued by the preflight.
+ * Does not wait for txindex or grant financial execution authority. */
+bool ApplyExactPaymasterFinalObservation(CWallet& wallet,
+    const CTransactionRef& transaction, const ExactFinalTransactionPreflight& observation,
+    std::string& error,
+    PaymasterFinalizationFailure* failure = nullptr);
 
 namespace paymaster_app {
 /** Require the index to match the current active tip, including its hash.
@@ -122,14 +171,6 @@ ClientFinalExecutionResult ExecuteDurableClientFinal(
     ExactFinalBroadcastMode broadcast_mode = ExactFinalBroadcastMode::RELAY);
 } // namespace paymaster_app
 
-/** Classify infrastructure failures at the legacy string boundary. Durable
- * results retain additional retryable storage/observation failures; callers
- * must preserve their exact authorization rather than create a replacement. */
-enum class PaymasterFinalizationStage { BEFORE_PROVIDER_COMMIT, DURABLE_RESULT };
-enum class PaymasterFinalizationFailure { LOCAL_UNAVAILABLE, REJECTED };
-PaymasterFinalizationFailure ClassifyPaymasterFinalizationFailure(
-    std::string_view error, PaymasterFinalizationStage stage = PaymasterFinalizationStage::DURABLE_RESULT);
-bool IsTransientPaymasterFinalizationError(std::string_view error);
 
 /** Persist the exact current native wallet record before acknowledging a
  * Paymaster operation. AddToWallet may retain memory after a failed write.
@@ -152,7 +193,8 @@ bool InsertAndBroadcastExactPaymasterTransaction(
     const CTransactionRef& transaction,
     bool& already_confirmed,
     std::string& error,
-    ExactFinalBroadcastMode broadcast_mode = ExactFinalBroadcastMode::RELAY);
+    ExactFinalBroadcastMode broadcast_mode = ExactFinalBroadcastMode::RELAY,
+    PaymasterFinalizationFailure* failure = nullptr);
 
 /** Revalidate and insert/broadcast the exact transaction in a durable provider
  * commit. Quote/retry expiry is not an authorization revocation mechanism and

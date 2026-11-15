@@ -380,7 +380,8 @@ bool PreflightFinalPaymasterTransaction(
     FinalTransactionPresence& presence,
     std::string& error,
     ExactFinalTxIndexMode txindex_mode = ExactFinalTxIndexMode::WAIT_FOR_SYNC,
-    std::optional<DigiDollar::Paymaster::ExactFinalTransactionProof>* final_proof = nullptr);
+    std::optional<DigiDollar::Paymaster::ExactFinalTransactionProof>* final_proof = nullptr,
+    PaymasterFinalizationFailure* failure = nullptr);
 bool MarkFinalValidationFailureRecoverable(
     PaymasterStore& store,
     const DigiDollar::Paymaster::PaymentSession& session,
@@ -411,7 +412,8 @@ bool InsertAndBroadcastPaymasterTransaction(CWallet& wallet,
                                             const CTransactionRef& transaction,
                                             bool& already_confirmed,
                                             std::string& error,
-                                            ExactFinalBroadcastMode broadcast_mode = ExactFinalBroadcastMode::RELAY);
+                                            ExactFinalBroadcastMode broadcast_mode = ExactFinalBroadcastMode::RELAY,
+                                            PaymasterFinalizationFailure* failure = nullptr);
 bool InsertAndBroadcastProviderCommit(
     CWallet& wallet,
     PaymasterStore& store,

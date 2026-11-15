@@ -122,10 +122,11 @@ ClientResultReceipt ReceiveAlternativePaymasterResult(WalletContext& context, CW
         }
         observed_final = MakeTransactionRef(
             *message->result.final_transaction);
+        PaymasterFinalizationFailure preflight_failure{PaymasterFinalizationFailure::LOCAL_UNAVAILABLE};
         if (!PreflightFinalPaymasterTransaction(
                 wallet, observed_final, observed_presence, error,
-                ExactFinalTxIndexMode::WAIT_FOR_SYNC, &observed_proof)) {
-            throw ApplicationError(IsTransientPaymasterFinalizationError(error)
+                ExactFinalTxIndexMode::WAIT_FOR_SYNC, &observed_proof, &preflight_failure)) {
+            throw ApplicationError(IsLocalPaymasterFinalizationFailure(preflight_failure)
                 ? ErrorKind::WALLET : ErrorKind::REJECTED, error);
         }
     }
@@ -144,8 +145,7 @@ ClientResultReceipt ReceiveAlternativePaymasterResult(WalletContext& context, CW
             Params(), *node->chainman, authorization_time,
             observation_time,
             final_proof, user_psbt, error)) {
-        throw ApplicationError(IsTransientPaymasterFinalizationError(error)
-            ? ErrorKind::WALLET : ErrorKind::REJECTED, error);
+        throw ApplicationError(ErrorKind::WALLET, error);
     }
 
     if (message) {
@@ -157,8 +157,7 @@ ClientResultReceipt ReceiveAlternativePaymasterResult(WalletContext& context, CW
                 trusted, parameters, Params(), *node->chainman,
                 authorization_time, observation_time,
                 final_proof, error)) {
-            throw ApplicationError(IsTransientPaymasterFinalizationError(error)
-                ? ErrorKind::WALLET : ErrorKind::REJECTED, error);
+            throw ApplicationError(ErrorKind::WALLET, error);
         }
         recovery.phase = AlternativeRecoveryPhase::FINAL_COMMITTED;
         recovery.final_transaction =
@@ -887,10 +886,11 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
             // This observation never fabricates a provider-signed result.
             observed_final = FindLocalPaymasterFinal(
                 wallet, recovery.recovery_response.manifest.unsigned_txid);
+            PaymasterFinalizationFailure preflight_failure{PaymasterFinalizationFailure::LOCAL_UNAVAILABLE};
             if (observed_final && !PreflightFinalPaymasterTransaction(
                     wallet, observed_final, observed_presence, error,
-                    ExactFinalTxIndexMode::NONBLOCKING, &observed_proof)) {
-                throw ApplicationError(IsTransientPaymasterFinalizationError(error)
+                    ExactFinalTxIndexMode::NONBLOCKING, &observed_proof, &preflight_failure)) {
+                throw ApplicationError(IsLocalPaymasterFinalizationFailure(preflight_failure)
                     ? ErrorKind::WALLET : ErrorKind::REJECTED, error);
             }
         }
@@ -909,8 +909,7 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
                 Params(), *node->chainman, authorization_time,
                 observation_time,
                 final_proof, user_psbt, error)) {
-            throw ApplicationError(IsTransientPaymasterFinalizationError(error)
-                ? ErrorKind::WALLET : ErrorKind::REJECTED, error);
+            throw ApplicationError(ErrorKind::WALLET, error);
         }
 
         if (observed_final &&
@@ -918,8 +917,7 @@ ClientRecoveryResult ResolveAlternativePaymasterRecovery(
                 CMutableTransaction{*observed_final}, observed_final->GetWitnessHash(),
                 trusted, parameters, Params(), *node->chainman,
                 authorization_time, observation_time, final_proof, error)) {
-            throw ApplicationError(IsTransientPaymasterFinalizationError(error)
-                ? ErrorKind::WALLET : ErrorKind::REJECTED, error);
+            throw ApplicationError(ErrorKind::WALLET, error);
         }
 
         // Process/retain a received signed result before local completion can

@@ -1580,8 +1580,9 @@ BOOST_AUTO_TEST_CASE(session_status_requires_current_recipient_evidence)
     BOOST_CHECK_EQUAL(std::string{observation.Status(SessionState::CANCELED_SAFE)}, "canceled");
 }
 
-BOOST_AUTO_TEST_CASE(session_payment_view_is_read_only_and_reorg_sensitive)
+BOOST_FIXTURE_TEST_CASE(session_payment_view_is_read_only_and_reorg_sensitive, PruneRegtestWalletTestingSetup)
 {
+    EnsurePruneChain(m_node);
     using namespace wallet::paymaster_rpc::internal;
     PaymasterStore store{m_wallet};
     PaymentSession session;
@@ -1601,12 +1602,16 @@ BOOST_AUTO_TEST_CASE(session_payment_view_is_read_only_and_reorg_sensitive)
     session.user_inputs = {artifacts.user_input};
     session.final_txid = attempt.final_txid;
     session.state = SessionState::CONFIRMED; // deliberately stale persisted state
+    const auto* active_tip = WITH_LOCK(cs_main, return m_node.chainman->ActiveChain().Tip());
+    BOOST_REQUIRE(active_tip);
+    const auto block_hash = active_tip->GetBlockHash();
+    const int block_height = active_tip->nHeight;
     {
         LOCK(m_wallet.cs_wallet);
         WalletBatch batch{m_wallet.GetDatabase()};
         BOOST_REQUIRE(batch.WritePaymasterAttempt(attempt));
         BOOST_REQUIRE(batch.WritePaymasterSession(session));
-        m_wallet.SetLastBlockProcessed(10, uint256S("a1"));
+        m_wallet.SetLastBlockProcessed(block_height, block_hash);
     }
     auto& database = GetMockableDatabase(m_wallet);
     const MockableData records = database.m_records;
@@ -1622,14 +1627,14 @@ BOOST_AUTO_TEST_CASE(session_payment_view_is_read_only_and_reorg_sensitive)
     {
         LOCK(m_wallet.cs_wallet);
         m_wallet.mapWallet.try_emplace(transaction->GetHash(), transaction,
-            TxStateConfirmed{uint256S("a1"), 10, 0});
+            TxStateConfirmed{block_hash, block_height, 0});
     }
     const UniValue confirmed = SessionToJSON(session, &store);
     BOOST_CHECK_EQUAL(confirmed.find_value("status").get_str(), "success");
     BOOST_CHECK(confirmed.find_value("payment_confirmed").get_bool());
     const UniValue& payment = confirmed.find_value("payment_view").find_value("payment");
     BOOST_CHECK_EQUAL(payment.find_value("confirmations").getInt<int>(), 1);
-    BOOST_CHECK_EQUAL(payment.find_value("block_hash").get_str(), uint256S("a1").GetHex());
+    BOOST_CHECK_EQUAL(payment.find_value("block_hash").get_str(), block_hash.GetHex());
     BOOST_CHECK_EQUAL(payment.find_value("recipient").find_value("vout").getInt<int>(), 0);
     {
         LOCK(m_wallet.cs_wallet);
@@ -1642,7 +1647,7 @@ BOOST_AUTO_TEST_CASE(session_payment_view_is_read_only_and_reorg_sensitive)
     BOOST_CHECK(reorged.find_value("payment_view").find_value("payment").find_value("block_hash").isNull());
     {
         LOCK(m_wallet.cs_wallet);
-        m_wallet.mapWallet.at(transaction->GetHash()).m_state = TxStateConflicted{uint256S("a1"), 10};
+        m_wallet.mapWallet.at(transaction->GetHash()).m_state = TxStateConflicted{block_hash, block_height};
     }
     BOOST_CHECK_EQUAL(SessionToJSON(session, &store).find_value("status").get_str(), "conflicted");
     {
@@ -7197,21 +7202,23 @@ BOOST_AUTO_TEST_CASE(client_legacy_recovery_fee_blocks_new_authorization)
     BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == before);
 }
 
-BOOST_AUTO_TEST_CASE(client_legacy_recovery_fee_allows_confirmed_original)
+BOOST_FIXTURE_TEST_CASE(client_legacy_recovery_fee_allows_confirmed_original, PruneRegtestWalletTestingSetup)
 {
+    EnsurePruneChain(m_node);
     ScopedRecoveryMockTime time{1000};
     PaymasterStore store{m_wallet};
     PaymentSession session;
     ValidClientResultArtifacts artifacts;
     SeedLegacyClientRecovery(m_wallet, session, artifacts);
-    LOCK(m_wallet.cs_wallet);
     // After the reorg the original payment wins, even without a provider reply.
-    m_wallet.SetLastBlockProcessed(DEFAULT_REORG_SAFETY_DEPTH, uint256S("a1"));
-    BOOST_REQUIRE(m_wallet.AddToWallet(MakeTransactionRef(artifacts.final_transaction),
-        TxStateConfirmed{uint256S("a1"), 1, 0}));
+    SetFinalWalletObservation(m_wallet, artifacts.final_transaction, DEFAULT_REORG_SAFETY_DEPTH);
+    LOCK(m_wallet.cs_wallet);
     std::string error;
     bool completed{false};
-    CheckPaymasterWriteFailures(m_wallet, 3,
+    BOOST_CHECK(!m_wallet.IsWalletFlagSet(WALLET_FLAG_PAYMASTER_AUTHORIZATION));
+    // This historical fixture also needs the authorization flag migration:
+    // attempt, session, fee ledger, and wallet flags share the same commit.
+    CheckPaymasterWriteFailures(m_wallet, 4,
         [&](std::string& failure) {
             return store.CompleteClientConfirmedPayment(session.request_id,
                 artifacts.attempt.attempt_id, 1000, completed, failure);
@@ -7221,6 +7228,7 @@ BOOST_AUTO_TEST_CASE(client_legacy_recovery_fee_allows_confirmed_original)
     BOOST_REQUIRE_MESSAGE(store.ReconcileFinalSessionsAtTip(1000, error), error);
     BOOST_REQUIRE(store.GetSessionByRequestId(session.request_id, session));
     BOOST_CHECK(session.state == SessionState::CONFIRMED);
+    BOOST_CHECK(m_wallet.IsWalletFlagSet(WALLET_FLAG_PAYMASTER_AUTHORIZATION));
     ClientFeeLedger ledger;
     BOOST_REQUIRE(GetPaymasterClientFeeLedger(m_wallet, ledger));
     BOOST_REQUIRE_EQUAL(ledger.reservations.size(), 1U);
@@ -7266,8 +7274,9 @@ BOOST_AUTO_TEST_CASE(client_legacy_recovery_fee_allows_late_provider_result)
     BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == before_replay);
 }
 
-BOOST_AUTO_TEST_CASE(client_confirmed_payment_without_provider_result)
+BOOST_FIXTURE_TEST_CASE(client_confirmed_payment_without_provider_result, PruneRegtestWalletTestingSetup)
 {
+    EnsurePruneChain(m_node);
     PaymasterStore store{m_wallet};
     PaymentSession session;
     std::string error;
@@ -7300,12 +7309,19 @@ BOOST_AUTO_TEST_CASE(client_confirmed_payment_without_provider_result)
     BOOST_REQUIRE(store.CompleteClientConfirmedPayment(request_id, attempt.attempt_id, 1000, completed, error));
     BOOST_CHECK(!completed);
     const auto transaction = MakeTransactionRef(artifacts.final_transaction);
-    m_wallet.SetLastBlockProcessed(1, uint256S("a1"));
-    BOOST_REQUIRE(m_wallet.AddToWallet(transaction, TxStateConfirmed{uint256S("a1"), 1, 0}));
+    SetFinalWalletObservation(m_wallet, artifacts.final_transaction, 1);
     BOOST_REQUIRE(store.CompleteClientConfirmedPayment(request_id, attempt.attempt_id, 1000, completed, error));
     BOOST_CHECK(!completed);
-    m_wallet.SetLastBlockProcessed(DEFAULT_REORG_SAFETY_DEPTH, uint256S("a2"));
+    SetFinalWalletObservation(m_wallet, artifacts.final_transaction, DEFAULT_REORG_SAFETY_DEPTH);
     const auto before = GetMockableDatabase(m_wallet).m_records;
+    const auto active_state = m_wallet.mapWallet.at(transaction->GetHash()).m_state;
+    auto stale_state = *m_wallet.mapWallet.at(transaction->GetHash()).state<TxStateConfirmed>();
+    stale_state.confirmed_block_hash = uint256S("a2");
+    m_wallet.mapWallet.at(transaction->GetHash()).m_state = stale_state;
+    BOOST_CHECK(!store.CompleteClientConfirmedPayment(request_id, attempt.attempt_id, 1000, completed, error));
+    BOOST_CHECK(!completed);
+    BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == before);
+    m_wallet.mapWallet.at(transaction->GetHash()).m_state = active_state;
     CMutableTransaction wrong_witness{*transaction};
     wrong_witness.vin[0].scriptWitness.stack[0][0] ^= 1;
     m_wallet.mapWallet.at(transaction->GetHash()).tx = MakeTransactionRef(wrong_witness);
@@ -7329,6 +7345,13 @@ BOOST_AUTO_TEST_CASE(client_confirmed_payment_without_provider_result)
     PaymasterSessionObservation observation;
     BOOST_REQUIRE_MESSAGE(store.GetSessionObservation(session, observation, error), error);
     BOOST_CHECK(observation.PaymentConfirmed(session.state));
+    // A terminal session must not turn an old native block binding into a
+    // receipt while a disconnect notification is delayed.
+    m_wallet.mapWallet.at(transaction->GetHash()).m_state = stale_state;
+    BOOST_REQUIRE_MESSAGE(store.GetSessionObservation(session, observation, error), error);
+    BOOST_CHECK(!observation.PaymentConfirmed(session.state));
+    BOOST_CHECK_EQUAL(observation.payment.confirmations, 0);
+    m_wallet.mapWallet.at(transaction->GetHash()).m_state = active_state;
     BOOST_CHECK(!batch.HasPaymasterResult(attempt.commit_key));
     BOOST_REQUIRE(batch.ReadPaymasterClientFeeLedger(ledger));
     BOOST_CHECK(ledger.reservations.front().state == BudgetReservationState::SPENT);
@@ -7364,21 +7387,14 @@ BOOST_FIXTURE_TEST_CASE(client_tip_reconciles_payment_without_provider_reply, Pr
     BOOST_REQUIRE(store.ReconcileFinalSessionsAtTip(1000, error));
     BOOST_REQUIRE(store.GetSessionByRequestId(session.request_id, session));
     BOOST_CHECK(session.final_txid.IsNull());
-    {
-        LOCK(m_wallet.cs_wallet);
-        m_wallet.SetLastBlockProcessed(1, uint256S("a1"));
-        BOOST_REQUIRE(m_wallet.AddToWallet(transaction, TxStateInMempool{}));
-    }
+    SetFinalWalletObservation(m_wallet, artifacts.final_transaction, 0, true);
     BOOST_REQUIRE(store.ReconcileFinalSessionsAtTip(1000, error));
-    {
-        LOCK(m_wallet.cs_wallet);
-        m_wallet.mapWallet.at(transaction->GetHash()).m_state = TxStateConfirmed{uint256S("a1"), 1, 0};
-    }
+    SetFinalWalletObservation(m_wallet, artifacts.final_transaction, 1);
     BOOST_REQUIRE(store.ReconcileFinalSessionsAtTip(1000, error));
     BOOST_REQUIRE(store.GetSessionByRequestId(session.request_id, session));
     BOOST_CHECK(session.final_txid.IsNull());
+    SetFinalWalletObservation(m_wallet, artifacts.final_transaction, DEFAULT_REORG_SAFETY_DEPTH);
     LOCK(m_wallet.cs_wallet);
-    m_wallet.SetLastBlockProcessed(DEFAULT_REORG_SAFETY_DEPTH, uint256S("a2"));
     // The same txid with a tampered final witness is never a payment receipt.
     const auto before = GetMockableDatabase(m_wallet).m_records;
     CMutableTransaction wrong_witness{*transaction};
@@ -7414,19 +7430,16 @@ BOOST_FIXTURE_TEST_CASE(client_tip_reconciles_payment_without_provider_reply, Pr
     BOOST_CHECK(ledger.reservations.front().state == BudgetReservationState::SPENT);
 }
 
-BOOST_AUTO_TEST_CASE(client_recovery_reconciles_confirmed_original_payment)
+BOOST_FIXTURE_TEST_CASE(client_recovery_reconciles_confirmed_original_payment, PruneRegtestWalletTestingSetup)
 {
+    EnsurePruneChain(m_node);
     ScopedRecoveryMockTime time{1000};
     PaymasterStore store{m_wallet};
     PaymentSession session;
     ValidClientResultArtifacts artifacts;
     SeedResultlessClientPayment(m_wallet, "550e8400-e29b-41d4-a716-446655440099", session, artifacts);
     const auto transaction = MakeTransactionRef(artifacts.final_transaction);
-    {
-        LOCK(m_wallet.cs_wallet);
-        m_wallet.SetLastBlockProcessed(DEFAULT_REORG_SAFETY_DEPTH, uint256S("a1"));
-        BOOST_REQUIRE(m_wallet.AddToWallet(transaction, TxStateConfirmed{uint256S("a1"), 1, 0}));
-    }
+    SetFinalWalletObservation(m_wallet, artifacts.final_transaction, 1);
     WalletContext context;
     context.chain = m_node.chain.get();
     context.args = m_node.args;
@@ -7445,6 +7458,9 @@ BOOST_AUTO_TEST_CASE(client_recovery_reconciles_confirmed_original_payment)
         BOOST_FAIL(error.write());
     }
     BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == before);
+    // Confirmation advances after the read-only refresh, before the recovery
+    // request must discover that the original payment already won.
+    SetFinalWalletObservation(m_wallet, artifacts.final_transaction, DEFAULT_REORG_SAFETY_DEPTH);
     request.params = UniValue{UniValue::VARR};
     request.params.push_back(lookup);
     request.params.push_back("cancel_to_self");
@@ -8158,45 +8174,6 @@ BOOST_AUTO_TEST_CASE(budgetless_exact_commit_is_never_executable)
     BOOST_CHECK_EQUAL(error, "PAYMASTER_BUDGET_RESERVATION_MISSING");
 }
 
-BOOST_AUTO_TEST_CASE(transient_finalization_errors_remain_retryable)
-{
-    struct FailureCase {
-        const char* error;
-        bool before_commit;
-        bool durable_result;
-    };
-    const FailureCase cases[]{
-        {"PAYMASTER_NODE_CONTEXT_UNAVAILABLE", true, true},
-        {"PAYMASTER_TXINDEX_NOT_READY", true, true},
-        {"PAYMASTER_EXACT_FINAL_PROOF_STALE", true, true},
-        {"PAYMASTER_NODE_RUNTIME_UNAVAILABLE", false, true},
-        {"PAYMASTER_FINAL_BLOCK_READ", false, true},
-        {"PAYMASTER_WALLET_TRANSACTION_DATABASE_WRITE", false, true},
-        {"PAYMASTER_RECOVERY_USER_PREVOUT_NOT_FOUND", false, true},
-        {"PAYMASTER_FINAL_MEMPOOL_POLICY", false, true},
-        {"PAYMASTER_FINAL_BROADCAST_UNAVAILABLE", false, true},
-        {"PAYMASTER_FINAL_TRANSACTION_CONFLICT", false, false},
-        {"PAYMASTER_FINAL_WITNESS_CONFLICT", false, false},
-        {"PAYMASTER_FINAL_MEMPOOL_REJECTED: bad-txns-inputs-missingorspent", false, false},
-        {"PAYMASTER_FINAL_TRANSACTION_MISSING", false, false},
-        {"PAYMASTER_FUTURE_UNKNOWN_FAILURE", false, false},
-        {"", false, false},
-    };
-    for (const auto& row : cases) {
-        BOOST_TEST_CONTEXT("finalization error=" << row.error) {
-            BOOST_CHECK(ClassifyPaymasterFinalizationFailure(
-                row.error, PaymasterFinalizationStage::BEFORE_PROVIDER_COMMIT) ==
-                (row.before_commit ? PaymasterFinalizationFailure::LOCAL_UNAVAILABLE
-                                   : PaymasterFinalizationFailure::REJECTED));
-            BOOST_CHECK(ClassifyPaymasterFinalizationFailure(
-                row.error, PaymasterFinalizationStage::DURABLE_RESULT) ==
-                (row.durable_result ? PaymasterFinalizationFailure::LOCAL_UNAVAILABLE
-                                    : PaymasterFinalizationFailure::REJECTED));
-            BOOST_CHECK_EQUAL(IsTransientPaymasterFinalizationError(row.error), row.durable_result);
-        }
-    }
-}
-
 BOOST_AUTO_TEST_CASE(shared_final_preflight_rejects_missing_transaction)
 {
     ExactFinalTransactionPreflight preflight;
@@ -8204,6 +8181,7 @@ BOOST_AUTO_TEST_CASE(shared_final_preflight_rejects_missing_transaction)
     BOOST_CHECK(!PreflightExactPaymasterFinalTransaction(
         m_wallet, {}, ExactFinalTxIndexMode::NONBLOCKING, preflight, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_FINAL_TRANSACTION_MISSING");
+    BOOST_CHECK(preflight.failure == PaymasterFinalizationFailure::LOCAL_AUTHORITY_INVALID);
     BOOST_CHECK(preflight.presence == ExactFinalTransactionPresence::NONE);
     BOOST_CHECK(!preflight.final_proof);
 
@@ -8211,6 +8189,7 @@ BOOST_AUTO_TEST_CASE(shared_final_preflight_rejects_missing_transaction)
     BOOST_CHECK(!PreflightExactPaymasterFinalTransaction(
         m_wallet, {}, ExactFinalTxIndexMode::WAIT_FOR_SYNC, preflight, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_FINAL_TRANSACTION_MISSING");
+    BOOST_CHECK(preflight.failure == PaymasterFinalizationFailure::LOCAL_AUTHORITY_INVALID);
     BOOST_CHECK(preflight.presence == ExactFinalTransactionPresence::NONE);
     BOOST_CHECK(!preflight.final_proof);
 }
@@ -9378,6 +9357,84 @@ BOOST_AUTO_TEST_CASE(client_result_status_getter_preserves_absence_and_bool_comp
     }
 }
 
+BOOST_AUTO_TEST_CASE(client_expected_result_quarantine_survives_initial_authority_read_failure)
+{
+    ScopedRecoveryMockTime time{110};
+    PaymentSession session;
+    ValidClientResultArtifacts artifacts;
+    SeedClientViewPayment(*this, session, artifacts);
+    PaymasterStore store{m_wallet};
+    auto& database = GetMockableDatabase(m_wallet);
+    const auto intact = database.m_records;
+    WalletContext context;
+    context.chain = m_node.chain.get();
+    context.args = m_node.args;
+    for (int scenario{0}; scenario < 5; ++scenario) {
+        BOOST_TEST_CONTEXT("initial authority read " << scenario) {
+            database.m_records = intact;
+            SetMockTime(110);
+            Manager manager{true};
+            context.paymaster = &manager;
+            PaymasterResultMessage message;
+            message.request_id = session.request_id;
+            message.session_id = session.session_id;
+            message.result = MakeClientViewResult(artifacts);
+            const auto bytes = SerializePaymasterTestObject(message);
+            const uint256 id{Hash(bytes)};
+            PaymasterSubmit submit;
+            submit.provider_id = artifacts.attempt.provider_id;
+            submit.request_id = session.request_id;
+            submit.session_id = session.session_id;
+            BOOST_REQUIRE(manager.QueueOutboundDirectMessage(41, uint256S("a200"), 100, submit, 110));
+            BOOST_REQUIRE(manager.EnqueueNetworkDirectMessage(41, id, bytes.size(), message, 110,
+                41, {1, 2, 3}, DirectAdmissionClass::RESPONSE) == DirectEnqueueResult::ACCEPTED);
+            if (scenario == 0) {
+                database.m_pass = false;
+            } else {
+                auto batch = database.MakeBatch();
+                if (scenario <= 2)
+                    BOOST_REQUIRE(batch->Write(std::make_pair(DBKeys::PAYMASTER_SESSION, session.request_id),
+                        uint16_t(PaymentSession::CURRENT_VERSION + (scenario == 2))));
+                else
+                    BOOST_REQUIRE(batch->Write(std::make_pair(DBKeys::PAYMASTER_ATTEMPT, artifacts.attempt.attempt_id),
+                        uint16_t(ProviderAttempt::CURRENT_VERSION + (scenario == 4))));
+            }
+            const auto damaged = database.m_records;
+            BOOST_CHECK_THROW(paymaster_app::ProcessPaymasterResult(context, m_wallet, session.request_id), ApplicationError);
+            database.m_pass = true;
+            BOOST_CHECK(database.m_records == damaged);
+            manager.ForgetDirectPeer(41);
+            SetMockTime(110 + DIRECT_REPLAY_TTL_SECONDS + MAX_DIRECT_MESSAGE_TTL_SECONDS + 1);
+            PaymasterCapacityRequest unrelated;
+            unrelated.provider_id = artifacts.attempt.provider_id;
+            unrelated.request_id = "550e8400-e29b-41d4-a716-446655440099";
+            unrelated.session_id = uint256S("a299");
+            BOOST_REQUIRE(manager.EnqueueDirectMessage(42, uint256S("a298"), 100, unrelated, GetTime()));
+            BOOST_REQUIRE(manager.AcknowledgeDirectMessagesIfPresent({uint256S("a298")}));
+            manager.PruneDirectMessages(GetTime());
+            BOOST_REQUIRE_EQUAL(manager.DirectMessageCount(), 1U);
+            {
+                const auto lease = manager.LeaseResults(session.request_id, session.session_id, artifacts.attempt.provider_id, 1);
+                BOOST_REQUIRE_EQUAL(lease.Messages().size(), 1U);
+                BOOST_CHECK(lease.Messages().front().quarantined_result);
+                BOOST_CHECK(!lease.Messages().front().retained_result);
+            }
+            database.m_records = intact;
+            BOOST_CHECK(IsPaymasterInputReserved(m_wallet, artifacts.user_input));
+            const auto accepted = paymaster_app::ProcessPaymasterResult(context, m_wallet, session.request_id);
+            BOOST_CHECK(accepted.processed.value_or(false));
+            BOOST_CHECK_EQUAL(manager.DirectMessageCount(), 0U);
+            PaymasterResult saved;
+            BOOST_REQUIRE(store.GetProviderResult(artifacts.attempt.commit_key, saved));
+            BOOST_CHECK(SerializePaymasterTestObject(saved) == SerializePaymasterTestObject(message.result));
+            const auto committed = database.m_records;
+            BOOST_CHECK(!paymaster_app::ProcessPaymasterResult(context, m_wallet, session.request_id).processed.value_or(false));
+            BOOST_CHECK(database.m_records == committed);
+            BOOST_CHECK(IsPaymasterInputReserved(m_wallet, artifacts.user_input));
+        }
+    }
+}
+
 BOOST_AUTO_TEST_CASE(client_result_artifact_failure_retains_incoming_message)
 {
     ScopedRecoveryMockTime time{110};
@@ -9778,18 +9835,18 @@ BOOST_AUTO_TEST_CASE(client_final_preflight_failure_retains_incoming_message)
     BOOST_CHECK(retained.front().message_id == Hash(bytes));
 }
 
-BOOST_AUTO_TEST_CASE(confirmed_client_payment_bypasses_prior_result_read)
+BOOST_FIXTURE_TEST_CASE(confirmed_client_payment_bypasses_prior_result_read, PruneRegtestWalletTestingSetup)
 {
+    EnsurePruneChain(m_node);
     ScopedRecoveryMockTime time{110};
     PaymentSession session;
     ValidClientResultArtifacts artifacts;
     SeedClientViewPayment(*this, session, artifacts);
     const auto transaction = MakeTransactionRef(artifacts.final_transaction);
     const auto key = std::make_pair(DBKeys::PAYMASTER_RESULT, artifacts.attempt.commit_key);
+    SetFinalWalletObservation(m_wallet, artifacts.final_transaction, DEFAULT_REORG_SAFETY_DEPTH);
     {
         LOCK(m_wallet.cs_wallet);
-        m_wallet.SetLastBlockProcessed(DEFAULT_REORG_SAFETY_DEPTH, uint256S("a1"));
-        BOOST_REQUIRE(m_wallet.AddToWallet(transaction, TxStateConfirmed{uint256S("a1"), 1, 0}));
         BOOST_REQUIRE(m_wallet.GetDatabase().MakeBatch()->Write(key, uint16_t(PaymasterResult::CURRENT_VERSION + 1)));
     }
     Manager manager{true};
@@ -9816,20 +9873,37 @@ BOOST_AUTO_TEST_CASE(confirmed_client_payment_bypasses_prior_result_read)
         DatabaseReadStatus::UNSUPPORTED_VERSION);
 }
 
-BOOST_AUTO_TEST_CASE(client_observed_payment_retires_result_only_after_durable_confirmation)
+BOOST_FIXTURE_TEST_CASE(client_observed_payment_retires_result_only_after_durable_confirmation, PruneRegtestWalletTestingSetup)
 {
+    EnsurePruneChain(m_node);
     ScopedRecoveryMockTime time{110};
     PaymentSession session;
     ValidClientResultArtifacts artifacts;
     SeedClientViewPayment(*this, session, artifacts);
     const auto transaction = MakeTransactionRef(artifacts.final_transaction);
+    SetFinalWalletObservation(m_wallet, artifacts.final_transaction, DEFAULT_REORG_SAFETY_DEPTH);
+    const auto confirmed_state = WITH_LOCK(m_wallet.cs_wallet,
+        return m_wallet.mapWallet.at(transaction->GetHash()).m_state);
+    auto& database = GetMockableDatabase(m_wallet);
+    // The observation helper changes the native state in memory. Persist that
+    // independent wallet repair before testing the financial commit boundary.
+    // It must change only this exact native transaction row.
+    auto normalized = database.m_records;
+    DataStream native_key;
+    native_key << std::make_pair(DBKeys::TX, transaction->GetHash());
+    CDataStream native_value{SER_DISK, CLIENT_VERSION};
     {
         LOCK(m_wallet.cs_wallet);
-        m_wallet.SetLastBlockProcessed(DEFAULT_REORG_SAFETY_DEPTH, uint256S("a1"));
-        BOOST_REQUIRE(m_wallet.AddToWallet(transaction, TxStateConfirmed{uint256S("a1"), 1, 0}));
+        native_value << m_wallet.mapWallet.at(transaction->GetHash());
     }
-    auto& database = GetMockableDatabase(m_wallet);
+    normalized[SerializeData{native_key.begin(), native_key.end()}] =
+        SerializeData{native_value.begin(), native_value.end()};
+    BOOST_REQUIRE(normalized != database.m_records);
+    std::string normalization_error;
+    BOOST_REQUIRE_MESSAGE(PersistExactPaymasterWalletTransaction(m_wallet, transaction, normalization_error), normalization_error);
+    BOOST_CHECK(database.m_records == normalized);
     const auto original = database.m_records;
+    const uint64_t original_flags = m_wallet.GetWalletFlags();
     WalletContext context;
     context.chain = m_node.chain.get();
     context.args = m_node.args;
@@ -9837,6 +9911,11 @@ BOOST_AUTO_TEST_CASE(client_observed_payment_retires_result_only_after_durable_c
         BOOST_TEST_CONTEXT("observed payment completion boundary " << scenario) {
             SetMockTime(110);
             database.m_records = original;
+            BOOST_REQUIRE(m_wallet.LoadWalletFlags(original_flags));
+            uint64_t stored_flags{0};
+            BOOST_REQUIRE(database.MakeBatch()->Read(DBKeys::FLAGS, stored_flags));
+            BOOST_CHECK_EQUAL(stored_flags, original_flags);
+            BOOST_CHECK_EQUAL(m_wallet.GetWalletFlags(), stored_flags);
             Manager manager{true};
             context.paymaster = &manager;
             PaymasterResultMessage message;
@@ -9852,6 +9931,7 @@ BOOST_AUTO_TEST_CASE(client_observed_payment_retires_result_only_after_durable_c
                 BOOST_CHECK_THROW(paymaster_app::ProcessPaymasterResult(context, m_wallet, session.request_id), ApplicationError);
                 database.ClearFailureInjection();
                 BOOST_CHECK(database.m_records == original);
+                BOOST_CHECK_EQUAL(m_wallet.GetWalletFlags(), original_flags);
                 BOOST_CHECK(IsPaymasterInputReserved(m_wallet, artifacts.user_input));
                 BOOST_CHECK_EQUAL(manager.DirectMessageCount(), 1U);
                 SetMockTime(110 + DIRECT_REPLAY_TTL_SECONDS + MAX_DIRECT_MESSAGE_TTL_SECONDS + 1);
@@ -9913,7 +9993,7 @@ BOOST_AUTO_TEST_CASE(client_observed_payment_retires_result_only_after_durable_c
             BOOST_REQUIRE_EQUAL(manager.DirectMessageCount(), 1U);
             {
                 LOCK(m_wallet.cs_wallet);
-                m_wallet.mapWallet.at(transaction->GetHash()).m_state = TxStateConfirmed{uint256S("a1"), 1, 0};
+                m_wallet.mapWallet.at(transaction->GetHash()).m_state = confirmed_state;
             }
             const auto terminal = paymaster_app::ProcessPaymasterResult(context, m_wallet, session.request_id);
             BOOST_CHECK(terminal.processed.value_or(false));

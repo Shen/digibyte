@@ -312,6 +312,7 @@ bool PreflightExactPaymasterFinalTransactionImpl(
     result = {};
     error.clear();
     if (!transaction) {
+        result.failure = PaymasterFinalizationFailure::LOCAL_AUTHORITY_INVALID;
         error = "PAYMASTER_FINAL_TRANSACTION_MISSING";
         return false;
     }
@@ -325,6 +326,7 @@ bool PreflightExactPaymasterFinalTransactionImpl(
         node->mempool->get(transaction->GetHash());
     if (mempool_transaction) {
         if (!MatchDurableFinalTransaction(mempool_transaction, transaction, error)) {
+            result.failure = PaymasterFinalizationFailure::OBSERVED_CONFLICT;
             return false;
         }
         result.presence = ExactFinalTransactionPresence::MEMPOOL;
@@ -335,6 +337,7 @@ bool PreflightExactPaymasterFinalTransactionImpl(
             node->stempool->get(transaction->GetHash());
         if (stem_transaction) {
             if (!MatchDurableFinalTransaction(stem_transaction, transaction, error)) {
+                result.failure = PaymasterFinalizationFailure::OBSERVED_CONFLICT;
                 return false;
             }
             result.presence = ExactFinalTransactionPresence::STEMPOOL;
@@ -372,6 +375,7 @@ bool PreflightExactPaymasterFinalTransactionImpl(
         }
         if (confirmed) {
             if (!MatchDurableFinalTransaction(known, transaction, error)) {
+                result.failure = PaymasterFinalizationFailure::OBSERVED_CONFLICT;
                 return false;
             }
             CBlock block;
@@ -385,9 +389,12 @@ bool PreflightExactPaymasterFinalTransactionImpl(
                 [&](const CTransactionRef& candidate) {
                     return candidate->GetHash() == transaction->GetHash();
                 });
-            if (position == block.vtx.end() ||
-                !MatchDurableFinalTransaction(*position, transaction, error)) {
-                if (error.empty()) error = "PAYMASTER_FINAL_TRANSACTION_CONFLICT";
+            if (position == block.vtx.end()) {
+                error = "PAYMASTER_FINAL_BLOCK_READ";
+                return false;
+            }
+            if (!MatchDurableFinalTransaction(*position, transaction, error)) {
+                result.failure = PaymasterFinalizationFailure::OBSERVED_CONFLICT;
                 return false;
             }
             result.presence = ExactFinalTransactionPresence::CONFIRMED;
@@ -414,12 +421,20 @@ bool PreflightExactPaymasterFinalTransactionImpl(
     }
     if (preflight.m_result_type == MempoolAcceptResult::ResultType::MEMPOOL_ENTRY) {
         const CTransactionRef accepted = node->mempool->get(transaction->GetHash());
-        if (!MatchDurableFinalTransaction(accepted, transaction, error)) return false;
+        if (!accepted) {
+            error = "PAYMASTER_EXACT_FINAL_PROOF_STALE";
+            return false;
+        }
+        if (!MatchDurableFinalTransaction(accepted, transaction, error)) {
+            result.failure = PaymasterFinalizationFailure::OBSERVED_CONFLICT;
+            return false;
+        }
         result.presence = ExactFinalTransactionPresence::MEMPOOL;
         return true;
     }
     if (preflight.m_result_type ==
         MempoolAcceptResult::ResultType::DIFFERENT_WITNESS) {
+        result.failure = PaymasterFinalizationFailure::OBSERVED_CONFLICT;
         error = "PAYMASTER_FINAL_WITNESS_CONFLICT";
         return false;
     }
@@ -431,13 +446,22 @@ bool PreflightExactPaymasterFinalTransactionImpl(
     }
     error = strprintf("PAYMASTER_FINAL_MEMPOOL_REJECTED: %s",
                       preflight.m_state.ToString());
+    // A policy/runtime failure or an as-yet unclassified validation outcome
+    // must not acquire conflict authority. Typed validation failures still
+    // reject the transaction, but only a native exact mismatch above proves
+    // an observed conflict with the retained final.
+    if (preflight.m_state.IsInvalid() &&
+        preflight.m_state.GetResult() != TxValidationResult::TX_NO_MEMPOOL) {
+        result.failure = PaymasterFinalizationFailure::TRANSACTION_REJECTED;
+    }
     return false;
 }
 
 bool AddExactDurableTransactionToWallet(CWallet& wallet,
                                         const CTransactionRef& transaction,
                                         const TxState& state,
-                                        std::string& error)
+                                        std::string& error,
+                                        PaymasterFinalizationFailure* failure)
 {
     // cs_wallet is recursive. Keep it across the exact-byte check and both
     // AddToWallet calls so another wallet notification cannot insert a
@@ -448,6 +472,7 @@ bool AddExactDurableTransactionToWallet(CWallet& wallet,
     const CWalletTx* existing = wallet.GetWalletTx(transaction->GetHash());
     if (existing) {
         if (!MatchDurableFinalTransaction(existing->tx, transaction, error)) {
+            if (failure) *failure = PaymasterFinalizationFailure::OBSERVED_CONFLICT;
             return false;
         }
         const bool same_type = existing->m_state.index() == state.index();
@@ -609,6 +634,7 @@ public:
     {
         result = {};
         if (!transaction) {
+            result.failure = wallet::PaymasterFinalizationFailure::LOCAL_AUTHORITY_INVALID;
             error = "PAYMASTER_FINAL_TRANSACTION_MISSING";
             return false;
         }
@@ -637,12 +663,24 @@ public:
         if (result.presence != wallet::ExactFinalTransactionPresence::NONE) {
             result.final_proof = ExactFinalTransactionProof{transaction, *node->chainman, after};
         }
+        result.wallet_observation = wallet::ExactFinalWalletObservation{transaction, *node->chainman, after, result};
+        result.failure = wallet::PaymasterFinalizationFailure::NONE;
         return true;
     }
 };
 } // namespace DigiDollar::Paymaster
 
 namespace wallet {
+
+ExactFinalWalletObservation::ExactFinalWalletObservation(const CTransactionRef& transaction,
+    const ChainstateManager& chainman, const uint256& tip,
+    const ExactFinalTransactionPreflight& snapshot)
+    : m_transaction{transaction}, m_chainman{&chainman}, m_tip{tip},
+      m_presence{snapshot.presence}, m_confirmed_block{snapshot.confirmed_block},
+      m_confirmed_height{snapshot.confirmed_height}, m_confirmed_position{snapshot.confirmed_position},
+      m_confirmation_depth{snapshot.confirmation_depth}
+{
+}
 
 bool paymaster_app::ProviderTxIndexIsReady(CWallet& wallet, bool wait_for_sync)
 {
@@ -668,32 +706,63 @@ bool PreflightExactPaymasterFinalTransaction(
         wallet, transaction, txindex_mode, result, error);
 }
 
-PaymasterFinalizationFailure ClassifyPaymasterFinalizationFailure(
-    std::string_view error, PaymasterFinalizationStage stage)
+bool ApplyExactPaymasterFinalObservation(CWallet& wallet,
+    const CTransactionRef& transaction, const ExactFinalTransactionPreflight& snapshot,
+    std::string& error,
+    PaymasterFinalizationFailure* failure)
 {
-    if (error == "PAYMASTER_NODE_CONTEXT_UNAVAILABLE" || error == "PAYMASTER_TXINDEX_NOT_READY" ||
-        error == "PAYMASTER_EXACT_FINAL_PROOF_STALE") {
-        return PaymasterFinalizationFailure::LOCAL_UNAVAILABLE;
-    }
-    if (stage == PaymasterFinalizationStage::DURABLE_RESULT &&
-        (error == "PAYMASTER_NODE_RUNTIME_UNAVAILABLE" ||
-         error == "PAYMASTER_FINAL_BLOCK_READ" ||
-         error == "PAYMASTER_WALLET_TRANSACTION_DATABASE_READ" ||
-         error == "PAYMASTER_WALLET_TRANSACTION_DATABASE_WRITE" ||
-         error == "PAYMASTER_WALLET_DD_STATE_UPDATE_FAILED" ||
-         error == "PAYMASTER_FINAL_MEMPOOL_POLICY" ||
-         error == "PAYMASTER_FINAL_BROADCAST_UNAVAILABLE" ||
-         error == "PAYMASTER_FINAL_BROADCAST_DEFERRED" ||
-         error == "PAYMASTER_WALLET_BROADCAST_DISABLED" ||
-         error == "PAYMASTER_RECOVERY_USER_PREVOUT_NOT_FOUND")) {
-        return PaymasterFinalizationFailure::LOCAL_UNAVAILABLE;
-    }
-    return PaymasterFinalizationFailure::REJECTED;
-}
+    if (failure) *failure = PaymasterFinalizationFailure::LOCAL_UNAVAILABLE;
+    error.clear();
+    const auto stale = [&] { error = "PAYMASTER_EXACT_FINAL_PROOF_STALE"; return false; };
+    if (!transaction || !snapshot.wallet_observation) return stale();
+    const auto& observation = *snapshot.wallet_observation;
+    auto* node = wallet.chain().context();
+    if (!node || !node->chainman || !node->mempool || observation.m_chainman != node->chainman.get() ||
+        !observation.m_transaction || snapshot.failure != PaymasterFinalizationFailure::NONE ||
+        snapshot.presence != observation.m_presence || snapshot.confirmed_block != observation.m_confirmed_block ||
+        snapshot.confirmed_height != observation.m_confirmed_height ||
+        snapshot.confirmed_position != observation.m_confirmed_position ||
+        snapshot.confirmation_depth != observation.m_confirmation_depth ||
+        !MatchDurableFinalTransaction(observation.m_transaction, transaction, error)) return stale();
 
-bool IsTransientPaymasterFinalizationError(std::string_view error)
-{
-    return ClassifyPaymasterFinalizationFailure(error) == PaymasterFinalizationFailure::LOCAL_UNAVAILABLE;
+    // No index wait occurs here. Keep the observed chain and both pools stable
+    // through the exact wallet write; a later preflight alone cannot close the
+    // gap after a disconnect notification has already corrected the wallet.
+    LOCK(wallet.cs_wallet);
+    LOCK(cs_main);
+    LOCK(node->mempool->cs);
+    std::unique_lock<RecursiveMutex> stem_lock;
+    if (node->stempool) stem_lock = std::unique_lock<RecursiveMutex>{node->stempool->cs};
+    const auto& chain = node->chainman->ActiveChain();
+    const auto* tip = chain.Tip();
+    if (!tip || tip->GetBlockHash() != observation.m_tip) return stale();
+    const auto pooled = node->mempool->get(transaction->GetHash());
+    const auto stemmed = node->stempool ? node->stempool->get(transaction->GetHash()) : nullptr;
+    if ((pooled && !MatchDurableFinalTransaction(pooled, transaction, error)) ||
+        (stemmed && !MatchDurableFinalTransaction(stemmed, transaction, error))) {
+        if (failure) *failure = PaymasterFinalizationFailure::OBSERVED_CONFLICT;
+        return false;
+    }
+    switch (observation.m_presence) {
+    case ExactFinalTransactionPresence::CONFIRMED: {
+        const auto* block = chain[observation.m_confirmed_height];
+        if (!block || block->GetBlockHash() != observation.m_confirmed_block ||
+            chain.Height() - block->nHeight + 1 != observation.m_confirmation_depth) return stale();
+        break;
+    }
+    case ExactFinalTransactionPresence::MEMPOOL:
+        if (!pooled) return stale();
+        break;
+    case ExactFinalTransactionPresence::STEMPOOL:
+        if (pooled || !stemmed) return stale();
+        break;
+    case ExactFinalTransactionPresence::NONE:
+        if (pooled || stemmed) return stale();
+        break;
+    }
+    if (!AddExactDurableTransactionToWallet(wallet, transaction, DurableWalletState(snapshot), error, failure)) return false;
+    if (failure) *failure = PaymasterFinalizationFailure::NONE;
+    return true;
 }
 
 bool PersistExactPaymasterWalletTransaction(CWallet& wallet,
@@ -736,11 +805,14 @@ bool InsertAndBroadcastExactPaymasterTransaction(
     const CTransactionRef& transaction,
     bool& already_confirmed,
     std::string& error,
-    ExactFinalBroadcastMode broadcast_mode)
+    ExactFinalBroadcastMode broadcast_mode,
+    PaymasterFinalizationFailure* failure)
 {
+    if (failure) *failure = PaymasterFinalizationFailure::LOCAL_UNAVAILABLE;
     already_confirmed = false;
     error.clear();
     if (!transaction) {
+        if (failure) *failure = PaymasterFinalizationFailure::LOCAL_AUTHORITY_INVALID;
         error = "PAYMASTER_FINAL_TRANSACTION_MISSING";
         return false;
     }
@@ -748,18 +820,21 @@ bool InsertAndBroadcastExactPaymasterTransaction(
     ExactFinalTransactionPreflight preflight;
     if (!PreflightExactPaymasterFinalTransaction(
             wallet, transaction, ExactFinalTxIndexMode::NONBLOCKING,
-            preflight, error) ||
-        !AddExactDurableTransactionToWallet(
-            wallet, transaction, DurableWalletState(preflight), error)) {
+            preflight, error)) {
+        if (failure) *failure = preflight.failure;
         return false;
     }
+    if (!ApplyExactPaymasterFinalObservation(wallet, transaction, preflight, error, failure)) return false;
+    if (failure) *failure = PaymasterFinalizationFailure::LOCAL_UNAVAILABLE;
     if (preflight.presence == ExactFinalTransactionPresence::CONFIRMED) {
         already_confirmed = true;
+        if (failure) *failure = PaymasterFinalizationFailure::NONE;
         return true;
     }
     if ((preflight.presence == ExactFinalTransactionPresence::MEMPOOL ||
          preflight.presence == ExactFinalTransactionPresence::STEMPOOL) &&
         (broadcast_mode != ExactFinalBroadcastMode::RELAY || !ExactFinalRelayIsEnabled(wallet))) {
+        if (failure) *failure = PaymasterFinalizationFailure::NONE;
         return true;
     }
 
@@ -784,6 +859,7 @@ bool InsertAndBroadcastExactPaymasterTransaction(
                 ExactFinalTxIndexMode::NONBLOCKING, current, current_error)) {
             error = "PAYMASTER_FINAL_BROADCAST_UNAVAILABLE";
         } else {
+            if (failure) *failure = current.failure;
             error = std::move(current_error);
         }
         return false;
@@ -792,14 +868,20 @@ bool InsertAndBroadcastExactPaymasterTransaction(
     ExactFinalTransactionPreflight observed;
     if (!PreflightExactPaymasterFinalTransaction(
             wallet, transaction, ExactFinalTxIndexMode::NONBLOCKING,
-            observed, error) ||
-        !AddExactDurableTransactionToWallet(
-            wallet, transaction, DurableWalletState(observed), error)) {
+            observed, error)) {
+        if (failure) *failure = observed.failure;
         return false;
     }
+    if (!ApplyExactPaymasterFinalObservation(wallet, transaction, observed, error, failure)) return false;
     already_confirmed =
         observed.presence == ExactFinalTransactionPresence::CONFIRMED;
-    return observed.presence != ExactFinalTransactionPresence::NONE;
+    if (observed.presence == ExactFinalTransactionPresence::NONE) {
+        if (failure) *failure = PaymasterFinalizationFailure::LOCAL_UNAVAILABLE;
+        error = "PAYMASTER_FINAL_BROADCAST_UNAVAILABLE";
+        return false;
+    }
+    if (failure) *failure = PaymasterFinalizationFailure::NONE;
+    return true;
 }
 
 static bool PromoteProviderSignedAttempt(
@@ -1476,8 +1558,8 @@ DurablePaymasterCommitRecovery RecoverDurablePaymasterCommit(
         return result;
     }
 
-    if (!AddExactDurableTransactionToWallet(
-            wallet, transaction, DurableWalletState(preflight), result.error)) {
+    if (!ApplyExactPaymasterFinalObservation(
+            wallet, transaction, preflight, result.error)) {
         return result;
     }
 
@@ -1488,8 +1570,8 @@ DurablePaymasterCommitRecovery RecoverDurablePaymasterCommit(
     if (!PreflightExactPaymasterFinalTransaction(
             wallet, transaction, ExactFinalTxIndexMode::NONBLOCKING,
             observed, result.error) ||
-        !AddExactDurableTransactionToWallet(
-            wallet, transaction, DurableWalletState(observed), result.error)) {
+        !ApplyExactPaymasterFinalObservation(
+            wallet, transaction, observed, result.error)) {
         return result;
     }
     if (observed.presence == ExactFinalTransactionPresence::CONFIRMED) {
@@ -1533,8 +1615,8 @@ DurablePaymasterCommitRecovery RecoverDurablePaymasterCommit(
             result.broadcast = false;
             return result;
         }
-        if (!AddExactDurableTransactionToWallet(
-                wallet, transaction, DurableWalletState(observed),
+        if (!ApplyExactPaymasterFinalObservation(
+                wallet, transaction, observed,
                 result.error) ||
             !ReconcileDurableFinalObservation(
                 store, transaction, observed, recovery_now, result.error)) {

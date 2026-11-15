@@ -499,13 +499,12 @@ PaymentResult SubmitPaymasterTransactionWithGuard(CWallet& target, PartiallySign
         // in place to close the race after this observation.
         FinalTransactionPresence signed_presence{
             FinalTransactionPresence::NONE};
+        PaymasterFinalizationFailure signed_failure{PaymasterFinalizationFailure::LOCAL_UNAVAILABLE};
         if (!PreflightFinalPaymasterTransaction(
                 *wallet, MakeTransactionRef(final_transaction),
-                signed_presence, error, txindex_mode)) {
-            const bool transient = ClassifyPaymasterFinalizationFailure(
-                error, PaymasterFinalizationStage::BEFORE_PROVIDER_COMMIT) == PaymasterFinalizationFailure::LOCAL_UNAVAILABLE;
+                signed_presence, error, txindex_mode, nullptr, &signed_failure)) {
             throw ApplicationError(
-                transient ? ErrorKind::WALLET : ErrorKind::REJECTED,
+                IsLocalPaymasterFinalizationFailure(signed_failure) ? ErrorKind::WALLET : ErrorKind::REJECTED,
                 error);
         }
         signed_now = true;
@@ -596,13 +595,12 @@ PaymentResult SubmitPaymasterTransactionWithGuard(CWallet& target, PartiallySign
                 ErrorKind::REJECTED,
                 error.empty() ? "PAYMASTER_PROVIDER_COMMIT_AUTHORIZATION_INVALID" : error);
         }
+        PaymasterFinalizationFailure commit_failure{PaymasterFinalizationFailure::LOCAL_UNAVAILABLE};
         if (!PreflightFinalPaymasterTransaction(
                 *wallet, MakeTransactionRef(validated_final),
-                final_presence, error, txindex_mode)) {
-            const bool transient = ClassifyPaymasterFinalizationFailure(
-                error, PaymasterFinalizationStage::BEFORE_PROVIDER_COMMIT) == PaymasterFinalizationFailure::LOCAL_UNAVAILABLE;
+                final_presence, error, txindex_mode, nullptr, &commit_failure)) {
             throw ApplicationError(
-                transient ? ErrorKind::WALLET : ErrorKind::REJECTED,
+                IsLocalPaymasterFinalizationFailure(commit_failure) ? ErrorKind::WALLET : ErrorKind::REJECTED,
                 error);
         }
         attempt = std::move(committing_attempt);
@@ -796,10 +794,12 @@ CommittedProviderRecovery SignAndCommitProviderRecoverySubmit(
     FinalTransactionPresence presence{FinalTransactionPresence::NONE};
     const CTransactionRef final_ref =
         MakeTransactionRef(final_transaction);
+    PaymasterFinalizationFailure preflight_failure{PaymasterFinalizationFailure::LOCAL_UNAVAILABLE};
     if (!PreflightFinalPaymasterTransaction(
             *wallet, final_ref, presence, error,
-            service_txindex_mode)) {
-        throw ApplicationError(ErrorKind::REJECTED, error);
+            service_txindex_mode, nullptr, &preflight_failure)) {
+        throw ApplicationError(IsLocalPaymasterFinalizationFailure(preflight_failure)
+            ? ErrorKind::WALLET : ErrorKind::REJECTED, error);
     }
 
     ProviderCommitRecord commit;
@@ -916,14 +916,15 @@ ProviderProcessingResult BroadcastCommittedProviderRecoverySubmit(
             *node_ctx->chainman, authorization_time,
             broadcast_user_psbt, error)) {
         throw ApplicationError(
-            IsTransientPaymasterFinalizationError(error) ? ErrorKind::WALLET : ErrorKind::REJECTED,
+            ErrorKind::WALLET,
             error.empty() ? "PAYMASTER_PROVIDER_RECOVERY_POST_COMMIT_CONFLICT" : error);
     }
+    PaymasterFinalizationFailure broadcast_failure{PaymasterFinalizationFailure::LOCAL_UNAVAILABLE};
     if (!PreflightFinalPaymasterTransaction(
             *wallet, final_ref, broadcast_presence, error,
-            service_txindex_mode, &broadcast_proof)) {
+            service_txindex_mode, &broadcast_proof, &broadcast_failure)) {
         throw ApplicationError(
-            IsTransientPaymasterFinalizationError(error) ? ErrorKind::WALLET : ErrorKind::REJECTED,
+            IsLocalPaymasterFinalizationFailure(broadcast_failure) ? ErrorKind::WALLET : ErrorKind::REJECTED,
             error.empty() ? "PAYMASTER_PROVIDER_RECOVERY_POST_COMMIT_PREFLIGHT_FAILED" : error);
     }
     if (!ValidateFinalAlternativeRecoveryAgainstChainstate(
@@ -934,7 +935,7 @@ ProviderProcessingResult BroadcastCommittedProviderRecoverySubmit(
             broadcast_proof ? &*broadcast_proof : nullptr,
             error)) {
         throw ApplicationError(
-            IsTransientPaymasterFinalizationError(error) ? ErrorKind::WALLET : ErrorKind::REJECTED,
+            ErrorKind::WALLET,
             error.empty() ? "PAYMASTER_PROVIDER_RECOVERY_POST_COMMIT_CONFLICT" : error);
     }
     recovery = std::move(broadcast_recovery);
@@ -942,10 +943,11 @@ ProviderProcessingResult BroadcastCommittedProviderRecoverySubmit(
     bool already_confirmed{false};
     std::string broadcast_error;
     const bool broadcast = InsertAndBroadcastPaymasterTransaction(
-        *wallet, final_ref, already_confirmed, broadcast_error);
+        *wallet, final_ref, already_confirmed, broadcast_error,
+        ExactFinalBroadcastMode::RELAY, &broadcast_failure);
     if (!broadcast) {
         throw ApplicationError(
-            IsTransientPaymasterFinalizationError(broadcast_error) ? ErrorKind::WALLET : ErrorKind::REJECTED,
+            IsLocalPaymasterFinalizationFailure(broadcast_failure) ? ErrorKind::WALLET : ErrorKind::REJECTED,
             broadcast_error.empty() ? "PAYMASTER_PROVIDER_RECOVERY_FINAL_BROADCAST_REJECTED" : strprintf("PAYMASTER_PROVIDER_RECOVERY_FINAL_BROADCAST_REJECTED: %s", broadcast_error));
     }
     ProviderProcessingResult result;
@@ -2708,12 +2710,13 @@ ClientResultReceipt ReceivePaymasterResult(WalletContext& context, CWallet& targ
                 }
                 throw ApplicationError(ErrorKind::INVALID_INPUT, validation_error);
             }
+            PaymasterFinalizationFailure preflight_failure{PaymasterFinalizationFailure::LOCAL_UNAVAILABLE};
             if (!PreflightFinalPaymasterTransaction(
                     *wallet, MakeTransactionRef(*message->result.final_transaction),
-                    final_presence, error)) {
+                    final_presence, error, ExactFinalTxIndexMode::WAIT_FOR_SYNC,
+                    nullptr, &preflight_failure)) {
                 const std::string preflight_error{error};
-                const bool transient =
-                    IsTransientPaymasterFinalizationError(preflight_error);
+                const bool transient = IsLocalPaymasterFinalizationFailure(preflight_failure);
                 if (!transient) {
                     std::string persistence_error;
                     if (!MarkFinalValidationFailureRecoverable(
