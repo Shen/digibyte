@@ -1944,6 +1944,23 @@ bool CheckMaintenanceExecutionState(CWallet& wallet,
     return true;
 }
 
+bool PersistMaintenanceLegWalletTransaction(CWallet& wallet, const CTransactionRef& transaction,
+    const PaymasterMaintenanceExecutionLeg& leg, std::string& error)
+{
+    AssertLockHeld(wallet.cs_wallet);
+    const auto found = wallet.mapWallet.find(transaction->GetHash());
+    if (found == wallet.mapWallet.end()) { error = "PAYMASTER_MAINTENANCE_RECOVERY_TRANSACTION_MISSING"; return false; }
+    for (const auto& [key, value] : leg.metadata) {
+        const auto previous = found->second.mapValue.find(key);
+        if (previous != found->second.mapValue.end() && previous->second != value) {
+            error = "PAYMASTER_MAINTENANCE_RECOVERY_METADATA_CONFLICT";
+            return false;
+        }
+        found->second.mapValue[key] = value;
+    }
+    return PersistExactPaymasterWalletTransaction(wallet, transaction, error);
+}
+
 bool CommitMaintenanceExecution(CWallet& wallet, const PaymasterMaintenanceExecution& execution,
     PaymasterCheckpointOperation& checkpoint, std::string& error)
 {
@@ -1967,20 +1984,12 @@ bool CommitMaintenanceExecution(CWallet& wallet, const PaymasterMaintenanceExecu
         const auto existing = wallet.mapWallet.find(tx->GetHash());
         if (existing == wallet.mapWallet.end()) {
             if (!wallet.CommitTransaction(tx, leg.metadata, {}, &error)) return false;
-            if (!PersistExactPaymasterWalletTransaction(wallet, tx, error)) return false;
+            if (!PersistMaintenanceLegWalletTransaction(wallet, tx, leg, error)) return false;
         } else {
             // AddToWallet can leave its in-memory entry behind when WriteTx
             // fails. Re-persist it before accounting or removing the journal.
             auto& saved = existing->second;
-            for (const auto& [key, value] : leg.metadata) {
-                const auto found = saved.mapValue.find(key);
-                if (found != saved.mapValue.end() && found->second != value) {
-                    error = "PAYMASTER_MAINTENANCE_RECOVERY_METADATA_CONFLICT";
-                    return false;
-                }
-                saved.mapValue[key] = value;
-            }
-            if (!PersistExactPaymasterWalletTransaction(wallet, tx, error)) return false;
+            if (!PersistMaintenanceLegWalletTransaction(wallet, tx, leg, error)) return false;
             if (wallet.GetBroadcastTransactions() && wallet.GetTxDepthInMainChain(saved) == 0 &&
                 !wallet.SubmitTxMemoryPoolAndRelay(saved, error, true)) return false;
         }
