@@ -11,6 +11,7 @@
 #include <key.h>
 #include <paymaster/directory.h>
 #include <paymaster/provider.h>
+#include <paymaster/finance.h>
 #include <paymaster/txbuilder.h>
 #include <paymaster/wire.h>
 #include <script/standard.h>
@@ -2497,6 +2498,29 @@ BOOST_AUTO_TEST_CASE(provider_finance_totals_keep_models_and_capital_separate)
         PoolEntry(50, PoolPurpose::OPERATIONAL, PoolAsset::DGB, 5000000)};
     BOOST_CHECK_EQUAL(capital.dgb_value.value, 5000000);
     BOOST_CHECK_EQUAL(totals.dgb_cost.value, 36);
+    BOOST_REQUIRE(add_event(5, ProviderFinanceEventKind::RECOVERY,
+                            FundingModel::USER_PAID, SponsorshipScope::PUBLIC, 0, 17));
+    ProviderFinanceTotals canonical;
+    for (const auto& event : ledger.events) BOOST_REQUIRE(ApplyProviderFinanceContribution(canonical, event, 1, error));
+    BOOST_CHECK(canonical.total == ledger.daily_totals.front());
+    BOOST_CHECK_EQUAL(canonical.total.dgb_cost.value, 53);
+    BOOST_CHECK_EQUAL(canonical.total.maintenance_transactions, 1U);
+    BOOST_CHECK_EQUAL(canonical.income[0], 30);
+    BOOST_CHECK_EQUAL(canonical.cost[0], 5);
+    BOOST_CHECK_EQUAL(canonical.cost[1], 7);
+    BOOST_CHECK_EQUAL(canonical.cost[2], 11);
+    auto orphaned = ledger.events.front();
+    BOOST_REQUIRE(ApplyProviderFinanceContribution(canonical, orphaned, -1, error));
+    orphaned.state = ProviderFinanceEventState::INVALIDATED;
+    orphaned.confirmed_at = 0;
+    ++orphaned.updated_at;
+    BOOST_REQUIRE(UpsertProviderFinanceEvent(ledger, orphaned, error));
+    BOOST_CHECK(canonical.total == ledger.daily_totals.front());
+    const auto previous_totals = ledger.daily_totals;
+    ledger.events.push_back(ledger.events.back());
+    BOOST_CHECK(!RebuildProviderFinanceDailyTotals(ledger, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_DUPLICATE_FINANCE_EVENT");
+    BOOST_CHECK(ledger.daily_totals == previous_totals);
 }
 
 BOOST_AUTO_TEST_CASE(provider_backup_status_requires_a_fresh_acknowledgement)
