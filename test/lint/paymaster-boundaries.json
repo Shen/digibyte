@@ -50,6 +50,8 @@
     "src/qt/digidollaroverviewwidget.cpp",
     "src/qt/digidollaroverviewwidget.h",
     "src/qt/digidollarsendwidget.cpp",
+    "src/qt/digidollarmintwidget.cpp",
+    "src/qt/digidollarmintwidget.h",
     "src/qt/test/wallettests.cpp",
     "src/qt/test/wallettests.h",
     "src/qt/test/digidollarwidgettests.cpp",
@@ -99,16 +101,38 @@
   ],
   "dependencies": [
     {
-      "sources": ["src/qt/clientmodel.cpp", "src/qt/clientmodel.h"],
-      "deny": ["qt/paymaster*", "paymaster/*", "wallet/*", "rpc/*"]
+      "sources": [
+        "src/qt/clientmodel.cpp",
+        "src/qt/clientmodel.h"
+      ],
+      "deny": [
+        "qt/paymaster*",
+        "paymaster/*",
+        "wallet/*",
+        "rpc/*"
+      ]
     },
     {
-      "sources": ["src/qt/walletmodel.cpp", "src/qt/walletmodel.h"],
-      "deny": ["qt/paymaster*", "paymaster/*"]
+      "sources": [
+        "src/qt/walletmodel.cpp",
+        "src/qt/walletmodel.h"
+      ],
+      "deny": [
+        "qt/paymaster*",
+        "paymaster/*"
+      ]
     },
     {
-      "sources": ["src/qt/walletasync.cpp", "src/qt/walletasync.h"],
-      "deny": ["qt/paymaster*", "paymaster/*", "wallet/*", "rpc/*"]
+      "sources": [
+        "src/qt/walletasync.cpp",
+        "src/qt/walletasync.h"
+      ],
+      "deny": [
+        "qt/paymaster*",
+        "paymaster/*",
+        "wallet/*",
+        "rpc/*"
+      ]
     },
     {
       "sources": [
