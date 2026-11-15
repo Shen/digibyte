@@ -1134,7 +1134,7 @@ BOOST_AUTO_TEST_CASE(operator_sync_wait_and_activity_validation)
     auto provider = Snapshot().find_value("provider");
     provider.pushKV("running", true);
     provider.pushKV("service_state", "waiting_for_readiness");
-    for (const auto* code : {"PAYMASTER_PROVIDER_SYNCING", "PAYMASTER_TXINDEX_NOT_READY"}) {
+    for (const auto* code : {"PAYMASTER_PROVIDER_SYNCING", "PAYMASTER_TXINDEX_NOT_READY", "PAYMASTER_HISTORY_SCAN_PENDING"}) {
         provider.pushKV("last_service_error", code);
         const auto diagnostics = OperatorDiagnostics(provider, 0, 100);
         BOOST_CHECK_EQUAL(diagnostics[0].find_value("area").get_str(), "node");

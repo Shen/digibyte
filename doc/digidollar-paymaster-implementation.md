@@ -619,6 +619,21 @@ unavailable and invalidates derived state; it is never presented as known zero.
 
 ## Execution and presentation
 
+Provider history capacity and drain observations share a disposable bounded
+census in `paymastersessionindex.h` / `paymasterdb.cpp`. Each census step reads
+at most one existing bounded session page and one recovery page, before filtering
+client rows. Only provider locators are retained, capped by the existing history
+limit. Typed session/recovery/attempt commits update candidates; abort, read
+failure and wallet unload discard observation state. Ordinary client activity
+does not restart a partially completed census.
+An incomplete census or drain page returns `PAYMASTER_HISTORY_SCAN_PENDING`;
+service/setup classify it as waiting. Drain pages reread source sessions,
+attempts and recoveries, with row and byte work limits (a session and its at most
+16 attempts form one indivisible observation). Candidate removal records only
+absence of drain work; payment, signing and release still validate their exact
+authoritative records. Exact existing requests do not consume another history
+entry. Archived recoveries retain point-read authority without active quota.
+
 RPC and background callers invoke the same native services with typed inputs and
 results (`wallet/paymasterresults.h`). JSON encoding belongs to
 `wallet/rpc/paymaster_results.cpp`; session snapshots are captured before encoding.

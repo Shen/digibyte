@@ -40,6 +40,15 @@ load, concurrent load, lost successful/failed reply, broken inventory and the
 unchanged read-only status contract. Partial-link SHA256:
 `d78e9921197c3269fc8248abeb70b99ec80b35e514c238b807716de189b520a7`.
 
+Bounded history follow-up: **9 focused native cases, 27022 assertions, exit 0**,
+after freshly compiling the database, provider/recovery store, service, setup
+and affected test units. Covers 8192-entry combined quotas, client-only page
+work, concurrent typed writes, abort/read-failure reset, source candidate reload,
+pruning, atomic quote closure and depth-239/240 recovery archival. The reorg
+fixture explicitly verifies unchanged rows while the index remains ahead of a
+disconnected tip; paged drain waits also preserve all rows. Partial-link SHA256:
+`f594af28c34dd7a1137f0042a8ac14b7ac0da51a04a64393b237e65fc8fd3361`.
+
 ## Exact-final relay, checkpoint recovery and shared setup (2026-11-15)
 
 Review baseline: `3b9e5c5d6b2c657996be8926e9c2ea794d34b040`; implementation

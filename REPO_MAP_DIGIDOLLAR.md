@@ -874,6 +874,10 @@ RPC requests. Finance caching and persistence are described in the
 [implementation guide](doc/digidollar-paymaster-implementation.md#derived-indexes-and-finance-storage).
 `paymasterapplication.cpp` owns bounded maintenance-history observation;
 `paymastermaintenancecache.h` exposes only wallet-lifetime cache teardown.
+`ObservePaymasterProviderHistory` in `paymasterdb.cpp`, declared in
+`paymastersessionindex.h`, shares bounded quota/drain census progress. Committed
+typed writes maintain disposable provider locators; drain decisions reread source
+records and incomplete pages wait. The existing history limit is unchanged.
 `ExecuteDurableClientFinal` in `paymastertransactions.cpp`, declared beside the
 exact transaction APIs in `paymasterprovider.h`, shares durable client payment and
 recovery execution across result intake, retries and startup. The store's common

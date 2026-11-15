@@ -31,7 +31,7 @@ inline constexpr size_t MAX_PROVIDER_CAPACITY_CLEANUP_BYTES{4 * (MAX_DIRECT_MESS
 /** Normal sessions and active alternative provider recoveries share one
  * history budget. Confirmed recovery evidence is archived by maintenance at
  * the reorg safety depth and remains available through exact point reads. */
-bool CheckProviderHistoryCapacity(WalletBatch& batch, const std::string& request_id,
+bool CheckProviderHistoryCapacity(WalletBatch& batch, WalletDatabase& database, const std::string& request_id,
                                   std::string& error, const uint256& recovery_id = {});
 
 /** Translate typed wallet-database failures into stable Paymaster errors

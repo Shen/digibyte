@@ -3056,6 +3056,20 @@ BOOST_AUTO_TEST_CASE(expired_unsigned_provider_history_is_compacted_atomically)
     BOOST_CHECK(GetMockableDatabase(restarted).m_records == compacted);
 }
 
+static void CompleteProviderHistoryObservation(wallet::CWallet& wallet)
+{
+    LOCK(wallet.cs_wallet);
+    WalletBatch batch{wallet.GetDatabase()};
+    PaymasterProviderHistory history;
+    std::string error;
+    for (size_t page{0}; page < 1024; ++page) {
+        BOOST_REQUIRE_MESSAGE(ObservePaymasterProviderHistory(batch, wallet.GetDatabase(),
+            paymaster_store::internal::MAX_RETAINED_PROVIDER_SESSIONS, history, error), error);
+        if (history.complete) return;
+    }
+    BOOST_FAIL("Provider history did not finish its bounded pages");
+}
+
 BOOST_AUTO_TEST_CASE(provider_history_quota_preserves_existing_requests)
 {
     LOCK(m_wallet.cs_wallet);
@@ -3070,13 +3084,93 @@ BOOST_AUTO_TEST_CASE(provider_history_quota_preserves_existing_requests)
         session.session_id = SecurityTestId(uint256S("1092"), i + 1);
         BOOST_REQUIRE(batch.WritePaymasterSession(session));
     }
-    BOOST_CHECK(paymaster_store::internal::CheckProviderHistoryCapacity(batch, session.request_id, error));
-    BOOST_CHECK(!paymaster_store::internal::CheckProviderHistoryCapacity(batch,
+    CompleteProviderHistoryObservation(m_wallet);
+    BOOST_CHECK(paymaster_store::internal::CheckProviderHistoryCapacity(batch, m_wallet.GetDatabase(), session.request_id, error));
+    BOOST_CHECK(!paymaster_store::internal::CheckProviderHistoryCapacity(batch, m_wallet.GetDatabase(),
         "550e8400-e29b-41d4-a716-999999999999", error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_HISTORY_FULL");
     BOOST_REQUIRE(batch.ErasePaymasterSession(session.request_id));
-    BOOST_CHECK(paymaster_store::internal::CheckProviderHistoryCapacity(batch,
+    BOOST_CHECK(paymaster_store::internal::CheckProviderHistoryCapacity(batch, m_wallet.GetDatabase(),
         "550e8400-e29b-41d4-a716-999999999999", error));
+}
+
+BOOST_AUTO_TEST_CASE(provider_history_observation_bounds_raw_pages_and_tracks_committed_changes)
+{
+    LOCK(m_wallet.cs_wallet);
+    auto& database = GetMockableDatabase(m_wallet);
+    WalletBatch batch{database};
+    PaymentSession session;
+    session.created_at = session.updated_at = 1000;
+    session.canonical_request_hash = uint256::ONE;
+    BOOST_REQUIRE(batch.TxnBegin());
+    for (size_t row{0}; row < 130; ++row) {
+        session.request_id = strprintf("550e8400-e29b-41d4-a716-%012u", row);
+        session.session_id = SecurityTestId(uint256S("2211"), row + 1);
+        BOOST_REQUIRE(batch.WritePaymasterSession(session));
+    }
+    BOOST_REQUIRE(batch.TxnCommit());
+    const auto intact = database.m_records;
+    const auto observe = [&](PaymasterProviderHistory& history) {
+        std::string error;
+        const bool valid = ObservePaymasterProviderHistory(batch, database,
+            paymaster_store::internal::MAX_RETAINED_PROVIDER_SESSIONS, history, error);
+        BOOST_CHECK_MESSAGE(valid, error);
+    };
+    PaymasterProviderHistory history;
+    observe(history);
+    BOOST_CHECK(!history.complete);
+    BOOST_CHECK_EQUAL(history.retained, 0U);
+    // Ordinary client activity before the cursor must not restart the census.
+    session.request_id = "550e8400-e29b-41d4-a716-000000000000";
+    session.session_id = SecurityTestId(uint256S("2211"), 1);
+    BOOST_REQUIRE(batch.WritePaymasterSession(session));
+    observe(history);
+    BOOST_CHECK(!history.complete);
+    observe(history);
+    BOOST_REQUIRE(history.complete);
+    BOOST_CHECK_EQUAL(history.retained, 0U);
+    BOOST_CHECK(database.m_records == intact);
+    session.provider_side = true;
+    BOOST_REQUIRE(batch.TxnBegin());
+    BOOST_REQUIRE(batch.WritePaymasterSession(session));
+    observe(history);
+    BOOST_CHECK_EQUAL(history.retained, 0U); // No committed delta yet.
+    BOOST_REQUIRE(batch.TxnAbort());
+    CompleteProviderHistoryObservation(m_wallet);
+    observe(history);
+    BOOST_CHECK_EQUAL(history.retained, 0U);
+    BOOST_REQUIRE(batch.WritePaymasterSession(session));
+    observe(history);
+    BOOST_CHECK(history.complete);
+    BOOST_CHECK_EQUAL(history.retained, 1U);
+    BOOST_REQUIRE(batch.ErasePaymasterSession(session.request_id));
+    observe(history);
+    BOOST_CHECK(history.complete);
+    BOOST_CHECK_EQUAL(history.retained, 0U);
+
+    // A malformed raw row beyond page two proves that filtering does not scan
+    // all client history in a single observation. Failure discards progress.
+    session = {};
+    session.request_id = "550e8400-e29b-41d4-a716-000000000129";
+    session.session_id = SecurityTestId(uint256S("2211"), 130);
+    session.created_at = session.updated_at = 1000;
+    session.canonical_request_hash = uint256::ONE;
+    auto corrupt = session;
+    ++corrupt.version;
+    BOOST_REQUIRE(database.MakeBatch()->Write(std::make_pair(DBKeys::PAYMASTER_SESSION, session.request_id), corrupt));
+    ForgetPaymasterSessionIndex(database);
+    observe(history);
+    BOOST_CHECK(!history.complete);
+    observe(history);
+    BOOST_CHECK(!history.complete);
+    std::string error;
+    BOOST_CHECK(!ObservePaymasterProviderHistory(batch, database,
+        paymaster_store::internal::MAX_RETAINED_PROVIDER_SESSIONS, history, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_HISTORY_DATABASE_READ");
+    BOOST_REQUIRE(batch.WritePaymasterSession(session));
+    observe(history);
+    BOOST_CHECK(!history.complete);
+    CompleteProviderHistoryObservation(m_wallet);
 }
 
 BOOST_AUTO_TEST_CASE(
@@ -4470,6 +4564,7 @@ BOOST_AUTO_TEST_CASE(provider_history_quota_counts_alternative_recovery_quotes)
         BOOST_REQUIRE(batch.WritePaymasterSession(session));
     }
     BOOST_REQUIRE(batch.TxnCommit());
+    CompleteProviderHistoryObservation(m_wallet);
     const auto full = GetMockableDatabase(m_wallet).m_records;
     PaymasterStore store{m_wallet};
     std::string error;
@@ -4495,9 +4590,9 @@ BOOST_AUTO_TEST_CASE(provider_history_quota_counts_alternative_recovery_quotes)
     BOOST_REQUIRE_MESSAGE(store.CommitProviderAlternativeRecoveryQuote(recovery,
         environment.netgroup_bucket, Params().GenesisBlock().GetHash(), now, error), error);
     BOOST_CHECK(GetMockableDatabase(m_wallet).m_records == mixed_full);
-    BOOST_CHECK(!paymaster_store::internal::CheckProviderHistoryCapacity(batch, session.request_id, error));
+    BOOST_CHECK(!paymaster_store::internal::CheckProviderHistoryCapacity(batch, m_wallet.GetDatabase(), session.request_id, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_HISTORY_FULL");
-    BOOST_CHECK(!paymaster_store::internal::CheckProviderHistoryCapacity(batch, recovery.request_id,
+    BOOST_CHECK(!paymaster_store::internal::CheckProviderHistoryCapacity(batch, m_wallet.GetDatabase(), recovery.request_id,
         error, uint256S("1853")));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_PROVIDER_HISTORY_FULL");
 }
@@ -7222,6 +7317,7 @@ static void ExerciseFirstProviderRecoveryCommit(node::NodeContext& node,
     }
     const auto admission = [&] {
         uint256 netgroup;
+        CompleteProviderHistoryObservation(history_wallet);
         return history_store.CheckProviderQuoteAdmission(next_quote.request,
             Hash(SerializePaymasterSecurityObject(next_quote.request)), {1, 2, 3},
             false, DGBSatoshis{500}, now, netgroup, error);
@@ -7278,7 +7374,10 @@ static void ExerciseFirstProviderRecoveryCommit(node::NodeContext& node,
     BOOST_REQUIRE_MESSAGE(chainstate.InvalidateBlock(stale_disconnect, stale_tip), stale_disconnect.ToString());
     SyncWithValidationInterfaceQueue();
     IndexWaitSynced(*g_txindex);
-    BOOST_REQUIRE_MESSAGE(maintain(), error);
+    const auto before_index_wait = history_database.m_records;
+    BOOST_CHECK(!maintain());
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_TXINDEX_NOT_READY");
+    BOOST_CHECK(history_database.m_records == before_index_wait);
     BOOST_CHECK_EQUAL(active_recoveries(), 1U);
     BOOST_CHECK(!admission());
     WITH_LOCK(cs_main, chainstate.ResetBlockFailureFlags(stale_tip));
@@ -7354,7 +7453,17 @@ static void ExerciseFirstProviderRecoveryCommit(node::NodeContext& node,
     BOOST_CHECK(finance_after.dgb_cost == finance_before.dgb_cost);
     BOOST_CHECK(finance_after.transaction_id == finance_before.transaction_id);
     bool has_drain_work{true};
-    BOOST_REQUIRE_MESSAGE(history_store.HasProviderDrainWork(identity.provider_id, has_drain_work, error), error);
+    bool drain_observed{false};
+    const auto before_drain = history_database.m_records;
+    for (size_t page{0}; page < 256 && !drain_observed; ++page) {
+        drain_observed = history_store.HasProviderDrainWork(identity.provider_id, has_drain_work, error);
+        if (!drain_observed) {
+            BOOST_CHECK(!has_drain_work);
+            BOOST_REQUIRE_EQUAL(error, "PAYMASTER_HISTORY_SCAN_PENDING");
+        }
+        BOOST_CHECK(history_database.m_records == before_drain);
+    }
+    BOOST_REQUIRE(drain_observed);
     BOOST_CHECK(has_drain_work); // The new quote's live capacity continuation.
 
     {
@@ -7451,7 +7560,8 @@ static void ExerciseFirstProviderRecoveryCommit(node::NodeContext& node,
         LOCK(terminal_reopened.cs_wallet);
         terminal_reopened.SetLastBlockProcessed(terminal_tip.first, terminal_tip.second);
         WalletBatch batch{terminal_reopened.GetDatabase()};
-        BOOST_CHECK(paymaster_store::internal::CheckProviderHistoryCapacity(batch,
+        CompleteProviderHistoryObservation(terminal_reopened);
+        BOOST_CHECK(paymaster_store::internal::CheckProviderHistoryCapacity(batch, terminal_reopened.GetDatabase(),
             next_quote.request.intent.request_id, error));
     }
 }
@@ -9554,6 +9664,46 @@ BOOST_FIXTURE_TEST_CASE(continuing_capacity_replay_preserves_promoted_quote, Quo
     BOOST_CHECK(result.queued.value_or(false));
     BOOST_CHECK_EQUAL(manager.DirectMessageCount(), 0U);
     BOOST_CHECK(GetMockableDatabase(wallet).m_records == before);
+}
+
+BOOST_FIXTURE_TEST_CASE(provider_drain_observation_waits_for_client_history_and_reloads_candidates,
+                        QuoteRequestProcessingSetup)
+{
+    WalletBatch batch{wallet.GetDatabase()};
+    PaymentSession client;
+    client.created_at = client.updated_at = now;
+    client.canonical_request_hash = uint256::ONE;
+    BOOST_REQUIRE(batch.TxnBegin());
+    for (size_t row{0}; row < 140; ++row) {
+        client.request_id = strprintf("550e8400-e29b-41d4-a716-%012u", row);
+        client.session_id = SecurityTestId(uint256S("2212"), row + 1);
+        BOOST_REQUIRE(batch.WritePaymasterSession(client));
+    }
+    BOOST_REQUIRE(batch.TxnCommit());
+    ForgetPaymasterSessionIndex(wallet.GetDatabase());
+    PaymasterStore store{wallet};
+    bool work{false};
+    std::string error;
+    for (int page{0}; page < 2; ++page) {
+        BOOST_CHECK(!store.HasProviderDrainWork(environment.identity.provider_id, work, error));
+        BOOST_CHECK(!work);
+        BOOST_CHECK_EQUAL(error, "PAYMASTER_HISTORY_SCAN_PENDING");
+        BOOST_REQUIRE(batch.WritePaymasterSession(client));
+    }
+    const auto before = GetMockableDatabase(wallet).m_records;
+    BOOST_REQUIRE_MESSAGE(store.HasProviderDrainWork(environment.identity.provider_id, work, error), error);
+    BOOST_CHECK(work);
+    BOOST_CHECK(GetMockableDatabase(wallet).m_records == before);
+    // Only source records determine work. A committed attempt-only change
+    // must wake a previously exhausted candidate observation.
+    auto terminal = fixture.attempt;
+    terminal.state = AttemptState::REJECTED;
+    BOOST_REQUIRE(batch.WritePaymasterAttempt(terminal));
+    BOOST_REQUIRE_MESSAGE(store.HasProviderDrainWork(environment.identity.provider_id, work, error), error);
+    BOOST_CHECK(!work);
+    BOOST_REQUIRE(batch.WritePaymasterAttempt(fixture.attempt));
+    BOOST_REQUIRE_MESSAGE(store.HasProviderDrainWork(environment.identity.provider_id, work, error), error);
+    BOOST_CHECK(work);
 }
 
 BOOST_FIXTURE_TEST_CASE(closed_provider_quote_is_not_offered_again, QuoteRequestProcessingSetup)

@@ -690,21 +690,36 @@ bool PaymasterStore::HasProviderDrainWork(
     }
     LOCK(m_wallet.cs_wallet);
     WalletBatch batch{m_wallet.GetDatabase()};
-    std::vector<PaymentSession> sessions;
-    std::vector<AlternativeRecoveryRecord> recoveries;
-    if (!batch.ListPaymasterSessions(sessions) ||
-        !batch.ListPaymasterAlternativeRecoveries(recoveries)) {
-        error = "PAYMASTER_DATABASE_READ";
+    PaymasterProviderHistory history;
+    auto& database = m_wallet.GetDatabase();
+    if (!ObservePaymasterProviderHistory(batch, database, MAX_RETAINED_PROVIDER_SESSIONS, history, error)) return false;
+    if (!history.complete) {
+        error = "PAYMASTER_HISTORY_SCAN_PENDING";
         return false;
     }
-    for (const PaymentSession& session : sessions) {
-        if (!session.provider_side) continue;
+    const auto candidates = GetPaymasterProviderDrainCandidates(database, provider_id);
+    size_t observed_bytes{0};
+    const auto page_exhausted = [&] {
+        if (observed_bytes < PAYMASTER_BACKGROUND_SESSION_BYTES) return false;
+        error = "PAYMASTER_HISTORY_SCAN_PENDING";
+        return true;
+    };
+    for (const auto& request : candidates.sessions) {
+        if (page_exhausted()) return false;
+        PaymentSession session;
+        if (batch.ReadPaymasterSessionWithStatus(request, session) != DatabaseReadStatus::FOUND ||
+            !session.provider_side || session.attempt_ids.size() > 16) {
+            error = "PAYMASTER_SESSION_DATABASE_READ";
+            return false;
+        }
+        observed_bytes += GetSerializeSize(session, CLIENT_VERSION);
         for (const uint256& attempt_id : session.attempt_ids) {
             ProviderAttempt attempt;
-            if (!batch.ReadPaymasterAttempt(attempt_id, attempt)) {
+            if (!batch.ReadPaymasterAttempt(attempt_id, attempt) || attempt.session_id != session.session_id) {
                 error = "PAYMASTER_ATTEMPT_DATABASE_READ";
                 return false;
             }
+            observed_bytes += GetSerializeSize(attempt, CLIENT_VERSION);
             if (attempt.provider_id != provider_id) continue;
             if (attempt.state == AttemptState::QUOTED ||
                 attempt.state == AttemptState::USER_SIGNED ||
@@ -714,18 +729,27 @@ bool PaymasterStore::HasProviderDrainWork(
                 return true;
             }
         }
+        CompletePaymasterProviderDrainCandidate(database, request);
     }
-    has_work = std::any_of(
-        recoveries.begin(), recoveries.end(),
-        [&](const AlternativeRecoveryRecord& recovery) {
-            return recovery.provider_side && !recovery.expired &&
-                   recovery.recovery_provider_id == provider_id &&
-                   (recovery.phase ==
-                        AlternativeRecoveryPhase::RESPONSE_VALIDATED ||
-                    recovery.phase ==
-                        AlternativeRecoveryPhase::USER_SIGNED);
-        });
-    if (has_work) return true;
+    for (const auto& id : candidates.recoveries) {
+        if (page_exhausted()) return false;
+        AlternativeRecoveryRecord recovery;
+        if (batch.ReadPaymasterAlternativeRecoveryWithStatus(id, recovery) != DatabaseReadStatus::FOUND || !recovery.provider_side) {
+            error = "PAYMASTER_RECOVERY_DATABASE_READ";
+            return false;
+        }
+        observed_bytes += GetSerializeSize(recovery, CLIENT_VERSION);
+        if (!recovery.expired && recovery.recovery_provider_id == provider_id &&
+            (recovery.phase == AlternativeRecoveryPhase::RESPONSE_VALIDATED || recovery.phase == AlternativeRecoveryPhase::USER_SIGNED)) {
+            has_work = true;
+            return true;
+        }
+        CompletePaymasterProviderDrainCandidate(database, id);
+    }
+    if (!candidates.complete) {
+        error = "PAYMASTER_HISTORY_SCAN_PENDING";
+        return false;
+    }
 
     // A signed capacity proof is durable provider work too. The proof has
     // already committed exact operational pool resources to one client nonce,
@@ -1279,7 +1303,7 @@ bool PaymasterStore::CommitProviderAlternativeRecoveryQuote(
         error = "PAYMASTER_ALTERNATIVE_RECOVERY_CONFLICT";
         return false;
     }
-    if (!CheckProviderHistoryCapacity(batch, recovery.request_id, error, recovery.recovery_id)) return false;
+    if (!CheckProviderHistoryCapacity(batch, m_wallet.GetDatabase(), recovery.request_id, error, recovery.recovery_id)) return false;
     ProviderIdentityRecord identity;
     ProviderPolicy advertised_policy;
     ProviderSettings settings;

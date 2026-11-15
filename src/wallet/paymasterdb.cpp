@@ -29,7 +29,48 @@
 namespace wallet {
 namespace {
 using FinalIds = std::pair<uint256, uint256>;
+struct ProviderHistoryIndex {
+    size_t limit{0};
+    bool sessions_complete{false}, recoveries_complete{false}, overflow{false};
+    std::string after_session;
+    uint256 after_recovery, drain_provider;
+    std::map<std::string, uint256> sessions;
+    std::set<uint256> recoveries;
+    std::map<uint256, std::set<std::string>> by_session;
+    std::set<std::string> drain_sessions;
+    std::set<uint256> drain_recoveries;
+
+    size_t Size() const { return sessions.size() + recoveries.size(); }
+    void UpdateSession(const std::string& request, const std::optional<uint256>& session)
+    {
+        if (!limit) return;
+        const auto previous = sessions.find(request);
+        if (previous != sessions.end()) {
+            auto& requests = by_session[previous->second];
+            requests.erase(request);
+            if (requests.empty()) by_session.erase(previous->second);
+            sessions.erase(previous);
+        }
+        drain_sessions.erase(request);
+        if (!session) return;
+        if (Size() >= limit) { overflow = true; return; }
+        sessions.emplace(request, *session);
+        by_session[*session].insert(request);
+        drain_sessions.insert(request);
+    }
+    void UpdateRecovery(const uint256& id, bool provider)
+    {
+        if (!limit) return;
+        recoveries.erase(id);
+        drain_recoveries.erase(id);
+        if (!provider) return;
+        if (Size() >= limit) { overflow = true; return; }
+        recoveries.insert(id);
+        drain_recoveries.insert(id);
+    }
+};
 struct SessionIndex {
+    ProviderHistoryIndex provider_history;
     bool valid{false};
     bool commits_valid{false};
     bool pool_history_valid{false};
@@ -82,6 +123,9 @@ struct PendingSessionIndex {
     std::map<std::string, std::optional<FinalIds>> updates;
     std::map<uint256, std::optional<uint256>> commits;
     bool pool_history_changed{false};
+    std::map<std::string, std::optional<uint256>> provider_sessions;
+    std::map<uint256, bool> provider_recoveries;
+    std::set<uint256> attempt_sessions;
 };
 
 SessionIndex BuildSessionIndex(const std::vector<DigiDollar::Paymaster::PaymentSession>& sessions)
@@ -100,12 +144,29 @@ std::map<WalletDatabase*, SessionIndex> session_indexes;
 std::map<const WalletBatch*, PendingSessionIndex> pending_session_indexes;
 
 void QueueSessionIndex(const WalletBatch* owner, WalletDatabase& database,
-                       const std::string& request, std::optional<FinalIds> ids)
+                       const std::string& request, std::optional<FinalIds> ids,
+                       std::optional<uint256> provider_session)
 {
     std::lock_guard<std::mutex> lock{session_index_mutex};
     auto& pending = pending_session_indexes[owner];
     pending.database = &database;
     pending.updates[request] = std::move(ids);
+    pending.provider_sessions[request] = provider_session;
+}
+void QueueProviderRecoveryIndex(const WalletBatch* owner, WalletDatabase& database,
+    const uint256& id, bool provider)
+{
+    std::lock_guard<std::mutex> lock{session_index_mutex};
+    auto& pending = pending_session_indexes[owner];
+    pending.database = &database;
+    pending.provider_recoveries[id] = provider;
+}
+void QueueProviderAttemptIndex(const WalletBatch* owner, WalletDatabase& database, const uint256& session)
+{
+    std::lock_guard<std::mutex> lock{session_index_mutex};
+    auto& pending = pending_session_indexes[owner];
+    pending.database = &database;
+    pending.attempt_sessions.insert(session);
 }
 void QueueCommitIndex(const WalletBatch* owner, WalletDatabase& database,
                       const uint256& key, std::optional<uint256> txid)
@@ -127,6 +188,7 @@ void PaymasterSessionIndexEnd(const WalletBatch* owner, bool committed)
         ++index->second.revision;
         if (pending->second.pool_history_changed) index->second.pool_history_valid = false;
         if (!committed) {
+            index->second.provider_history = {};
             index->second.valid = false;
             index->second.commits_valid = false;
             // Failed financial work invalidates observation progress. Relay
@@ -139,6 +201,20 @@ void PaymasterSessionIndexEnd(const WalletBatch* owner, bool committed)
                 else scan = index->second.scans.erase(scan);
             }
         } else {
+            auto& history = index->second.provider_history;
+            if (history.overflow && (!pending->second.provider_sessions.empty() || !pending->second.provider_recoveries.empty())) {
+                // An over-limit wallet needs a new bounded census after edits;
+                // discarded excess locators cannot establish a lower count.
+                history = {};
+            } else {
+                for (const auto& [request, session] : pending->second.provider_sessions) history.UpdateSession(request, session);
+                for (const auto& [id, provider] : pending->second.provider_recoveries) history.UpdateRecovery(id, provider);
+                for (const auto& session : pending->second.attempt_sessions) {
+                    const auto found = history.by_session.find(session);
+                    if (found != history.by_session.end())
+                        history.drain_sessions.insert(found->second.begin(), found->second.end());
+                }
+            }
             if (index->second.valid)
                 for (const auto& [request, ids] : pending->second.updates) index->second.Update(request, ids);
             if (index->second.commits_valid)
@@ -152,6 +228,85 @@ void ForgetPaymasterSessionIndex(WalletDatabase& database)
 {
     std::lock_guard<std::mutex> lock{session_index_mutex};
     session_indexes.erase(&database);
+}
+
+bool ObservePaymasterProviderHistory(WalletBatch& batch, WalletDatabase& database,
+    size_t limit, PaymasterProviderHistory& history, std::string& error)
+{
+    history = {};
+    error.clear();
+    if (!limit) { error = "PAYMASTER_INVALID_HISTORY_LIMIT"; return false; }
+    bool sessions_complete, recoveries_complete;
+    std::string after_session;
+    uint256 after_recovery;
+    {
+        std::lock_guard<std::mutex> lock{session_index_mutex};
+        auto& index = session_indexes[&database].provider_history;
+        if (index.limit != limit) { index = {}; index.limit = limit; }
+        sessions_complete = index.sessions_complete || index.overflow;
+        recoveries_complete = index.recoveries_complete || index.overflow;
+        after_session = index.after_session;
+        after_recovery = index.after_recovery;
+    }
+    std::vector<DigiDollar::Paymaster::PaymentSession> sessions;
+    std::vector<DigiDollar::Paymaster::AlternativeRecoveryRecord> recoveries;
+    std::string next_session;
+    uint256 next_recovery;
+    if ((!sessions_complete && !batch.ListPaymasterSessionsPage(after_session,
+            PAYMASTER_BACKGROUND_SESSION_ROWS, PAYMASTER_BACKGROUND_SESSION_BYTES, sessions, next_session)) ||
+        (!recoveries_complete && !batch.ListPaymasterAlternativeRecoveriesPage(after_recovery, recoveries, next_recovery))) {
+        std::lock_guard<std::mutex> lock{session_index_mutex};
+        session_indexes[&database].provider_history = {};
+        error = "PAYMASTER_HISTORY_DATABASE_READ";
+        return false;
+    }
+    {
+        std::lock_guard<std::mutex> lock{session_index_mutex};
+        auto& index = session_indexes[&database].provider_history;
+        for (const auto& session : sessions) {
+            index.UpdateSession(session.request_id,
+                session.provider_side ? std::make_optional(session.session_id) : std::nullopt);
+        }
+        for (const auto& recovery : recoveries) index.UpdateRecovery(recovery.recovery_id, recovery.provider_side);
+        if (!sessions_complete) { index.after_session = next_session; index.sessions_complete = next_session.empty(); }
+        if (!recoveries_complete) { index.after_recovery = next_recovery; index.recoveries_complete = next_recovery.IsNull(); }
+        history.retained = index.Size();
+        history.complete = index.sessions_complete && index.recoveries_complete;
+        history.full = index.overflow || history.retained >= limit;
+    }
+    return true;
+}
+
+PaymasterProviderDrainCandidates GetPaymasterProviderDrainCandidates(
+    WalletDatabase& database, const uint256& provider_id)
+{
+    std::lock_guard<std::mutex> lock{session_index_mutex};
+    auto& index = session_indexes[&database].provider_history;
+    if (index.drain_provider != provider_id) {
+        index.drain_provider = provider_id;
+        index.drain_sessions.clear();
+        for (const auto& [request, session] : index.sessions) index.drain_sessions.insert(request);
+        index.drain_recoveries = index.recoveries;
+    }
+    PaymasterProviderDrainCandidates page;
+    auto session = index.drain_sessions.begin();
+    for (; session != index.drain_sessions.end() && page.sessions.size() < PAYMASTER_BACKGROUND_SESSION_ROWS; ++session)
+        page.sessions.push_back(*session);
+    auto recovery = index.drain_recoveries.begin();
+    for (; recovery != index.drain_recoveries.end() && page.recoveries.size() < PAYMASTER_BACKGROUND_SESSION_ROWS; ++recovery)
+        page.recoveries.push_back(*recovery);
+    page.complete = session == index.drain_sessions.end() && recovery == index.drain_recoveries.end();
+    return page;
+}
+void CompletePaymasterProviderDrainCandidate(WalletDatabase& database, const std::string& request)
+{
+    std::lock_guard<std::mutex> lock{session_index_mutex};
+    session_indexes[&database].provider_history.drain_sessions.erase(request);
+}
+void CompletePaymasterProviderDrainCandidate(WalletDatabase& database, const uint256& recovery)
+{
+    std::lock_guard<std::mutex> lock{session_index_mutex};
+    session_indexes[&database].provider_history.drain_recoveries.erase(recovery);
 }
 
 PaymasterScanPosition GetPaymasterScanPosition(WalletDatabase& database, PaymasterScan scan)
@@ -228,6 +383,7 @@ void PrimePaymasterSessionIndex(WalletDatabase& database,
     auto rebuilt = BuildSessionIndex(sessions);
     std::lock_guard<std::mutex> lock{session_index_mutex};
     rebuilt.revision = session_indexes[&database].revision + 1;
+    rebuilt.provider_history = std::move(session_indexes[&database].provider_history);
     rebuilt.capacity_cleanup_after = session_indexes[&database].capacity_cleanup_after;
     rebuilt.scans = std::move(session_indexes[&database].scans);
     rebuilt.relay_round = session_indexes[&database].relay_round;
@@ -576,7 +732,8 @@ bool WalletBatch::WritePaymasterSession(const DigiDollar::Paymaster::PaymentSess
         return false;
     }
     QueueSessionIndex(this, m_database, session.request_id,
-                      FinalIds{session.final_txid, session.recovery_txid});
+                      FinalIds{session.final_txid, session.recovery_txid},
+                      session.provider_side ? std::make_optional(session.session_id) : std::nullopt);
     if (!own || TxnCommit()) return true;
     TxnAbort();
     return false;
@@ -699,7 +856,7 @@ bool WalletBatch::ErasePaymasterSession(const std::string& request_id)
         if (own) TxnAbort();
         return false;
     }
-    QueueSessionIndex(this, m_database, request_id, std::nullopt);
+    QueueSessionIndex(this, m_database, request_id, std::nullopt, std::nullopt);
     if (!own || TxnCommit()) return true;
     TxnAbort();
     return false;
@@ -784,9 +941,16 @@ bool WalletBatch::WritePaymasterAlternativeRecovery(
                                     recovery.recovery_provider_id, recovery.client_nonce)) {
         return false;
     }
-    return WritePaymasterIC(
-        std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY, recovery.recovery_id),
-        recovery, overwrite);
+    const bool own = !PaymasterCheckpointInTransaction(this);
+    if (own && !TxnBegin()) return false;
+    if (!WritePaymasterIC(std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY, recovery.recovery_id), recovery, overwrite)) {
+        if (own) TxnAbort();
+        return false;
+    }
+    QueueProviderRecoveryIndex(this, m_database, recovery.recovery_id, recovery.provider_side);
+    if (!own || TxnCommit()) return true;
+    TxnAbort();
+    return false;
 }
 
 DatabaseReadStatus WalletBatch::ReadPaymasterAlternativeRecoveryWithStatus(
@@ -965,9 +1129,17 @@ bool WalletBatch::ListPaymasterAlternativeRecoveries(
 bool WalletBatch::ErasePaymasterAlternativeRecovery(
     const uint256& recovery_id)
 {
-    return !recovery_id.IsNull() &&
-           ErasePaymasterIC(std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY,
-                                  recovery_id));
+    if (recovery_id.IsNull()) return false;
+    const bool own = !PaymasterCheckpointInTransaction(this);
+    if (own && !TxnBegin()) return false;
+    if (!ErasePaymasterIC(std::make_pair(DBKeys::PAYMASTER_ALT_RECOVERY, recovery_id))) {
+        if (own) TxnAbort();
+        return false;
+    }
+    QueueProviderRecoveryIndex(this, m_database, recovery_id, false);
+    if (!own || TxnCommit()) return true;
+    TxnAbort();
+    return false;
 }
 
 bool WalletBatch::ArchivePaymasterAlternativeRecovery(
@@ -1046,7 +1218,16 @@ bool WalletBatch::WritePaymasterAttempt(const DigiDollar::Paymaster::ProviderAtt
             DigiDollar::Paymaster::MAX_EQUIVOCATION_ARTIFACT_BYTES) {
         return false;
     }
-    return WritePaymasterIC(std::make_pair(DBKeys::PAYMASTER_ATTEMPT, attempt.attempt_id), attempt, overwrite);
+    const bool own = !PaymasterCheckpointInTransaction(this);
+    if (own && !TxnBegin()) return false;
+    if (!WritePaymasterIC(std::make_pair(DBKeys::PAYMASTER_ATTEMPT, attempt.attempt_id), attempt, overwrite)) {
+        if (own) TxnAbort();
+        return false;
+    }
+    QueueProviderAttemptIndex(this, m_database, attempt.session_id);
+    if (!own || TxnCommit()) return true;
+    TxnAbort();
+    return false;
 }
 
 DatabaseReadStatus WalletBatch::ReadPaymasterAttemptWithStatus(
@@ -1086,7 +1267,19 @@ bool WalletBatch::HasPaymasterAttempt(const uint256& attempt_id)
 
 bool WalletBatch::ErasePaymasterAttempt(const uint256& attempt_id)
 {
-    return ErasePaymasterIC(std::make_pair(DBKeys::PAYMASTER_ATTEMPT, attempt_id));
+    DigiDollar::Paymaster::ProviderAttempt attempt;
+    const auto status = ReadPaymasterAttemptWithStatus(attempt_id, attempt);
+    if (status != DatabaseReadStatus::FOUND && status != DatabaseReadStatus::NOT_FOUND) return false;
+    const bool own = !PaymasterCheckpointInTransaction(this);
+    if (own && !TxnBegin()) return false;
+    if (!ErasePaymasterIC(std::make_pair(DBKeys::PAYMASTER_ATTEMPT, attempt_id))) {
+        if (own) TxnAbort();
+        return false;
+    }
+    if (status == DatabaseReadStatus::FOUND) QueueProviderAttemptIndex(this, m_database, attempt.session_id);
+    if (!own || TxnCommit()) return true;
+    TxnAbort();
+    return false;
 }
 
 bool WalletBatch::WritePaymasterCapacitySnapshot(

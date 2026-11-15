@@ -42,7 +42,7 @@ using namespace DigiDollar::Paymaster;
 using namespace paymaster_store::internal;
 
 bool paymaster_store::internal::CheckProviderHistoryCapacity(
-    WalletBatch& batch, const std::string& request_id, std::string& error,
+    WalletBatch& batch, WalletDatabase& database, const std::string& request_id, std::string& error,
     const uint256& recovery_id)
 {
     DatabaseReadStatus status;
@@ -58,23 +58,14 @@ bool paymaster_store::internal::CheckProviderHistoryCapacity(
         error = "PAYMASTER_SESSION_DATABASE_READ";
         return false;
     }
-    std::vector<PaymentSession> sessions;
-    if (!batch.ListPaymasterSessions(sessions)) {
-        error = "PAYMASTER_SESSION_DATABASE_READ";
-        return false;
-    }
-    std::vector<AlternativeRecoveryRecord> recoveries;
-    if (!batch.ListPaymasterAlternativeRecoveries(recoveries)) {
-        error = "PAYMASTER_RECOVERY_DATABASE_READ";
-        return false;
-    }
-    const size_t retained_sessions = std::count_if(sessions.begin(), sessions.end(),
-        [](const PaymentSession& session) { return session.provider_side; });
-    const size_t retained_recoveries = std::count_if(recoveries.begin(), recoveries.end(),
-        [](const AlternativeRecoveryRecord& recovery) { return recovery.provider_side; });
-    if (retained_sessions >= MAX_RETAINED_PROVIDER_SESSIONS ||
-        retained_recoveries >= MAX_RETAINED_PROVIDER_SESSIONS - retained_sessions) {
+    PaymasterProviderHistory history;
+    if (!ObservePaymasterProviderHistory(batch, database, MAX_RETAINED_PROVIDER_SESSIONS, history, error)) return false;
+    if (history.full) {
         error = "PAYMASTER_PROVIDER_HISTORY_FULL";
+        return false;
+    }
+    if (!history.complete) {
+        error = "PAYMASTER_HISTORY_SCAN_PENDING";
         return false;
     }
     return true;
@@ -132,7 +123,7 @@ bool PaymasterStore::CheckProviderQuoteAdmission(
         return false;
     }
 
-    if (!CheckProviderHistoryCapacity(batch, request.intent.request_id, error)) return false;
+    if (!CheckProviderHistoryCapacity(batch, m_wallet.GetDatabase(), request.intent.request_id, error)) return false;
 
     PaymasterCapacityRequest capacity_request;
     PaymasterCapacityProof capacity_proof;
@@ -204,7 +195,7 @@ bool PaymasterStore::CheckProviderRecoveryAdmission(
         error = batch.HasPaymasterProviderBudgetLedger() ? "PAYMASTER_INVALID_PROVIDER_BUDGET_LEDGER" : "PAYMASTER_PROVIDER_BUDGET_LEDGER_NOT_FOUND";
         return false;
     }
-    if (!CheckProviderHistoryCapacity(batch, request.request_id, error,
+    if (!CheckProviderHistoryCapacity(batch, m_wallet.GetDatabase(), request.request_id, error,
             GetAlternativeRecoveryId(request.request_id, request.session_id,
                 request.recovery_provider_id, request.client_nonce))) return false;
     netgroup_bucket = GetNetgroupBudgetBucket(
@@ -412,7 +403,7 @@ bool PaymasterStore::CommitProviderQuote(
         error = "PAYMASTER_ATTEMPT_ID_CONFLICT";
         return false;
     }
-    if (!CheckProviderHistoryCapacity(batch, request.intent.request_id, error)) return false;
+    if (!CheckProviderHistoryCapacity(batch, m_wallet.GetDatabase(), request.intent.request_id, error)) return false;
 
     PaymasterCapacityRequest capacity_request;
     PaymasterCapacityProof capacity_proof;

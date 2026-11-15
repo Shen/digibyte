@@ -301,6 +301,7 @@ void BackgroundFailure(WalletContext& context, CWallet& wallet,
         state = ProviderServiceState::WAITING_FOR_UNLOCK;
     } else if (failure.code == "PAYMASTER_INVALID_MAINTENANCE_LEDGER" ||
                failure.code == "PAYMASTER_PROVIDER_SYNCING" ||
+               failure.code == "PAYMASTER_HISTORY_SCAN_PENDING" ||
                failure.code == "PAYMASTER_REQUIRES_READY_TXINDEX" ||
                failure.code == "PAYMASTER_TXINDEX_NOT_READY" ||
                failure.code == "PAYMASTER_NODE_NOT_READY") {

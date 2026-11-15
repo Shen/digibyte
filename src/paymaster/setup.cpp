@@ -415,7 +415,7 @@ UniValue OperatorDiagnostics(const UniValue& provider, int64_t unlocked_until, i
         if (code == "PAYMASTER_WALLET_LOCKED")
             add(code, "action_required", "wallet", "unlock");
         else if (code == "PAYMASTER_NODE_NOT_READY" || code == "PAYMASTER_REQUIRES_READY_TXINDEX" || code == "PAYMASTER_DIGIDOLLAR_NOT_ACTIVE" ||
-                 code == "PAYMASTER_PROVIDER_SYNCING" || code == "PAYMASTER_TXINDEX_NOT_READY")
+                 code == "PAYMASTER_PROVIDER_SYNCING" || code == "PAYMASTER_TXINDEX_NOT_READY" || code == "PAYMASTER_HISTORY_SCAN_PENDING")
             add(code, "waiting", "node", "wait");
         else if (code == "PAYMASTER_OPERATIONAL_SLOT_MISSING" && temporary_capacity)
             add(code, "waiting", work_phase == "confirmation" ? "liquidity" : "payments", "wait");
@@ -446,6 +446,7 @@ UniValue OperatorDiagnostics(const UniValue& provider, int64_t unlocked_until, i
             if (!preparation_pending) add(service_error.get_str(), "action_required", "liquidity", "review_liquidity");
         } else if (provider.find_value("service_state").isStr() && provider.find_value("service_state").get_str() != "error" &&
                   (service_error.get_str() == "PAYMASTER_PROVIDER_SYNCING" ||
+                   service_error.get_str() == "PAYMASTER_HISTORY_SCAN_PENDING" ||
                    service_error.get_str() == "PAYMASTER_REQUIRES_READY_TXINDEX" ||
                    service_error.get_str() == "PAYMASTER_TXINDEX_NOT_READY" ||
                    service_error.get_str() == "PAYMASTER_NODE_NOT_READY")) {

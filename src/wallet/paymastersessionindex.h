@@ -53,6 +53,26 @@ public:
 constexpr size_t PAYMASTER_BACKGROUND_SESSION_ROWS{64};
 constexpr size_t PAYMASTER_BACKGROUND_SESSION_BYTES{64 * 8192};
 
+struct PaymasterProviderHistory {
+    size_t retained{0};
+    bool complete{false};
+    bool full{false};
+};
+/** Bounded disposable observation. Caller holds cs_wallet. Counts constrain
+ * resource admission only; locators never grant signing/payment authority.
+ * Committed typed writes update the observation; abort/unload discards it. */
+bool ObservePaymasterProviderHistory(WalletBatch& batch, WalletDatabase& database,
+    size_t limit, PaymasterProviderHistory& history, std::string& error);
+struct PaymasterProviderDrainCandidates {
+    std::vector<std::string> sessions;
+    std::vector<uint256> recoveries;
+    bool complete{false};
+};
+PaymasterProviderDrainCandidates GetPaymasterProviderDrainCandidates(
+    WalletDatabase& database, const uint256& provider_id);
+void CompletePaymasterProviderDrainCandidate(WalletDatabase& database, const std::string& request);
+void CompletePaymasterProviderDrainCandidate(WalletDatabase& database, const uint256& recovery);
+
 /** Derived lookup only. Caller holds the wallet lock; returned records are
  * freshly read and still require exact-artifact/authorization validation. */
 bool ListPaymasterFinalSessions(WalletBatch& batch, WalletDatabase& database,
