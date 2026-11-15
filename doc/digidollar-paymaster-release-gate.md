@@ -4,6 +4,35 @@ There is **no complete current-revision release certification** in this record.
 The candidate below and historical checkpoints identify actual verification;
 implemented behavior alone does not establish release acceptance.
 
+## Checkpoint crash residues and shared validation (2026-11-16)
+
+Review baseline: `b0d8c295eb4cc27b5733aaeec834d1eac4b61548`. Corrections:
+checkpoint recovery `6375bc272d`, shared public-offer eligibility `32ec990949`,
+and shared pool-target validation `5087d0bdfc`. Temporary filenames no longer
+reuse a native financial token; exclusive creation preserves abandoned paths.
+Setup, liquidity and pool operations retain their distinct funding/retirement
+contracts through shared target validators. No boundary policy was expanded.
+
+| Actual local check | Result and scope |
+| --- | --- |
+| Native, final partial link | **53 distinct selected cases / 13,423 assertions, exit 0**, in two nonoverlapping selections. Covers partial/full temporary files and directories, failed accounting commit, exact wallet/SQLite reopen, signed carrier-history replay, stale clones, checkpoint concurrency, common offer filters, gross rounding, recovery/privacy ordering, setup approvals/lost replies, retained-target retirement, manual locks, exact final observation and ordinary DGB reannouncement. Unselected cases were not run. |
+| Negative checkpoint control | Both native pool-accounting recovery and signed carrier-history replay fail with the old checkpoint object and the same current test/caller objects. This is an isolated producer comparison, not a clean historical build. |
+| Qt, partial link | **Three selected functions / 15 data rows, exit 0**, excluding init/cleanup: liquidity approval defaults, typed offer-policy values and reserve presets; Windows/Fusion. The current production objects are linked with retained Qt/test dependencies. |
+| Open Qt setup regression | `paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep` has four failing rows and ten passing rows. The `already-funded` failure also reproduces with the retained baseline Qt executable below; the existing setup fixture/branch correction is not included. These failures remain open and are not counted as passes. |
+| Compilation | Five changed production translation units and five changed native test units freshly compiled with MSVC 19.43/toolset 14.43, C++20. All five production units also pass C++17 `/Zs`. Current source/object fingerprints match; retained dependencies lack complete transitive rebuild provenance. |
+| Architecture | Working-tree dependency/cycle checks, six boundary fixtures, change-record JSON and whitespace checks pass. Committed changed-path/shared-Core validation uses the trusted review baseline above. |
+
+SHA256: native `13f782430b71f55991ea49ea1b15f332e5ed4539b0ddfb943914436874218f60`;
+Qt `2278f6a7065cf8b5a6008e9d87629dc7ee1901154f3f98469632d46e20337119`.
+The baseline Qt negative control uses
+`cff1e7dd6dc2e16d3f97da27279df89088dfa29e6c198d27bdc6bf1c6551da52`.
+Commands, selections, failed/passing logs, random-context/test seeds and object
+fingerprints remain locally in ignored `.ai/implement-review-b0d8/`.
+Crash residues are simulated; carrier construction/signing uses a mock chain.
+Physical power-loss and the complete file-I/O failure matrix remain unverified.
+Complete clean products, full functional/platform suites, sanitizers/fuzz and
+project-plugin Tidy were not run and remain operator gates in the test runbook.
+
 ## Current observations, early result retention and liquidity (2026-11-15)
 
 Review baseline: `498c6c584300be76929b665cf83c82f27c354532`. Corrections:

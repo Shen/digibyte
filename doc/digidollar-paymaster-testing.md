@@ -46,6 +46,20 @@ these targeted controls does not establish repository-wide strict C++17 support.
 
 Authorization and serving regressions (after rebuilding the selected tests):
 
+For temporary-checkpoint recovery and shared selection/target validation, run:
+
+```powershell
+& ./build_msvc/x64/Release/test_digibyte.exe '--run_test=paymaster_wallet_security_tests/checkpoint_native_resume_preserves_abandoned_temporary_paths,checkpoint_sqlite_initial_native_commit_recovers_exact_intent:paymaster_wallet_identity_tests/finite_carrier_history_survives_reconciliation_restart_and_write_retry,rebalance_saved_targets_do_not_assert_provider_readiness:paymaster_client_tests/candidate_builders_share_public_eligibility_and_reputation_filters:paymaster_provider_tests/pool_targets_separate_new_funding_from_reviewed_retirement:paymaster_setup_tests/setup_checks_core_policy_budgets_and_pool_before_writes' --report_level=detailed --random=20261116
+```
+
+The native test preserves partial/full files and a directory across failed
+accounting commit, wallet reopen and exact completion, while stale copies remain
+fenced. SQLite separately closes/reopens a real database. Carrier history uses
+real wallet construction/signing with a mock chain, then repeats the saved
+execution without changing its witness, ledger or transaction count. These are
+simulated crash residues and commit failures, not physical power-loss tests.
+Retain the adjacent checkpoint, finance, ordinary lock and final-execution cases.
+
 For exact observation and early result failure boundaries, select
 `paymaster_wallet_security_tests/exact_final_observation_rechecks_chain_pools_and_snapshot`,
 `durable_client_final_executor_revalidates_authority_and_replays_exact_payment`

@@ -96,6 +96,9 @@ An announcement may become unavailable before expiry. Expiry does not prove
 already signed spending authority harmless.
 
 Offer comparisons share `OfferCandidateLess` in `src/paymaster/client.cpp`.
+Normal, fixed-total and recovery selection share public-offer eligibility through
+`ForEachEligiblePublicOffer`: endpoint, identity, expiry, scope, model and local
+reputation filters precede their distinct amount projections.
 Within the selected policy, non-deprioritized offers precede deprioritized ones;
 cost precedes sufficient reliability data, success rate, known/lower latency
 and provider/offer IDs. Fixed-total comparisons use lower fee then higher
@@ -432,6 +435,11 @@ plan. Saved older unsubmitted automatic maintenance transactions remain protecte
 and are reported as awaiting broadcast,
 separately from transactions observed in a relay pool awaiting confirmation.
 See [pool setup](digidollar-paymaster-pool-setup.md).
+Setup, liquidity policies and provider pool operations share
+`ValidateProviderPoolTargets`. New funding additionally uses
+`ValidateProviderPoolFundingTargets` for model-specific carrier requirements.
+Exact saved-target retirement and DGB-only release retain structural validation;
+reducing reserves does not enable service or assert complete payment capacity.
 Funded DD plans are revalidated through `ValidateDigiDollarTransferPlan` under
 the execution wallet lock before building/signing. It reuses DD selection,
 ordinary fee-coin availability and capacity/fee preflight for the exact saved
@@ -639,6 +647,10 @@ registry lock only locates shared states; it performs no file/database I/O. Path
 come from the single cached network data directory and the genesis/provider filename, normalized
 before lookup, so wallet clones share the same file lock. The OS lock, flush,
 rename and checkpoint-before-database-commit ordering remain mandatory.
+Each checkpoint write exclusively creates a fresh random temporary filename,
+independently of its financial token. Native resume can therefore retain its
+exact token while leaving partial files, complete abandoned files and unrelated
+paths untouched. Only the current writer's own temporary file is cleaned up.
 `WalletBatch` routes successful commit, abort and destruction through
 `PaymasterWalletTransactionEnd`. That common completion publishes or discards
 derived session/finance notifications and then releases checkpoint state;
