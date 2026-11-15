@@ -8224,9 +8224,17 @@ BOOST_AUTO_TEST_CASE(provider_successor_reconciliation_recycles_carrier_and_dgb_
     const COutPoint initial_carrier{uint256S("7001"), 0};
     const COutPoint initial_dgb{uint256S("7002"), 0};
 
-    const auto fresh_script = [] {
+    const auto fresh_script = [&] {
         CKey key;
         key.MakeNewKey(true);
+        FlatSigningProvider keys;
+        std::string error;
+        auto descriptor = Parse("tr(" + EncodeSecret(key) + ")", keys, error, false);
+        BOOST_REQUIRE_MESSAGE(descriptor, error);
+        WalletDescriptor wallet_descriptor{std::move(descriptor), 0, 0, 1, 0};
+        LOCK(m_wallet.cs_wallet);
+        m_wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+        BOOST_REQUIRE(m_wallet.AddWalletDescriptor(wallet_descriptor, keys, "", false));
         TaprootBuilder builder;
         builder.Finalize(XOnlyPubKey{key.GetPubKey()});
         return GetScriptForDestination(builder.GetOutput());

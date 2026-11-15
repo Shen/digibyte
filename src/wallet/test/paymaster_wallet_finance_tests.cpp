@@ -394,9 +394,14 @@ struct FinanceTestingSetup : WalletTestingSetup {
         const auto user_parent = MakeTransactionRef(user_funding);
         BOOST_REQUIRE(provider->AddToWallet(user_parent, TxStateConfirmed{Params().GenesisBlock().GetHash(), 1, 0}));
         CMutableTransaction final;
+        final.SetDigiDollarType(::DD_TX_TRANSFER);
         final.vin.emplace_back(COutPoint{user_parent->GetHash(), 0});
         final.vin.emplace_back(COutPoint{parent->GetHash(), 0});
+        final.vout.emplace_back(0, identity.identity_script); // Exact DD wallet return.
+        final.vout.emplace_back(0, identity.identity_script); // Separate >=1-DD fee.
         final.vout.emplace_back(1500, identity.identity_script);
+        final.vout.emplace_back(0, CScript{} << OP_RETURN << std::vector<unsigned char>{'D', 'D'}
+            << CScriptNum(::DD_TX_TRANSFER) << CScriptNum(900) << CScriptNum(100));
         AlternativeRecoveryRecord recovery;
         recovery.provider_side = true;
         recovery.request_id = "550e8400-e29b-41d4-a716-446655449004";
@@ -1306,7 +1311,7 @@ BOOST_AUTO_TEST_CASE(recovery_final_commit_failure_cannot_publish_finance_or_spe
         PaymasterFinalCommitFailure failure{*database};
         BOOST_CHECK(!store.CommitProviderAlternativeRecoveryFinal(recovery, commit,
             recovery.signed_result, Params().GenesisBlock().GetHash(), error));
-        BOOST_REQUIRE(failure.Armed());
+        BOOST_REQUIRE_MESSAGE(failure.Armed(), error);
     }
     BOOST_REQUIRE(database->m_records.count(PaymasterCheckpointIntentKey()));
     BOOST_CHECK(WithoutPaymasterCheckpointIntent(database->m_records) == before);
