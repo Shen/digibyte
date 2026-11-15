@@ -30,6 +30,7 @@
 #include <validation.h>
 #include <validationinterface.h>
 #include <version.h>
+#include <wallet/test/paymaster_chain.h>
 #include <wallet/test/util.h>
 #include <wallet/test/wallet_test_fixture.h>
 #include <wallet/wallet.h>
@@ -503,7 +504,7 @@ BOOST_FIXTURE_TEST_CASE(created_payment_resume_selects_original_unreserved_walle
     PaymentSession other;
     BOOST_REQUIRE(store.CreateOrJoinSession("550e8400-e29b-41d4-a716-446655440024",
         uint256S("24"), FeeMode::PAYMASTER, GetTime(), other, error) == CreatePaymasterSessionResult::CREATED);
-    BOOST_REQUIRE(store.ReserveInputs(other.request_id, {{first, ReservationRole::USER_DD}},
+    BOOST_REQUIRE(wallet::test::PaymasterLegacyFixtureAccess::ReserveInputs(store, other.request_id, {{first, ReservationRole::USER_DD}},
         FeeMode::PAYMASTER, GetTime(), error));
     BOOST_CHECK(!SelectCreatedClientPaymentInputs(m_wallet, dd_wallet, replay->session,
         replay->original_inputs, DDCents{3000}, selected, total, &amounts, error)); // Metadata cannot borrow another session's reservation.
@@ -603,7 +604,7 @@ BOOST_FIXTURE_TEST_CASE(client_order_selection_and_join_are_atomic_and_keep_orig
         BOOST_CHECK(result[0]->original_inputs == std::vector<COutPoint>{first});
         PaymasterStore store{owner};
         std::string error;
-        BOOST_REQUIRE_MESSAGE(store.ReserveInputs(input.request_id, {{first, ReservationRole::USER_DD}},
+        BOOST_REQUIRE_MESSAGE(wallet::test::PaymasterLegacyFixtureAccess::ReserveInputs(store, input.request_id, {{first, ReservationRole::USER_DD}},
             FeeMode::PAYMASTER, GetTime(), error), error);
         const auto replay = SelectOrJoinClientPaymentOrder(owner, dd_wallet, input, DDCents{500}, GetTime());
         BOOST_CHECK(replay.original_inputs == result[0]->original_inputs);
@@ -718,7 +719,7 @@ BOOST_FIXTURE_TEST_CASE(client_replay_conflicts_precede_preparation_and_preserve
         }
     };
     check_retries(session);
-    BOOST_REQUIRE(store.ReserveInputs(original.request_id,
+    BOOST_REQUIRE(wallet::test::PaymasterLegacyFixtureAccess::ReserveInputs(store, original.request_id,
         {{inputs[0], ReservationRole::USER_DD}, {inputs[1], ReservationRole::USER_DD}},
         original.mode, GetTime(), error));
     BOOST_REQUIRE(store.GetSessionByRequestId(original.request_id, session));

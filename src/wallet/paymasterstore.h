@@ -30,6 +30,7 @@ class ExactFinalTransactionProof;
 namespace wallet {
 
 class CWallet;
+namespace test { class PaymasterLegacyFixtureAccess; }
 
 /** Paymaster reservations are hard safety locks. Unlike ordinary lockunspent
  * hints they may not be bypassed by preset coin-control inputs.
@@ -215,12 +216,6 @@ public:
      * establish a send. Does not sign, broadcast or change payment authority. */
     bool ReconcileClientPaymentHistory(const std::string& request_id, std::string& error);
 
-    bool ReserveInputs(const std::string& request_id,
-                       const std::vector<std::pair<COutPoint, DigiDollar::Paymaster::ReservationRole>>& inputs,
-                       DigiDollar::Paymaster::FeeMode used_mode,
-                       int64_t now,
-                       std::string& error);
-
     bool TransitionSession(const std::string& request_id,
                            DigiDollar::Paymaster::SessionState state,
                            DigiDollar::Paymaster::PendingPhase phase,
@@ -228,9 +223,6 @@ public:
                            int64_t now,
                            std::string& error);
 
-    bool AddAttempt(const std::string& request_id,
-                    DigiDollar::Paymaster::ProviderAttempt attempt,
-                    std::string& error);
     /** Persist an unsigned intent and reserve its USER_DD inputs before an
      * encrypted wallet is unlocked. */
     bool PreparePaymentIntent(
@@ -596,13 +588,6 @@ public:
                                    const uint256& expected_wtxid,
                                    int64_t now,
                                    std::string& error);
-    /** Atomically publish the attempt and session state observed after the
-     * exact final transaction has been accepted by the node or chain. */
-    bool RecordClientFinalObservation(const std::string& request_id,
-                                      const uint256& attempt_id,
-                                      bool confirmed,
-                                      int64_t now,
-                                      std::string& error);
     /** Observe an exact deeply confirmed payment or alternative recovery.
      * Creates no signature, remote result or broadcast authority. */
     bool CompleteClientConfirmedFinal(const std::string& request_id,
@@ -835,6 +820,28 @@ public:
     bool PruneFinalSession(const std::string& request_id, std::string& error);
 
 private:
+    friend class test::PaymasterLegacyFixtureAccess;
+    // Retained only for constructing and validating historical fixture states.
+    // Productive callers use the atomic payment/capacity and reconciliation
+    // operations above; these legacy paths are not application APIs.
+    bool ReserveInputs(const std::string& request_id,
+                       const std::vector<std::pair<COutPoint, DigiDollar::Paymaster::ReservationRole>>& inputs,
+                       DigiDollar::Paymaster::FeeMode used_mode,
+                       int64_t now,
+                       std::string& error);
+    bool AddAttempt(const std::string& request_id,
+                    DigiDollar::Paymaster::ProviderAttempt attempt,
+                    std::string& error);
+    bool RecordClientFinalObservation(const std::string& request_id,
+                                      const uint256& attempt_id,
+                                      bool confirmed,
+                                      int64_t now,
+                                      std::string& error);
+    static bool ReserveOperationalSlotForLegacyFixture(
+        CWallet& wallet, const uint256& reservation_id, bool require_carrier,
+        int32_t tip_height, int32_t minimum_confirmations, int64_t now,
+        std::vector<DigiDollar::Paymaster::ProviderPoolEntry>& reserved,
+        std::string& error);
     bool ReconcileCurrentFinalTransaction(const CTransaction& transaction,
                                           bool allow_final_prune,
                                           int64_t now, std::string& error);

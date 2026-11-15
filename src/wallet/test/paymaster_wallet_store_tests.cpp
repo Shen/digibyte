@@ -44,6 +44,7 @@
 #include <wallet/rpc/paymaster.h>
 #include <wallet/rpc/paymaster_internal.h>
 #include <wallet/scriptpubkeyman.h>
+#include <wallet/test/paymaster_chain.h>
 #include <wallet/test/util.h>
 #include <wallet/test/wallet_test_fixture.h>
 #include <wallet/wallet.h>
@@ -1883,7 +1884,7 @@ BOOST_AUTO_TEST_CASE(prune_rejects_unreadable_attempt_without_mutation)
     attempt.attempt_id = uint256S("f011");
     attempt.provider_id = uint256S("f012");
     attempt.created_at = attempt.updated_at = 101;
-    BOOST_REQUIRE(store.AddAttempt(request_id, attempt, error));
+    BOOST_REQUIRE(wallet::test::PaymasterLegacyFixtureAccess::AddAttempt(store, request_id, attempt, error));
     BOOST_REQUIRE(store.TransitionSession(
         request_id, SessionState::FAILED, PendingPhase::NONE, {}, 102,
         error));
@@ -2000,20 +2001,20 @@ BOOST_AUTO_TEST_CASE(reservations_share_standard_wallet_locks)
 
     BOOST_REQUIRE(store.CreateOrJoinSession(first_id, uint256::ONE, FeeMode::PAYMASTER, 100,
                                             first, error) == CreatePaymasterSessionResult::CREATED);
-    BOOST_CHECK(store.ReserveInputs(first_id, {{input, ReservationRole::USER_DD}},
+    BOOST_CHECK(wallet::test::PaymasterLegacyFixtureAccess::ReserveInputs(store, first_id, {{input, ReservationRole::USER_DD}},
                                     FeeMode::PAYMASTER, 101, error));
     {
         LOCK(m_wallet.cs_wallet);
         BOOST_CHECK(m_wallet.IsLockedCoin(input));
     }
-    BOOST_CHECK(store.ReserveInputs(first_id, {{input, ReservationRole::USER_DD}},
+    BOOST_CHECK(wallet::test::PaymasterLegacyFixtureAccess::ReserveInputs(store, first_id, {{input, ReservationRole::USER_DD}},
                                     FeeMode::PAYMASTER, 102, error));
     BOOST_CHECK(IsPaymasterInputReserved(m_wallet, input));
 
     PaymentSession second;
     BOOST_REQUIRE(store.CreateOrJoinSession(second_id, uint256S("02"), FeeMode::PAYMASTER, 100,
                                             second, error) == CreatePaymasterSessionResult::CREATED);
-    BOOST_CHECK(!store.ReserveInputs(second_id, {{input, ReservationRole::USER_DD}},
+    BOOST_CHECK(!wallet::test::PaymasterLegacyFixtureAccess::ReserveInputs(store, second_id, {{input, ReservationRole::USER_DD}},
                                      FeeMode::PAYMASTER, 102, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_INPUT_ALREADY_RESERVED");
 }
@@ -2267,7 +2268,7 @@ BOOST_FIXTURE_TEST_CASE(ambiguous_authorization_is_protected_and_prunes_to_tombs
 
     BOOST_REQUIRE(store.CreateOrJoinSession(request_id, uint256::ONE, FeeMode::PAYMASTER, 100,
                                             session, error) == CreatePaymasterSessionResult::CREATED);
-    BOOST_REQUIRE(store.ReserveInputs(request_id, {{input, ReservationRole::USER_DD}},
+    BOOST_REQUIRE(wallet::test::PaymasterLegacyFixtureAccess::ReserveInputs(store, request_id, {{input, ReservationRole::USER_DD}},
                                       FeeMode::PAYMASTER, 101, error));
     BOOST_REQUIRE(store.TransitionSession(request_id, SessionState::AUTHORIZED, PendingPhase::NONE,
                                           {}, 102, error));
@@ -2350,7 +2351,7 @@ BOOST_FIXTURE_TEST_CASE(final_transaction_observations_handle_mempool_reorg_and_
     BOOST_REQUIRE(store.CreateOrJoinSession(request_id, uint256S("39"),
                                             FeeMode::PAYMASTER, 100, session, error) ==
                   CreatePaymasterSessionResult::CREATED);
-    BOOST_REQUIRE(store.ReserveInputs(request_id, {{input, ReservationRole::USER_DD}},
+    BOOST_REQUIRE(wallet::test::PaymasterLegacyFixtureAccess::ReserveInputs(store, request_id, {{input, ReservationRole::USER_DD}},
                                       FeeMode::PAYMASTER, 101, error));
     BOOST_REQUIRE(store.TransitionSession(request_id, SessionState::AUTHORIZED,
                                           PendingPhase::NONE, {}, 102, error));
@@ -2605,7 +2606,7 @@ BOOST_FIXTURE_TEST_CASE(historical_self_recovery_reconciliation_is_idempotent_an
     BOOST_REQUIRE(store.CreateOrJoinSession(request_id, uint256S("42"),
                                             FeeMode::PAYMASTER, 100, session, error) ==
                   CreatePaymasterSessionResult::CREATED);
-    BOOST_REQUIRE(store.ReserveInputs(request_id, {{input, ReservationRole::USER_DD}},
+    BOOST_REQUIRE(wallet::test::PaymasterLegacyFixtureAccess::ReserveInputs(store, request_id, {{input, ReservationRole::USER_DD}},
                                       FeeMode::PAYMASTER, 101, error));
     BOOST_REQUIRE(store.TransitionSession(request_id, SessionState::AUTHORIZED,
                                           PendingPhase::NONE, {}, 102, error));
@@ -3388,7 +3389,7 @@ BOOST_AUTO_TEST_CASE(client_attempt_artifacts_and_authorization_are_append_only_
     constexpr auto next_request = "550e8400-e29b-41d4-a716-446655440005";
     BOOST_REQUIRE(expiry_store.CreateOrJoinSession(next_request, uint256S("1234"), FeeMode::PAYMASTER,
         122, next_session, error) == CreatePaymasterSessionResult::CREATED);
-    BOOST_REQUIRE_MESSAGE(expiry_store.ReserveInputs(next_request, {{user_input, ReservationRole::USER_DD}},
+    BOOST_REQUIRE_MESSAGE(wallet::test::PaymasterLegacyFixtureAccess::ReserveInputs(expiry_store, next_request, {{user_input, ReservationRole::USER_DD}},
         FeeMode::PAYMASTER, 122, error), error);
     ClientFeeLedger expired_fee_ledger;
     {
@@ -3570,7 +3571,7 @@ BOOST_AUTO_TEST_CASE(provider_quote_cancellation_rejects_client_session_without_
     candidate.attempt_id = uint256S("31");
     candidate.provider_id = uint256S("32");
     candidate.created_at = candidate.updated_at = 101;
-    BOOST_REQUIRE(store.AddAttempt(request_id, candidate, error));
+    BOOST_REQUIRE(wallet::test::PaymasterLegacyFixtureAccess::AddAttempt(store, request_id, candidate, error));
 
     ProviderAttempt quoted = candidate;
     quoted.session_id = session.session_id;
@@ -3631,7 +3632,7 @@ BOOST_AUTO_TEST_CASE(provider_quote_cancellation_rejects_client_session_without_
     ProviderAttempt signed_attempt = candidate;
     signed_attempt.attempt_id = uint256S("35");
     signed_attempt.created_at = signed_attempt.updated_at = 105;
-    BOOST_REQUIRE(store.AddAttempt(request_id, signed_attempt, error));
+    BOOST_REQUIRE(wallet::test::PaymasterLegacyFixtureAccess::AddAttempt(store, request_id, signed_attempt, error));
     signed_attempt.session_id = session.session_id;
     signed_attempt.state = AttemptState::USER_SIGNED;
     {
@@ -4316,7 +4317,7 @@ BOOST_AUTO_TEST_CASE(unavailable_unsigned_provider_observation_is_idempotent)
     attempt.attempt_id = uint256S("471");
     attempt.provider_id = uint256S("472");
     attempt.created_at = attempt.updated_at = 101;
-    BOOST_REQUIRE(store.AddAttempt(request_id, attempt, error));
+    BOOST_REQUIRE(wallet::test::PaymasterLegacyFixtureAccess::AddAttempt(store, request_id, attempt, error));
     attempt.session_id = session.session_id;
     attempt.state = AttemptState::REJECTED;
     attempt.updated_at = 102;
@@ -4367,7 +4368,7 @@ BOOST_AUTO_TEST_CASE(provider_outcome_is_recorded_once_without_payment_details)
     attempt.attempt_id = uint256S("41");
     attempt.provider_id = uint256S("42");
     attempt.created_at = attempt.updated_at = 101;
-    BOOST_REQUIRE(store.AddAttempt(request_id, attempt, error));
+    BOOST_REQUIRE(wallet::test::PaymasterLegacyFixtureAccess::AddAttempt(store, request_id, attempt, error));
     attempt.session_id = session.session_id;
     attempt.state = AttemptState::REJECTED;
     attempt.updated_at = 102;
@@ -5875,7 +5876,7 @@ BOOST_AUTO_TEST_CASE(conflicting_signed_quotes_are_persisted_atomically)
     attempt.provider_identity_key = XOnlyPubKey{provider_key.GetPubKey()};
     attempt.provider_id = GetPaymasterId(attempt.provider_identity_key);
     attempt.created_at = attempt.updated_at = 100;
-    BOOST_REQUIRE(store.AddAttempt(request_id, attempt, error));
+    BOOST_REQUIRE(wallet::test::PaymasterLegacyFixtureAccess::AddAttempt(store, request_id, attempt, error));
     BOOST_REQUIRE(store.GetAttempt(attempt.attempt_id, attempt));
     attempt.client_nonce = uint256S("93");
     PaymasterQuoteRequest authoritative_request;
@@ -6041,9 +6042,9 @@ BOOST_AUTO_TEST_CASE(pending_quote_pair_requires_exact_client_binding)
     attempt.created_at = attempt.updated_at = 100;
     ProviderAttempt poisoned_attempt{attempt};
     poisoned_attempt.quote_response_claim_candidate = {1, 2, 3};
-    BOOST_CHECK(!store.AddAttempt(request_id, poisoned_attempt, error));
+    BOOST_CHECK(!wallet::test::PaymasterLegacyFixtureAccess::AddAttempt(store, request_id, poisoned_attempt, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_INVALID_ATTEMPT");
-    BOOST_REQUIRE(store.AddAttempt(request_id, attempt, error));
+    BOOST_REQUIRE(wallet::test::PaymasterLegacyFixtureAccess::AddAttempt(store, request_id, attempt, error));
     BOOST_REQUIRE(store.GetAttempt(attempt.attempt_id, attempt));
     attempt.client_nonce = uint256S("8103");
     PaymasterQuoteRequest authoritative_request;
@@ -6406,7 +6407,7 @@ BOOST_AUTO_TEST_CASE(client_result_is_atomic_monotonic_and_final_artifacts_are_i
                           error);
     ProviderAttempt& attempt = artifacts.attempt;
     CMutableTransaction& transaction = artifacts.final_transaction;
-    BOOST_REQUIRE(store.ReserveInputs(
+    BOOST_REQUIRE(wallet::test::PaymasterLegacyFixtureAccess::ReserveInputs(store,
         request_id, {{artifacts.user_input, ReservationRole::USER_DD}},
         FeeMode::PAYMASTER, 101, error));
     BOOST_REQUIRE(store.GetSessionByRequestId(request_id, session));
@@ -6658,7 +6659,7 @@ BOOST_AUTO_TEST_CASE(manifestless_client_final_exact_replay_is_rejected_read_onl
     const std::vector<unsigned char> final_bytes =
         SerializePaymasterTestObject(artifacts.final_transaction);
 
-    BOOST_REQUIRE(store.ReserveInputs(
+    BOOST_REQUIRE(wallet::test::PaymasterLegacyFixtureAccess::ReserveInputs(store,
         request_id, {{artifacts.user_input, ReservationRole::USER_DD}},
         FeeMode::PAYMASTER, 101, error));
     BOOST_REQUIRE(store.GetSessionByRequestId(request_id, session));
@@ -7203,20 +7204,20 @@ BOOST_AUTO_TEST_CASE(client_final_observation_is_atomic_and_idempotent)
     const MockableData before_observation = database.m_records;
     for (size_t failing_write = 0; failing_write < 2; ++failing_write) {
         database.FailWriteAt(failing_write);
-        BOOST_CHECK(!store.RecordClientFinalObservation(
+        BOOST_CHECK(!wallet::test::PaymasterLegacyFixtureAccess::RecordClientFinalObservation(store,
             request_id, attempt.attempt_id, false, 103, error));
         BOOST_CHECK_EQUAL(error, "PAYMASTER_DATABASE_WRITE");
         database.ClearFailureInjection();
         BOOST_CHECK(database.m_records == before_observation);
     }
     database.FailCommit();
-    BOOST_CHECK(!store.RecordClientFinalObservation(
+    BOOST_CHECK(!wallet::test::PaymasterLegacyFixtureAccess::RecordClientFinalObservation(store,
         request_id, attempt.attempt_id, false, 103, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_DATABASE_COMMIT");
     database.ClearFailureInjection();
     BOOST_CHECK(database.m_records == before_observation);
 
-    BOOST_REQUIRE(store.RecordClientFinalObservation(
+    BOOST_REQUIRE(wallet::test::PaymasterLegacyFixtureAccess::RecordClientFinalObservation(store,
         request_id, attempt.attempt_id, false, 103, error));
     ProviderAttempt observed_attempt;
     BOOST_REQUIRE(store.GetAttempt(attempt.attempt_id, observed_attempt));
@@ -7228,26 +7229,26 @@ BOOST_AUTO_TEST_CASE(client_final_observation_is_atomic_and_idempotent)
 
     const MockableData after_mempool = database.m_records;
     database.FailWriteAt(0);
-    BOOST_CHECK(store.RecordClientFinalObservation(
+    BOOST_CHECK(wallet::test::PaymasterLegacyFixtureAccess::RecordClientFinalObservation(store,
         request_id, attempt.attempt_id, false, 104, error));
     BOOST_CHECK_EQUAL(database.m_write_count, 0U);
     database.ClearFailureInjection();
     BOOST_CHECK(database.m_records == after_mempool);
 
     database.FailWriteAt(0);
-    BOOST_CHECK(!store.RecordClientFinalObservation(
+    BOOST_CHECK(!wallet::test::PaymasterLegacyFixtureAccess::RecordClientFinalObservation(store,
         request_id, attempt.attempt_id, true, 105, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_DATABASE_WRITE");
     database.ClearFailureInjection();
     BOOST_CHECK(database.m_records == after_mempool);
     database.FailCommit();
-    BOOST_CHECK(!store.RecordClientFinalObservation(
+    BOOST_CHECK(!wallet::test::PaymasterLegacyFixtureAccess::RecordClientFinalObservation(store,
         request_id, attempt.attempt_id, true, 105, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_DATABASE_COMMIT");
     database.ClearFailureInjection();
     BOOST_CHECK(database.m_records == after_mempool);
 
-    BOOST_REQUIRE(store.RecordClientFinalObservation(
+    BOOST_REQUIRE(wallet::test::PaymasterLegacyFixtureAccess::RecordClientFinalObservation(store,
         request_id, attempt.attempt_id, true, 105, error));
     BOOST_REQUIRE(store.GetAttempt(attempt.attempt_id, observed_attempt));
     BOOST_CHECK(observed_attempt.state == AttemptState::MEMPOOL);
@@ -7257,7 +7258,7 @@ BOOST_AUTO_TEST_CASE(client_final_observation_is_atomic_and_idempotent)
 
     const MockableData after_confirmed = database.m_records;
     database.FailWriteAt(0);
-    BOOST_CHECK(store.RecordClientFinalObservation(
+    BOOST_CHECK(wallet::test::PaymasterLegacyFixtureAccess::RecordClientFinalObservation(store,
         request_id, attempt.attempt_id, true, 106, error));
     BOOST_CHECK_EQUAL(database.m_write_count, 0U);
     database.ClearFailureInjection();
@@ -7427,7 +7428,7 @@ BOOST_AUTO_TEST_CASE(client_pre_store_final_validation_failure_is_atomic_and_rec
                               101, artifacts, error),
                           error);
     ProviderAttempt attempt{artifacts.attempt};
-    BOOST_REQUIRE(store.ReserveInputs(
+    BOOST_REQUIRE(wallet::test::PaymasterLegacyFixtureAccess::ReserveInputs(store,
         request_id, {{artifacts.user_input, ReservationRole::USER_DD}},
         FeeMode::PAYMASTER, 101, error));
     BOOST_REQUIRE(store.GetSessionByRequestId(request_id, session));
@@ -7544,7 +7545,7 @@ BOOST_AUTO_TEST_CASE(client_post_store_final_conflict_is_atomic_and_keeps_author
     const CTransaction final_transaction{artifacts.final_transaction};
     const std::vector<unsigned char> final_bytes =
         SerializePaymasterTestObject(artifacts.final_transaction);
-    BOOST_REQUIRE(store.ReserveInputs(
+    BOOST_REQUIRE(wallet::test::PaymasterLegacyFixtureAccess::ReserveInputs(store,
         request_id, {{artifacts.user_input, ReservationRole::USER_DD}},
         FeeMode::PAYMASTER, 101, error));
     BOOST_REQUIRE(store.GetSessionByRequestId(request_id, session));
@@ -8314,7 +8315,7 @@ BOOST_AUTO_TEST_CASE(unsigned_client_cancel_failures_and_lost_reply_preserve_inp
     const std::vector<COutPoint> inputs{{uint256S("f201"), 0}, {uint256S("f202"), 1}};
     BOOST_REQUIRE(store.CreateOrJoinSession(request_id, uint256S("f203"),
         FeeMode::PAYMASTER, 100, session, error) == CreatePaymasterSessionResult::CREATED);
-    BOOST_REQUIRE_MESSAGE(store.ReserveInputs(request_id,
+    BOOST_REQUIRE_MESSAGE(wallet::test::PaymasterLegacyFixtureAccess::ReserveInputs(store, request_id,
         {{inputs[0], ReservationRole::USER_DD}, {inputs[1], ReservationRole::USER_DD}},
         FeeMode::PAYMASTER, 101, error), error);
     const auto cancel = [&](std::string& failure) {
@@ -8359,7 +8360,7 @@ BOOST_AUTO_TEST_CASE(unsigned_client_cancel_failures_and_lost_reply_preserve_inp
     constexpr auto next_request = "550e8400-e29b-41d4-a716-446655440092";
     BOOST_REQUIRE(reopened_store.CreateOrJoinSession(next_request, uint256S("f204"),
         FeeMode::PAYMASTER, 104, session, error) == CreatePaymasterSessionResult::CREATED);
-    BOOST_REQUIRE_MESSAGE(reopened_store.ReserveInputs(next_request,
+    BOOST_REQUIRE_MESSAGE(wallet::test::PaymasterLegacyFixtureAccess::ReserveInputs(reopened_store, next_request,
         {{inputs[0], ReservationRole::USER_DD}, {inputs[1], ReservationRole::USER_DD}},
         FeeMode::PAYMASTER, 105, error), error);
     const MockableData with_new_owner{database.m_records};
@@ -8395,7 +8396,7 @@ BOOST_AUTO_TEST_CASE(active_reservation_cleanup_preserves_manual_lock_ownership)
                 const COutPoint persistent{uint256S("f233"), 0};
                 BOOST_REQUIRE(original_store.CreateOrJoinSession(request_id, uint256S("f234"),
                     FeeMode::PAYMASTER, 100, session, error) == CreatePaymasterSessionResult::CREATED);
-                BOOST_REQUIRE_MESSAGE(original_store.ReserveInputs(request_id,
+                BOOST_REQUIRE_MESSAGE(wallet::test::PaymasterLegacyFixtureAccess::ReserveInputs(original_store, request_id,
                     {{automatic, ReservationRole::USER_DD}, {transient, ReservationRole::USER_DD},
                      {persistent, ReservationRole::USER_DD}}, FeeMode::PAYMASTER, 101, error), error);
                 {
@@ -8468,7 +8469,7 @@ BOOST_AUTO_TEST_CASE(manual_unlock_does_not_remove_active_reservation_lock)
     const COutPoint failed_input{uint256S("f243"), 0};
     BOOST_REQUIRE(store.CreateOrJoinSession(request_id, uint256S("f242"),
         FeeMode::PAYMASTER, 100, session, error) == CreatePaymasterSessionResult::CREATED);
-    BOOST_REQUIRE(store.ReserveInputs(request_id,
+    BOOST_REQUIRE(wallet::test::PaymasterLegacyFixtureAccess::ReserveInputs(store, request_id,
         {{input, ReservationRole::USER_DD}, {failed_input, ReservationRole::USER_DD}},
         FeeMode::PAYMASTER, 101, error));
     {
@@ -8565,13 +8566,13 @@ BOOST_AUTO_TEST_CASE(client_reservation_distinguishes_internal_and_manual_dd_loc
         BOOST_REQUIRE(m_wallet.LockDigiDollarCoin(input, &batch));
         BOOST_REQUIRE(m_wallet.LockCoin(input, &batch));
     }
-    BOOST_CHECK(!store.ReserveInputs(request_id, {{input, ReservationRole::USER_DD}}, FeeMode::PAYMASTER, 101, error));
+    BOOST_CHECK(!wallet::test::PaymasterLegacyFixtureAccess::ReserveInputs(store, request_id, {{input, ReservationRole::USER_DD}}, FeeMode::PAYMASTER, 101, error));
     {
         LOCK(m_wallet.cs_wallet);
         WalletBatch batch{m_wallet.GetDatabase()};
         BOOST_REQUIRE(m_wallet.UnlockCoin(input, &batch));
     }
-    BOOST_REQUIRE_MESSAGE(store.ReserveInputs(request_id, {{input, ReservationRole::USER_DD}},
+    BOOST_REQUIRE_MESSAGE(wallet::test::PaymasterLegacyFixtureAccess::ReserveInputs(store, request_id, {{input, ReservationRole::USER_DD}},
         FeeMode::PAYMASTER, 101, error), error);
     BOOST_REQUIRE(store.AbandonUnsignedClientSession(request_id, 102, error));
     BOOST_CHECK(!IsPaymasterInputReserved(m_wallet, input));
@@ -8590,7 +8591,7 @@ BOOST_AUTO_TEST_CASE(legacy_ambiguous_lock_record_is_preserved_as_manual)
     const COutPoint input{uint256S("f251"), 0};
     BOOST_REQUIRE(store.CreateOrJoinSession(request_id, uint256S("f252"),
         FeeMode::PAYMASTER, 100, session, error) == CreatePaymasterSessionResult::CREATED);
-    BOOST_REQUIRE(store.ReserveInputs(request_id, {{input, ReservationRole::USER_DD}},
+    BOOST_REQUIRE(wallet::test::PaymasterLegacyFixtureAccess::ReserveInputs(store, request_id, {{input, ReservationRole::USER_DD}},
         FeeMode::PAYMASTER, 101, error));
     // Pre-ownership wallets wrote this same byte for automatic and manual locks.
     BOOST_REQUIRE(m_wallet.GetDatabase().MakeBatch()->Write(
@@ -8617,7 +8618,7 @@ BOOST_AUTO_TEST_CASE(unknown_lock_owners_fail_closed_without_releasing_reservati
     const COutPoint input{uint256S("f261"), 0};
     BOOST_REQUIRE(store.CreateOrJoinSession(request_id, uint256S("f262"),
         FeeMode::PAYMASTER, 100, session, error) == CreatePaymasterSessionResult::CREATED);
-    BOOST_REQUIRE(store.ReserveInputs(request_id, {{input, ReservationRole::USER_DD}},
+    BOOST_REQUIRE(wallet::test::PaymasterLegacyFixtureAccess::ReserveInputs(store, request_id, {{input, ReservationRole::USER_DD}},
         FeeMode::PAYMASTER, 101, error));
     DataStream key_stream;
     key_stream << std::make_pair(DBKeys::LOCKED_UTXO, std::make_pair(input.hash, input.n));
@@ -8655,7 +8656,7 @@ BOOST_AUTO_TEST_CASE(unsigned_client_cleanup_preserves_later_manual_locks)
     const COutPoint persistent_input{uint256S("f212"), 1};
     BOOST_REQUIRE(store.CreateOrJoinSession(request_id, uint256S("f213"),
         FeeMode::PAYMASTER, 100, session, error) == CreatePaymasterSessionResult::CREATED);
-    BOOST_REQUIRE_MESSAGE(store.ReserveInputs(request_id,
+    BOOST_REQUIRE_MESSAGE(wallet::test::PaymasterLegacyFixtureAccess::ReserveInputs(store, request_id,
         {{transient_input, ReservationRole::USER_DD}, {persistent_input, ReservationRole::USER_DD}},
         FeeMode::PAYMASTER, 101, error), error);
     BOOST_REQUIRE_MESSAGE(store.AbandonUnsignedClientSession(request_id, 102, error), error);
@@ -8717,7 +8718,7 @@ BOOST_AUTO_TEST_CASE(unsigned_client_cleanup_rejects_unreadable_reservations)
     const COutPoint input{uint256S("f221"), 0};
     BOOST_REQUIRE(store.CreateOrJoinSession(request_id, uint256S("f222"),
         FeeMode::PAYMASTER, 100, session, error) == CreatePaymasterSessionResult::CREATED);
-    BOOST_REQUIRE_MESSAGE(store.ReserveInputs(request_id,
+    BOOST_REQUIRE_MESSAGE(wallet::test::PaymasterLegacyFixtureAccess::ReserveInputs(store, request_id,
         {{input, ReservationRole::USER_DD}}, FeeMode::PAYMASTER, 101, error), error);
     InputReservation reservation;
     {
@@ -9483,7 +9484,7 @@ BOOST_AUTO_TEST_CASE(client_history_shared_repair_is_retryable_and_idempotent)
         LOCK(m_wallet.cs_wallet);
         BOOST_REQUIRE(m_wallet.AddToWallet(MakeTransactionRef(artifacts.final_transaction), TxStateInMempool{}));
     }
-    BOOST_REQUIRE_MESSAGE(store.RecordClientFinalObservation(session.request_id,
+    BOOST_REQUIRE_MESSAGE(wallet::test::PaymasterLegacyFixtureAccess::RecordClientFinalObservation(store, session.request_id,
         artifacts.attempt.attempt_id, false, 110, error), error);
     // Load DD only afterwards: AddToWallet's ordinary DD tracking cannot
     // pre-create the row whose repair this regression must exercise.
@@ -9544,7 +9545,7 @@ BOOST_AUTO_TEST_CASE(client_history_shared_repair_rejects_damaged_bindings_and_w
         LOCK(m_wallet.cs_wallet);
         BOOST_REQUIRE(m_wallet.AddToWallet(final, TxStateInMempool{}));
     }
-    BOOST_REQUIRE_MESSAGE(store.RecordClientFinalObservation(session.request_id,
+    BOOST_REQUIRE_MESSAGE(wallet::test::PaymasterLegacyFixtureAccess::RecordClientFinalObservation(store, session.request_id,
         artifacts.attempt.attempt_id, false, 110, error), error);
     BOOST_REQUIRE(store.GetSessionByRequestId(session.request_id, session));
     m_wallet.EnsureDDWallet();

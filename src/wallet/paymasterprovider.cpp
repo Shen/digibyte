@@ -2231,7 +2231,7 @@ ProviderPoolReadiness GetPaymasterProviderPoolReadiness(
                                          minimum_confirmations, unavailable_inputs);
 }
 
-bool ReservePaymasterOperationalSlot(CWallet& wallet,
+bool PaymasterStore::ReserveOperationalSlotForLegacyFixture(CWallet& wallet,
                                      const uint256& reservation_id,
                                      bool require_carrier,
                                      int32_t tip_height,

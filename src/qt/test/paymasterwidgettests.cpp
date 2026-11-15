@@ -51,6 +51,7 @@
 #include <wallet/paymasterclientview.h>
 #include <wallet/rpc/paymaster_internal.h>
 #include <wallet/scriptpubkeyman.h>
+#include <wallet/test/paymaster_chain.h>
 #include <wallet/test/util.h>
 #include <wallet/wallet.h>
 #include <wallet/walletdb.h>
@@ -8172,13 +8173,13 @@ void PaymasterWidgetTests::paymasterClientReleasedInputsCanBeReservedAgain()
     PaymentSession old_session, new_session, third_session;
     std::string error;
     QVERIFY(store.CreateOrJoinSession(old_id, uint256::ONE, FeeMode::PAYMASTER, now, old_session, error) == wallet::CreatePaymasterSessionResult::CREATED);
-    QVERIFY2(store.ReserveInputs(old_id, {{input, ReservationRole::USER_DD}}, FeeMode::PAYMASTER, now, error), error.c_str());
+    QVERIFY2(wallet::test::PaymasterLegacyFixtureAccess::ReserveInputs(store, old_id, {{input, ReservationRole::USER_DD}}, FeeMode::PAYMASTER, now, error), error.c_str());
     QVERIFY2(store.AbandonUnsignedClientSession(old_id, now + 1, error), error.c_str());
     QVERIFY(store.GetSessionByRequestId(old_id, old_session));
     QVERIFY(old_session.state == SessionState::FAILED);
     QCOMPARE(old_session.user_inputs.size(), size_t{1}); // Historical binding is retained.
     QVERIFY(store.CreateOrJoinSession(new_id, uint256::ONE, FeeMode::PAYMASTER, now + 2, new_session, error) == wallet::CreatePaymasterSessionResult::CREATED);
-    QVERIFY2(store.ReserveInputs(new_id, {{input, ReservationRole::USER_DD}}, FeeMode::PAYMASTER, now + 2, error), error.c_str());
+    QVERIFY2(wallet::test::PaymasterLegacyFixtureAccess::ReserveInputs(store, new_id, {{input, ReservationRole::USER_DD}}, FeeMode::PAYMASTER, now + 2, error), error.c_str());
     QVERIFY(store.GetSessionByRequestId(new_id, new_session));
     QVERIFY(store.CreateOrJoinSession(third_id, uint256::ONE, FeeMode::PAYMASTER, now + 2, third_session, error) == wallet::CreatePaymasterSessionResult::CREATED);
 

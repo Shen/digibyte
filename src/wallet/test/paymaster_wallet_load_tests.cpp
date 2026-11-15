@@ -1,6 +1,7 @@
 // Copyright (c) 2014-2026 The DigiByte Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or https://www.opensource.org/licenses/mit-license.php.
+#include <wallet/test/paymaster_chain.h>
 #include <wallet/test/util.h>
 #include <wallet/wallet.h>
 #include <wallet/walletdb.h>
@@ -622,7 +623,7 @@ BOOST_FIXTURE_TEST_CASE(periodic_paymaster_maintenance_stages_single_quote_claim
     attempt.provider_identity_key = XOnlyPubKey{provider_key.GetPubKey()};
     attempt.provider_id = GetPaymasterId(attempt.provider_identity_key);
     attempt.created_at = attempt.updated_at = 100;
-    BOOST_REQUIRE_MESSAGE(store.AddAttempt(request_id, attempt, error), error);
+    BOOST_REQUIRE_MESSAGE(wallet::test::PaymasterLegacyFixtureAccess::AddAttempt(store, request_id, attempt, error), error);
     BOOST_REQUIRE(store.GetAttempt(attempt.attempt_id, attempt));
     attempt.client_nonce = uint256S("53");
 

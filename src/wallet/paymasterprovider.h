@@ -337,19 +337,6 @@ bool CancelPaymasterMaintenance(CWallet& wallet, const std::vector<uint256>& ope
 bool AdoptPaymasterBackup(CWallet& wallet, bool execute, const uint256& expected_plan,
                          int64_t now, PaymasterCapitalRelease& result, std::string& error);
 
-/** Atomically reserve at most one operational DGB entry and, when required,
- * one carrier. Repeating the same reservation id returns the exact same slot.
- */
-bool ReservePaymasterOperationalSlot(
-    CWallet& wallet,
-    const uint256& reservation_id,
-    bool require_carrier,
-    int32_t tip_height,
-    int32_t minimum_confirmations,
-    int64_t now,
-    std::vector<DigiDollar::Paymaster::ProviderPoolEntry>& reserved,
-    std::string& error);
-
 /** Build the short-lived, provider-authenticated proof for one validated
  * PMCAPREQ. The supplied entries must be a confirmed operational slot that is
  * either AVAILABLE or already RESERVED by request.client_nonce. This helper

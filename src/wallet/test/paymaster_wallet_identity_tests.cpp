@@ -3390,18 +3390,18 @@ BOOST_AUTO_TEST_CASE(policy_and_enablement_are_atomically_bound)
     BOOST_CHECK(IsPaymasterInputReserved(m_wallet, operational_dgb.outpoint));
     std::vector<ProviderPoolEntry> reserved;
     const uint256 reservation_id = uint256S("05");
-    BOOST_REQUIRE(ReservePaymasterOperationalSlot(m_wallet, reservation_id, true,
+    BOOST_REQUIRE(wallet::test::PaymasterLegacyFixtureAccess::ReserveOperationalSlot(m_wallet, reservation_id, true,
                                                   100, 1, 107, reserved, error));
     BOOST_CHECK_EQUAL(reserved.size(), 2U);
     BOOST_CHECK(IsPaymasterInputReserved(m_wallet, operational_dgb.outpoint));
     BOOST_CHECK(IsPaymasterInputReserved(m_wallet, operational_carrier.outpoint));
     std::vector<ProviderPoolEntry> retry;
-    BOOST_REQUIRE(ReservePaymasterOperationalSlot(m_wallet, reservation_id, true,
+    BOOST_REQUIRE(wallet::test::PaymasterLegacyFixtureAccess::ReserveOperationalSlot(m_wallet, reservation_id, true,
                                                   100, 1, 108, retry, error));
     BOOST_CHECK_EQUAL(retry.size(), 2U);
     BOOST_CHECK(!SetPaymasterProviderPoolEntries(m_wallet, pool, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_ACTIVE_POOL_ENTRY_CONFLICT");
-    BOOST_CHECK(!ReservePaymasterOperationalSlot(m_wallet, uint256S("06"), true,
+    BOOST_CHECK(!wallet::test::PaymasterLegacyFixtureAccess::ReserveOperationalSlot(m_wallet, uint256S("06"), true,
                                                  100, 1, 108, retry, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_OPERATIONAL_SLOT_MISSING");
 
@@ -3813,7 +3813,7 @@ void CheckCapacityProofReservationLifecycle(WalletTestingSetup& fixture, uint16_
         WalletBatch batch{m_wallet.GetDatabase()};
         BOOST_REQUIRE_MESSAGE(batch.WritePaymasterMaintenanceLedger(ledger), error);
         const auto before = GetMockableDatabase(m_wallet).m_records;
-        BOOST_CHECK(!ReservePaymasterOperationalSlot(m_wallet, reserved_request.client_nonce,
+        BOOST_CHECK(!wallet::test::PaymasterLegacyFixtureAccess::ReserveOperationalSlot(m_wallet, reserved_request.client_nonce,
             true, 100, 1, 112, reserved, error));
         BOOST_CHECK_EQUAL(error, "PAYMASTER_OPERATIONAL_SLOT_MISSING");
         BOOST_CHECK(!ReserveAndBuildPaymasterCapacityProof(m_wallet, identity, reserved_request,
@@ -3830,7 +3830,7 @@ void CheckCapacityProofReservationLifecycle(WalletTestingSetup& fixture, uint16_
         }
         const auto before = GetMockableDatabase(m_wallet).m_records;
         BOOST_CHECK_EQUAL(GetPaymasterProviderPoolReadiness(m_wallet, readiness_pool, policy, 100, 1).complete_operational_slots, 0U);
-        BOOST_CHECK(!ReservePaymasterOperationalSlot(m_wallet, reserved_request.client_nonce,
+        BOOST_CHECK(!wallet::test::PaymasterLegacyFixtureAccess::ReserveOperationalSlot(m_wallet, reserved_request.client_nonce,
             true, 100, 1, 112, reserved, error));
         BOOST_CHECK_EQUAL(error, "PAYMASTER_OPERATIONAL_SLOT_MISSING");
         BOOST_CHECK(!ReserveAndBuildPaymasterCapacityProof(m_wallet, identity, reserved_request,

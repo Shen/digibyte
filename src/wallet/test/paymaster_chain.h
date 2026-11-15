@@ -11,6 +11,7 @@
 #include <policy/feerate.h>
 #include <primitives/block.h>
 #include <univalue.h>
+#include <wallet/paymasterstore.h>
 
 #include <functional>
 #include <map>
@@ -20,6 +21,43 @@
 #include <vector>
 
 namespace wallet {
+
+namespace test {
+/** Explicit compatibility fixture entry points. Keep legacy-state assertions
+ * without exposing incomplete reservation/observation operations to product
+ * callers. Current behavior tests should use the application operations. */
+class PaymasterLegacyFixtureAccess
+{
+public:
+    static bool ReserveInputs(PaymasterStore& store, const std::string& request_id,
+        const std::vector<std::pair<COutPoint, DigiDollar::Paymaster::ReservationRole>>& inputs,
+        DigiDollar::Paymaster::FeeMode used_mode, int64_t now, std::string& error)
+    {
+        return store.ReserveInputs(request_id, inputs, used_mode, now, error);
+    }
+
+    static bool AddAttempt(PaymasterStore& store, const std::string& request_id,
+        DigiDollar::Paymaster::ProviderAttempt attempt, std::string& error)
+    {
+        return store.AddAttempt(request_id, std::move(attempt), error);
+    }
+
+    static bool RecordClientFinalObservation(PaymasterStore& store, const std::string& request_id,
+        const uint256& attempt_id, bool confirmed, int64_t now, std::string& error)
+    {
+        return store.RecordClientFinalObservation(request_id, attempt_id, confirmed, now, error);
+    }
+
+    static bool ReserveOperationalSlot(CWallet& wallet, const uint256& reservation_id,
+        bool require_carrier, int32_t tip_height, int32_t minimum_confirmations,
+        int64_t now, std::vector<DigiDollar::Paymaster::ProviderPoolEntry>& reserved,
+        std::string& error)
+    {
+        return PaymasterStore::ReserveOperationalSlotForLegacyFixture(wallet, reservation_id,
+            require_carrier, tip_height, minimum_confirmations, now, reserved, error);
+    }
+};
+} // namespace test
 
 /** Accounting fixtures may use synthetic wallet transactions while exercising
  * the real wallet construction, signing, persistence and submission sequence.
