@@ -15,6 +15,7 @@
 
 #include <algorithm>
 #include <array>
+#include <set>
 
 using namespace DigiDollar::Paymaster;
 
@@ -74,6 +75,71 @@ BOOST_AUTO_TEST_CASE(recovery_offers_price_aggregate_inputs_and_preserve_transfe
     BOOST_REQUIRE_EQUAL(recovery.size(), 1U);
     BOOST_CHECK_EQUAL(recovery.front().service_fee.value, 10000);
     BOOST_CHECK_EQUAL(recovery.front().payment.value, 9990000);
+}
+
+BOOST_AUTO_TEST_CASE(candidate_builders_share_public_eligibility_and_reputation_filters)
+{
+    constexpr int64_t now{300000};
+    CKey first_key, second_key, sponsored_key, cooldown_key, corrupt_key;
+    auto first = MakeAnnouncement(first_key, uint256S("a1"), FundingModel::USER_PAID, 0, now);
+    auto second = MakeAnnouncement(second_key, uint256S("a2"), FundingModel::USER_PAID, 0, now);
+    auto sponsored = MakeAnnouncement(sponsored_key, uint256S("a3"), FundingModel::SPONSORED, 0, now);
+    auto cooldown = MakeAnnouncement(cooldown_key, uint256S("a4"), FundingModel::USER_PAID, 0, now);
+    auto corrupt = MakeAnnouncement(corrupt_key, uint256S("a5"), FundingModel::USER_PAID, 0, now);
+    auto expired = first;
+    expired.expires_at = now;
+    auto invalid_key = first;
+    invalid_key.identity_key = XOnlyPubKey{};
+    auto endpoint = first;
+    endpoint.endpoint = LookupNumeric("8.8.8.8", 0);
+    auto restricted = first;
+    restricted.offers.front().scope = SponsorshipScope::RESTRICTED;
+    auto charged_sponsorship = sponsored;
+    charged_sponsorship.offers.front().fee_rate_bps = 100;
+    std::vector<Announcement> announcements{
+        expired, invalid_key, endpoint, restricted, charged_sponsorship, cooldown, corrupt, sponsored, second, first};
+    std::string error;
+    PaymasterReliabilityRecord cooling;
+    cooling.provider_id = GetPaymasterId(cooldown.identity_key);
+    BOOST_REQUIRE(ApplyReliabilityOutcome(cooling, ReliabilityOutcome::PROVIDER_FAILURE, now - 1, 0, error));
+    PaymasterReliabilityRecord unreadable;
+    unreadable.provider_id = GetPaymasterId(corrupt.identity_key);
+    ++unreadable.version;
+    const std::map<PaymasterId, PaymasterReliabilityRecord> reputation{
+        {cooling.provider_id, cooling}, {unreadable.provider_id, unreadable}};
+    for (const uint8_t models : {FUNDING_MODEL_USER_PAID, FUNDING_MODEL_SPONSORED, FUNDING_MODEL_ALL}) {
+        const auto normal = BuildOfferCandidates(announcements, DDCents{500}, models, DDCents{100}, reputation, now, error);
+        BOOST_REQUIRE(error.empty());
+        const auto gross = BuildGrossOfferCandidates(announcements, DDCents{500}, models, DDCents{100}, reputation, now, error);
+        BOOST_REQUIRE(error.empty());
+        const size_t expected = models == FUNDING_MODEL_ALL ? 3 : models == FUNDING_MODEL_USER_PAID ? 2 : 1;
+        BOOST_REQUIRE_EQUAL(normal.size(), expected);
+        BOOST_REQUIRE_EQUAL(gross.size(), expected);
+        std::set<PaymasterId> providers;
+        for (size_t index{0}; index < normal.size(); ++index) {
+            providers.insert(normal[index].provider_id);
+            BOOST_CHECK(normal[index].provider_id == gross[index].provider_id);
+            BOOST_CHECK(normal[index].terms.offer_id == gross[index].terms.offer_id);
+            BOOST_CHECK_EQUAL(normal[index].service_fee.value, 0);
+            BOOST_CHECK_EQUAL(gross[index].payment.value, 500);
+        }
+        BOOST_CHECK_EQUAL(providers.count(cooling.provider_id), 0U);
+        BOOST_CHECK_EQUAL(providers.count(unreadable.provider_id), 0U);
+        if (models & FUNDING_MODEL_USER_PAID) {
+            BOOST_CHECK_EQUAL(providers.count(GetPaymasterId(first.identity_key)), 1U);
+            BOOST_CHECK_EQUAL(providers.count(GetPaymasterId(second.identity_key)), 1U);
+        }
+        if (models & FUNDING_MODEL_SPONSORED) BOOST_CHECK_EQUAL(providers.count(GetPaymasterId(sponsored.identity_key)), 1U);
+    }
+    const auto normal = BuildOfferCandidates(announcements, DDCents{500}, FUNDING_MODEL_USER_PAID,
+        DDCents{100}, reputation, now, error);
+    std::reverse(announcements.begin(), announcements.end());
+    const auto recovery = BuildRecoveryOfferCandidates(announcements, DDCents{500}, DDCents{100}, reputation, now, error);
+    BOOST_REQUIRE_EQUAL(recovery.size(), normal.size());
+    for (size_t index{0}; index < normal.size(); ++index) {
+        BOOST_CHECK(normal[index].provider_id == recovery[index].provider_id);
+        BOOST_CHECK(normal[index].terms.offer_id == recovery[index].terms.offer_id);
+    }
 }
 
 BOOST_AUTO_TEST_CASE(recommendation_order_is_strict_with_missing_measurements)

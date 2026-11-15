@@ -273,6 +273,35 @@ bool ValidateQuoteResponseForRequest(
 }
 
 namespace {
+/** Shared advisory eligibility; amount projection and financial validation stay
+ * with the normal, fixed-total and recovery candidate builders. */
+template <typename Visitor>
+void ForEachEligiblePublicOffer(
+    const std::vector<Announcement>& announcements, uint8_t allowed_funding_models,
+    const std::map<PaymasterId, PaymasterReliabilityRecord>& reliability,
+    int64_t now, bool allow_local_endpoint, Visitor&& visit)
+{
+    for (const Announcement& announcement : announcements) {
+        if (announcement.expires_at <= now || !announcement.identity_key.IsFullyValid() ||
+            !IsSupportedPaymasterEndpoint(announcement.endpoint, allow_local_endpoint)) continue;
+        const PaymasterId provider_id = GetPaymasterId(announcement.identity_key);
+        ReliabilitySummary summary;
+        int64_t latency_ewma_ms{0};
+        const auto reputation = reliability.find(provider_id);
+        if (reputation != reliability.end()) {
+            if (!ValidateReliabilityRecord(reputation->second) || reputation->second.cooldown_until > now) continue;
+            summary = SummarizeReliability(reputation->second, now);
+            latency_ewma_ms = reputation->second.latency_ewma_ms;
+        }
+        for (const OfferTerms& terms : announcement.offers) {
+            const uint8_t model_bit = uint8_t{1} << static_cast<uint8_t>(terms.funding_model);
+            if ((allowed_funding_models & model_bit) == 0 || terms.scope != SponsorshipScope::PUBLIC) continue;
+            if (terms.funding_model == FundingModel::SPONSORED && terms.fee_rate_bps != 0) continue;
+            visit(announcement, terms, provider_id, summary, latency_ewma_ms);
+        }
+    }
+}
+
 std::vector<OfferCandidate> BuildCandidates(
     const std::vector<Announcement>& announcements,
     DDCents payment,
@@ -291,36 +320,21 @@ std::vector<OfferCandidate> BuildCandidates(
         error = "PAYMASTER_INVALID_OFFER_REQUEST";
         return result;
     }
-    for (const Announcement& announcement : announcements) {
-        if (announcement.expires_at <= now || !announcement.identity_key.IsFullyValid() ||
-            !IsSupportedPaymasterEndpoint(announcement.endpoint, allow_local_endpoint)) continue;
-        const PaymasterId provider_id = GetPaymasterId(announcement.identity_key);
-        ReliabilitySummary summary;
-        int64_t latency_ewma_ms{0};
-        const auto reputation = reliability.find(provider_id);
-        if (reputation != reliability.end()) {
-            if (!ValidateReliabilityRecord(reputation->second) || reputation->second.cooldown_until > now) continue;
-            summary = SummarizeReliability(reputation->second, now);
-            latency_ewma_ms = reputation->second.latency_ewma_ms;
-        }
-        for (const OfferTerms& terms : announcement.offers) {
-            const uint8_t model_bit = uint8_t{1} << static_cast<uint8_t>(terms.funding_model);
-            if ((allowed_funding_models & model_bit) == 0 || terms.scope != SponsorshipScope::PUBLIC ||
-                (!recovery && (payment.value < terms.min_payment.value || payment.value > terms.max_payment.value))) continue;
+    ForEachEligiblePublicOffer(announcements, allowed_funding_models, reliability, now, allow_local_endpoint,
+        [&](const Announcement& announcement, const OfferTerms& terms, const PaymasterId& provider_id,
+            const ReliabilitySummary& summary, int64_t latency_ewma_ms) {
+            if (!recovery && (payment.value < terms.min_payment.value || payment.value > terms.max_payment.value)) return;
             const auto fee = recovery
                 ? ComputePaymasterRecoveryFee(payment, terms.fee_rate_bps, terms.maximum_user_paid_service_fee)
                 : ComputePaymasterFee(payment, terms.fee_rate_bps, terms.maximum_user_paid_service_fee);
             if (!fee || fee->value > maximum_service_fee.value ||
-                fee->value > std::numeric_limits<int64_t>::max() - payment.value) continue;
-            if (terms.funding_model == FundingModel::SPONSORED &&
-                (terms.fee_rate_bps != 0 || fee->value != 0)) continue;
+                fee->value > std::numeric_limits<int64_t>::max() - payment.value) return;
             result.push_back(OfferCandidate{
                 provider_id, announcement.identity_key, announcement.display_name, announcement.endpoint,
                 announcement.sequence, announcement.expires_at, terms,
                 recovery ? DDCents{payment.value - fee->value} : payment, *fee,
                 recovery ? payment : DDCents{payment.value + fee->value}, summary, latency_ewma_ms});
-        }
-    }
+        });
     std::sort(result.begin(), result.end(), [recovery](const OfferCandidate& lhs, const OfferCandidate& rhs) {
         return OfferCandidateLess(lhs, rhs, /*fixed_user_total=*/recovery);
     });
@@ -365,39 +379,24 @@ std::vector<OfferCandidate> BuildGrossOfferCandidates(
         error = "PAYMASTER_INVALID_OFFER_REQUEST";
         return result;
     }
-    for (const Announcement& announcement : announcements) {
-        if (announcement.expires_at <= now || !announcement.identity_key.IsFullyValid() ||
-            !IsSupportedPaymasterEndpoint(announcement.endpoint, allow_local_endpoint)) continue;
-        const PaymasterId provider_id = GetPaymasterId(announcement.identity_key);
-        ReliabilitySummary summary;
-        int64_t latency_ewma_ms{0};
-        const auto reputation = reliability.find(provider_id);
-        if (reputation != reliability.end()) {
-            if (!ValidateReliabilityRecord(reputation->second) || reputation->second.cooldown_until > now) continue;
-            summary = SummarizeReliability(reputation->second, now);
-            latency_ewma_ms = reputation->second.latency_ewma_ms;
-        }
-        for (const OfferTerms& terms : announcement.offers) {
-            const uint8_t model_bit = uint8_t{1} << static_cast<uint8_t>(terms.funding_model);
-            if ((allowed_funding_models & model_bit) == 0 || terms.scope != SponsorshipScope::PUBLIC) continue;
+    ForEachEligiblePublicOffer(announcements, allowed_funding_models, reliability, now, allow_local_endpoint,
+        [&](const Announcement& announcement, const OfferTerms& terms, const PaymasterId& provider_id,
+            const ReliabilitySummary& summary, int64_t latency_ewma_ms) {
             const auto payment = ComputePaymasterPaymentFromGross(
                 gross_amount, terms.fee_rate_bps,
                 terms.maximum_user_paid_service_fee);
             if (!payment || payment->value < 100 ||
-                payment->value < terms.min_payment.value || payment->value > terms.max_payment.value) continue;
+                payment->value < terms.min_payment.value || payment->value > terms.max_payment.value) return;
             const auto fee = ComputePaymasterFee(
                 *payment, terms.fee_rate_bps,
                 terms.maximum_user_paid_service_fee);
             if (!fee || fee->value > maximum_service_fee.value ||
-                payment->value + fee->value != gross_amount.value) continue;
-            if (terms.funding_model == FundingModel::SPONSORED &&
-                (terms.fee_rate_bps != 0 || fee->value != 0)) continue;
+                payment->value + fee->value != gross_amount.value) return;
             result.push_back(OfferCandidate{
                 provider_id, announcement.identity_key, announcement.display_name, announcement.endpoint,
                 announcement.sequence, announcement.expires_at, terms, *payment, *fee,
                 gross_amount, summary, latency_ewma_ms});
-        }
-    }
+        });
     std::sort(result.begin(), result.end(), [](const OfferCandidate& lhs, const OfferCandidate& rhs) {
         return OfferCandidateLess(lhs, rhs, /*fixed_user_total=*/true);
     });
