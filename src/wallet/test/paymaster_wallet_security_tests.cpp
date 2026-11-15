@@ -1929,6 +1929,81 @@ BOOST_AUTO_TEST_CASE(checkpoint_initial_native_intent_authenticates_its_predeces
     BOOST_REQUIRE(db.MakeBatch()->Exists(std::string{"pmnativebinding"}));
 }
 
+BOOST_AUTO_TEST_CASE(checkpoint_native_resume_preserves_abandoned_temporary_paths)
+{
+    for (const int residue : {0, 1, 2}) {
+        const bool directory = residue == 2;
+        BOOST_TEST_CONTEXT("checkpoint residue " << residue) {
+            const auto environment = MakeProviderEnvironment(200000, 2000);
+            const auto execution = MakeCheckpointNativeExecution(environment.identity);
+            wallet::CWallet provider{m_node.chain.get(), "temporary-owner", CreateMockableWalletDatabase()};
+            BOOST_REQUIRE(provider.LoadWallet() == DBErrors::LOAD_OK);
+            auto& database = GetMockableDatabase(provider);
+            BOOST_REQUIRE(WalletBatch{database}.WritePaymasterIdentity(environment.identity));
+            std::string error;
+            {
+                LOCK(provider.cs_wallet);
+                PaymasterCheckpointOperation operation{provider};
+                BOOST_REQUIRE_MESSAGE(operation.Begin(execution, error), error);
+            }
+            PaymasterCheckpoint pending;
+            BOOST_REQUIRE(database.MakeBatch()->Read(std::string{"pmcheckpoint"}, pending));
+            const auto path = PaymasterCheckpointPath(execution.genesis_hash, execution.provider_id);
+            const auto abandoned = fs::path{path.parent_path()} / fs::PathFromString(pending.token.GetHex() + ".tmp");
+            const auto [read_checkpoint, checkpoint_bytes] = ReadBinaryFile(path);
+            BOOST_REQUIRE(read_checkpoint);
+            const auto abandoned_bytes = residue == 0 ? std::string(1, '\x01') : checkpoint_bytes;
+            if (directory) {
+                BOOST_REQUIRE(fs::create_directory(abandoned));
+            } else {
+                FILE* file = fsbridge::fopen(abandoned, "wb");
+                BOOST_REQUIRE(file);
+                BOOST_REQUIRE_EQUAL(std::fwrite(abandoned_bytes.data(), 1, abandoned_bytes.size(), file), abandoned_bytes.size());
+                BOOST_REQUIRE_EQUAL(std::fclose(file), 0);
+            }
+            const auto before = database.m_records;
+            {
+                LOCK(provider.cs_wallet);
+                PaymasterCheckpointOperation operation{provider};
+                BOOST_REQUIRE_MESSAGE(operation.Resume(execution, error), error);
+                // Exercise the actual native pool-accounting write. An external
+                // advance followed by a failed wallet commit must remain resumable
+                // even while the previous token's temporary path still exists.
+                database.FailCommit();
+                BOOST_CHECK(!WalletBatch{database}.WritePaymasterProviderPool({}));
+                database.ClearFailureInjection();
+                BOOST_CHECK(database.m_records == before);
+            }
+            wallet::CWallet reopened{m_node.chain.get(), "temporary-restart", DuplicateMockDatabase(database)};
+            BOOST_REQUIRE(reopened.LoadWallet() == DBErrors::LOAD_OK);
+            {
+                LOCK(reopened.cs_wallet);
+                PaymasterCheckpointOperation operation{reopened};
+                BOOST_REQUIRE_MESSAGE(operation.Resume(execution, error), error);
+                BOOST_REQUIRE(WalletBatch{reopened.GetDatabase()}.WritePaymasterProviderPool({}));
+                BOOST_REQUIRE_MESSAGE(operation.Complete(error), error);
+            }
+            BOOST_REQUIRE_MESSAGE(CheckPaymasterCheckpoint(reopened.GetDatabase(), error), error);
+            PaymasterMaintenanceExecution saved;
+            BOOST_CHECK(WalletBatch{reopened.GetDatabase()}.ReadPaymasterMaintenanceExecutionWithStatus(saved) == DatabaseReadStatus::NOT_FOUND);
+            BOOST_CHECK(!reopened.GetDatabase().MakeBatch()->Exists(std::string{"pmnativebinding"}));
+            if (directory) {
+                BOOST_CHECK(fs::is_directory(abandoned));
+            } else {
+                const auto [read, bytes] = ReadBinaryFile(abandoned);
+                BOOST_REQUIRE(read);
+                BOOST_CHECK_EQUAL(bytes, abandoned_bytes);
+            }
+            // The completed live copy must still fence the pre-accounting clone.
+            const auto stale_before = database.m_records;
+            LOCK(provider.cs_wallet);
+            PaymasterCheckpointOperation stale{provider};
+            BOOST_CHECK(!stale.Resume(execution, error));
+            BOOST_CHECK(database.m_records == stale_before);
+        }
+    }
+}
+
 BOOST_AUTO_TEST_CASE(checkpoint_native_journal_repairs_only_adjacent_exact_commit_gaps)
 {
     const auto environment = MakeProviderEnvironment(200000, 2000);
@@ -2554,8 +2629,14 @@ BOOST_AUTO_TEST_CASE(checkpoint_sqlite_initial_native_commit_recovers_exact_inte
     BOOST_REQUIRE_MESSAGE(operation.Resume(execution, error), error);
     BOOST_REQUIRE(operation.Active());
     BOOST_CHECK(ReadBinaryFile(checkpoint_path) == external_pending);
+    PaymasterCheckpoint pending;
+    BOOST_REQUIRE(restarted.GetDatabase().MakeBatch()->Read(std::string{"pmcheckpoint"}, pending));
+    const auto abandoned = fs::path{checkpoint_path.parent_path()} / fs::PathFromString(pending.token.GetHex() + ".tmp");
+    BOOST_REQUIRE(WriteBinaryFile(abandoned, "partial SQLite checkpoint"));
+    BOOST_REQUIRE(WalletBatch{restarted.GetDatabase()}.WritePaymasterProviderPool({}));
     BOOST_REQUIRE_MESSAGE(operation.Complete(error), error);
     BOOST_REQUIRE_MESSAGE(CheckPaymasterCheckpoint(restarted.GetDatabase(), error), error);
+    BOOST_CHECK(ReadBinaryFile(abandoned) == std::make_pair(true, std::string{"partial SQLite checkpoint"}));
     BOOST_CHECK(!restarted.GetDatabase().MakeBatch()->Exists(std::string{"pmnativeexec"}));
     BOOST_CHECK(!restarted.GetDatabase().MakeBatch()->Exists(std::string{"pmnativebinding"}));
 }

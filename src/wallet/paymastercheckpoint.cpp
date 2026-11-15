@@ -24,7 +24,9 @@
 
 #include <array>
 #include <algorithm>
+#include <cerrno>
 #include <cstdio>
+#include <fcntl.h>
 #include <limits>
 #include <map>
 #include <memory>
@@ -34,9 +36,10 @@
 #include <vector>
 
 #ifdef WIN32
+#include <io.h>
+#include <sys/stat.h>
 #include <windows.h>
 #else
-#include <fcntl.h>
 #include <unistd.h>
 #endif
 
@@ -429,14 +432,44 @@ std::wstring ExtendedPath(const fs::path& path)
 
 bool WriteFile(const fs::path& path, const PaymasterCheckpoint& record)
 {
-    const auto temporary = fs::path{path.parent_path()} / fs::PathFromString(record.token.GetHex() + ".tmp");
-    std::error_code ec;
-    if (fs::symlink_status(temporary, ec).type() != fs::file_type::not_found) { LogPrintf("Paymaster checkpoint temporary path unavailable: %s\n", ec.message()); return false; }
     CDataStream stream{SER_DISK, CLIENT_VERSION};
     stream << CHECKPOINT_MAGIC << record << Checksum(record);
     if (stream.size() != CHECKPOINT_FILE_SIZE) { LogPrintf("Paymaster checkpoint unexpected encoded size: %u\n", stream.size()); return false; }
-    FILE* file = fsbridge::fopen(temporary, "wb");
-    if (!file) { LogPrintf("Paymaster checkpoint file open failed\n"); return false; }
+    // Native execution keeps its financial token across several generations.
+    // A crash before replacement must not reserve that token's filename forever.
+    // Exclusive creation also prevents following or truncating an existing path;
+    // only a temporary file created by this invocation may be removed below.
+    fs::path temporary;
+    FILE* file{nullptr};
+    std::error_code ec;
+    for (size_t attempt{0}; attempt < 8; ++attempt) {
+        temporary = fs::path{path.parent_path()} / fs::PathFromString(GetRandHash().GetHex() + ".tmp");
+#ifdef WIN32
+        const int descriptor = _wopen(ExtendedPath(temporary).c_str(),
+            _O_WRONLY | _O_CREAT | _O_EXCL | _O_BINARY | _O_NOINHERIT, _S_IREAD | _S_IWRITE);
+#else
+        const int descriptor = open(temporary.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+#endif
+        if (descriptor < 0) {
+            if (errno == EEXIST) continue;
+            LogPrintf("Paymaster checkpoint file open failed: errno %d\n", errno);
+            return false;
+        }
+#ifdef WIN32
+        file = _fdopen(descriptor, "wb");
+        if (!file) _close(descriptor);
+#else
+        file = fdopen(descriptor, "wb");
+        if (!file) close(descriptor);
+#endif
+        if (!file) {
+            fs::remove(temporary, ec);
+            LogPrintf("Paymaster checkpoint file stream open failed\n");
+            return false;
+        }
+        break;
+    }
+    if (!file) { LogPrintf("Paymaster checkpoint temporary paths unavailable\n"); return false; }
     const bool written = std::fwrite(stream.data(), 1, stream.size(), file) == stream.size() && CommitCheckpointFile(file);
     const bool closed = std::fclose(file) == 0;
     bool replaced{false};

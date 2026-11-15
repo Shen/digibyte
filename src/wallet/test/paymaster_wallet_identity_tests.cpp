@@ -23,6 +23,7 @@
 #include <streams.h>
 #include <test/util/logging.h>
 #include <test/util/index.h>
+#include <util/readwritefile.h>
 #include <util/time.h>
 #include <validationinterface.h>
 #include <wallet/context.h>
@@ -5246,6 +5247,8 @@ BOOST_AUTO_TEST_CASE(finite_carrier_history_survives_reconciliation_restart_and_
                         row.amount == history.amount && row.address == history.address && row.comment == history.comment;
                 }), 1);
             };
+            std::optional<PaymasterMaintenanceExecution> interrupted;
+            fs::path abandoned;
             if (!fail_history_write) {
                 BOOST_REQUIRE_EQUAL(transactions.size(), 1U);
                 check_history(wallet, transactions.front().transaction->GetHash());
@@ -5253,6 +5256,12 @@ BOOST_AUTO_TEST_CASE(finite_carrier_history_survives_reconciliation_restart_and_
                 PaymasterMaintenanceExecution pending;
                 BOOST_REQUIRE(batch.ReadPaymasterMaintenanceExecutionWithStatus(pending) == DatabaseReadStatus::FOUND);
                 BOOST_CHECK(!CheckPaymasterProviderRestoreGuard(wallet, error));
+                interrupted = pending;
+                PaymasterCheckpoint checkpoint;
+                BOOST_REQUIRE(database.MakeBatch()->Read(std::string{"pmcheckpoint"}, checkpoint));
+                const auto path = PaymasterCheckpointPath(pending.genesis_hash, pending.provider_id);
+                abandoned = fs::path{path.parent_path()} / fs::PathFromString(checkpoint.token.GetHex() + ".tmp");
+                BOOST_REQUIRE(WriteBinaryFile(abandoned, "partial checkpoint"));
             }
             // Reopen both a completed execution and one interrupted while
             // writing DD history. Replay uses the same immutable signed bytes.
@@ -5268,6 +5277,23 @@ BOOST_AUTO_TEST_CASE(finite_carrier_history_survives_reconciliation_restart_and_
             BOOST_REQUIRE_EQUAL(ledger.records.size(), 1U);
             const uint256 txid = ledger.records.front().transaction_id;
             check_history(reopened, txid);
+            if (interrupted) {
+                BOOST_CHECK(ReadBinaryFile(abandoned) == std::make_pair(true, std::string{"partial checkpoint"}));
+                BOOST_REQUIRE_EQUAL(interrupted->legs.size(), 1U);
+                CMutableTransaction signed_transaction;
+                SpanReader stream{::PROTOCOL_VERSION, interrupted->legs.front().transaction};
+                stream >> signed_transaction;
+                BOOST_CHECK(txid == signed_transaction.GetHash());
+                BOOST_CHECK(reopened.mapWallet.at(txid).tx->GetWitnessHash() == CTransaction{signed_transaction}.GetWitnessHash());
+                const auto accounted = (HashWriter{} << ledger).GetHash();
+                const auto wallet_transactions = reopened.mapWallet.size();
+                BOOST_REQUIRE_MESSAGE(paymaster_app::ResumeProviderMaintenanceTransactions(reopened, error), error);
+                BOOST_REQUIRE(reopened_batch.ReadPaymasterMaintenanceLedger(ledger));
+                BOOST_CHECK((HashWriter{} << ledger).GetHash() == accounted);
+                BOOST_CHECK_EQUAL(reopened.mapWallet.size(), wallet_transactions);
+                PaymasterMaintenanceExecution saved;
+                BOOST_CHECK(reopened_batch.ReadPaymasterMaintenanceExecutionWithStatus(saved) == DatabaseReadStatus::NOT_FOUND);
+            }
             size_t recovered{0};
             BOOST_REQUIRE_MESSAGE(paymaster_app::ReconcileProviderMaintenance(reopened, recovered, error), error);
             check_history(reopened, txid);
