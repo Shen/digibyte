@@ -836,6 +836,8 @@ and [client contract](doc/digidollar-paymaster-integration.md).
 ### src/wallet/paymasterstore*.{h,cpp}
 
 Durable provider/client state, exact authorization, accounting and recovery.
+`ProviderPoolSuccessorPlan` normalizes authenticated output roles/indices for
+the common pool-registration operation; a plan grants no independent authority.
 Split provider, client, finalization, recovery, reconciliation and reputation
 units share internal helpers. `paymasterdb.cpp` persists wallet records;
 `paymastercheckpoint.*` maintains an independent rollback checkpoint. See

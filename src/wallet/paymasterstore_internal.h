@@ -109,13 +109,36 @@ bool MakeProviderPoolRoom(std::vector<ProviderPoolEntry>& entries, size_t additi
  * history. Preserve the original snapshot while pruning the working vector. */
 DatabaseReadStatus ReadProviderPoolDisposition(WalletBatch& batch,
     const std::vector<ProviderPoolEntry>& original, const COutPoint& outpoint, ProviderPoolEntry& entry);
+/** Output locations derived only from a fully authenticated exact final.
+ * This plan is not independent signing or spending authority. */
+struct ProviderPoolSuccessorPlan {
+    std::optional<COutPoint> carrier_input;
+    std::optional<uint32_t> carrier_output;
+    std::optional<uint32_t> dgb_change_output;
+    DDCents service_fee;
+    DGBSatoshis maximum_network_fee;
+};
+bool RegisterProviderPoolSuccessors(CWallet& wallet, const ProviderPoolSuccessorPlan& plan,
+                                    const ProviderCommitRecord& commit,
+                                    const CTransaction& transaction,
+                                    const std::optional<ProviderPolicy>& policy,
+                                    std::vector<ProviderPoolEntry>& entries,
+                                    bool& changed, std::string& error,
+                                    const std::vector<ProviderPoolEntry>* source_entries = nullptr);
 bool RegisterProviderPoolSuccessors(CWallet& wallet, const ProviderAttempt& attempt,
                                     const ProviderCommitRecord& commit,
                                     const CTransaction& transaction,
                                     const std::optional<ProviderPolicy>& policy,
                                     std::vector<ProviderPoolEntry>& entries,
                                     bool& changed,
-                                    std::string& error);
+                                    std::string& error,
+                                    const std::vector<ProviderPoolEntry>* source_entries = nullptr);
+bool RegisterProviderRecoveryPoolSuccessors(CWallet& wallet, const AlternativeRecoveryRecord& recovery,
+                                    const ProviderCommitRecord& commit,
+                                    const std::optional<ProviderPolicy>& policy,
+                                    std::vector<ProviderPoolEntry>& entries,
+                                    bool& changed, std::string& error,
+                                    const std::vector<ProviderPoolEntry>* source_entries = nullptr);
 bool PrepareProviderTransferFinanceEvent(WalletBatch& batch,
                                          const ProviderIdentityRecord& identity,
                                          const ProviderAttempt& attempt,

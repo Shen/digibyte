@@ -669,43 +669,45 @@ DatabaseReadStatus ReadProviderPoolDisposition(WalletBatch& batch,
     return batch.ReadPaymasterPoolHistoryWithStatus(outpoint, entry);
 }
 
-bool RegisterProviderPoolSuccessors(CWallet& wallet, const ProviderAttempt& attempt,
+bool RegisterProviderPoolSuccessors(CWallet& wallet, const ProviderPoolSuccessorPlan& plan,
                                     const ProviderCommitRecord& commit,
                                     const CTransaction& transaction,
                                     const std::optional<ProviderPolicy>& policy,
                                     std::vector<ProviderPoolEntry>& entries,
-                                    bool& changed,
-                                    std::string& error)
+                                    bool& changed, std::string& error,
+                                    const std::vector<ProviderPoolEntry>* source_entries)
 {
     changed = false;
     AssertLockHeld(wallet.cs_wallet);
     WalletBatch records{wallet.GetDatabase()};
-    const ProviderAuthorizationManifest& manifest = attempt.provider_manifest;
-    if (manifest.manifest_id.IsNull()) return true;
-    if (manifest.carrier_return_scripts.size() > 1 ||
-        manifest.dgb_change_scripts.size() > 1) {
+    if (transaction.GetHash() != commit.final_txid || plan.service_fee.value < 0 ||
+        plan.service_fee.value > MAX_DD_OUTPUT_CENTS ||
+        plan.carrier_input.has_value() != plan.carrier_output.has_value()) {
         error = "PAYMASTER_INVALID_PROVIDER_SUCCESSOR_MANIFEST";
         return false;
     }
-
+    for (const auto& index : {plan.carrier_output, plan.dgb_change_output}) {
+        if (index && (*index >= transaction.vout.size() ||
+            !(wallet.IsMine(transaction.vout[*index].scriptPubKey) & ISMINE_SPENDABLE))) {
+            error = "PAYMASTER_PROVIDER_CHANGE_NOT_WALLET_OWNED";
+            return false;
+        }
+    }
     std::vector<ProviderPoolEntry> successors;
-    if (!manifest.carrier_return_scripts.empty()) {
-        if (manifest.provider_carrier_inputs.size() != 1) {
+    if (plan.carrier_output) {
+        if (!plan.carrier_input || *plan.carrier_output >= transaction.vout.size()) {
             error = "PAYMASTER_INVALID_PROVIDER_CARRIER_SUCCESSOR";
             return false;
         }
-        const auto source = std::find_if(
-            entries.begin(), entries.end(), [&](const ProviderPoolEntry& entry) {
-                return entry.outpoint == manifest.provider_carrier_inputs.front() &&
-                       entry.asset == PoolAsset::DD_CARRIER;
-            });
-        const auto output_index = FindUniqueOutputByScript(
-            transaction, manifest.carrier_return_scripts.front());
-        const auto successor_value = source == entries.end()
+        ProviderPoolEntry source;
+        const auto source_status = ReadProviderPoolDisposition(records, source_entries ? *source_entries : entries, *plan.carrier_input, source);
+        const auto output_index = plan.carrier_output;
+        const auto successor_value = source_status != DatabaseReadStatus::FOUND || source.asset != PoolAsset::DD_CARRIER
             ? std::optional<DDCents>{}
-            : ComputeCarrierSuccessor(source->carrier_value,
-                                      manifest.service_fee, error);
-        if (source == entries.end() || !output_index || !successor_value) {
+            : ((plan.service_fee.value > 0 && plan.service_fee.value < 100)
+                ? ComputeCarrierSuccessor(source.carrier_value, plan.service_fee, error)
+                : std::optional<DDCents>{source.carrier_value});
+        if (!successor_value) {
             if (error.empty()) error = "PAYMASTER_INVALID_PROVIDER_CARRIER_SUCCESSOR";
             return false;
         }
@@ -723,7 +725,7 @@ bool RegisterProviderPoolSuccessors(CWallet& wallet, const ProviderAttempt& atte
         successor.purpose = PoolPurpose::OPERATIONAL;
         successor.asset = PoolAsset::DD_CARRIER;
         successor.state = PoolEntryState::PENDING_SUCCESSOR;
-        successor.script_pub_key = manifest.carrier_return_scripts.front();
+        successor.script_pub_key = transaction.vout[*output_index].scriptPubKey;
         successor.carrier_value = *successor_value;
         successor.reservation_id = commit.commit_key;
         successor.origin_commit_key = commit.commit_key;
@@ -731,24 +733,23 @@ bool RegisterProviderPoolSuccessors(CWallet& wallet, const ProviderAttempt& atte
         successors.push_back(std::move(successor));
     }
 
-    if (!manifest.dgb_change_scripts.empty()) {
-        const auto output_index = FindUniqueOutputByScript(
-            transaction, manifest.dgb_change_scripts.front());
-        if (!output_index) {
+    if (plan.dgb_change_output) {
+        const auto output_index = plan.dgb_change_output;
+        if (*output_index >= transaction.vout.size()) {
             error = "PAYMASTER_INVALID_PROVIDER_DGB_SUCCESSOR";
             return false;
         }
         const CAmount output_value = transaction.vout[*output_index].nValue;
         const CAmount minimum_capacity = policy
             ? policy->maximum_network_fee.value
-            : manifest.maximum_network_fee.value;
+            : plan.maximum_network_fee.value;
         if (output_value >= minimum_capacity && output_value > 0) {
             ProviderPoolEntry successor;
             successor.outpoint = COutPoint{commit.final_txid, *output_index};
             successor.purpose = PoolPurpose::OPERATIONAL;
             successor.asset = PoolAsset::DGB;
             successor.state = PoolEntryState::PENDING_SUCCESSOR;
-            successor.script_pub_key = manifest.dgb_change_scripts.front();
+            successor.script_pub_key = transaction.vout[*output_index].scriptPubKey;
             successor.dgb_value = DGBSatoshis{output_value};
             successor.reservation_id = commit.commit_key;
             successor.origin_commit_key = commit.commit_key;
@@ -792,6 +793,40 @@ bool RegisterProviderPoolSuccessors(CWallet& wallet, const ProviderAttempt& atte
         }
     }
     return true;
+}
+
+bool RegisterProviderPoolSuccessors(CWallet& wallet, const ProviderAttempt& attempt,
+                                    const ProviderCommitRecord& commit,
+                                    const CTransaction& transaction,
+                                    const std::optional<ProviderPolicy>& policy,
+                                    std::vector<ProviderPoolEntry>& entries,
+                                    bool& changed, std::string& error,
+                                    const std::vector<ProviderPoolEntry>* source_entries)
+{
+    changed = false;
+    const auto& manifest = attempt.provider_manifest;
+    if (manifest.manifest_id.IsNull()) return true;
+    if (manifest.carrier_return_scripts.size() > 1 || manifest.dgb_change_scripts.size() > 1) {
+        error = "PAYMASTER_INVALID_PROVIDER_SUCCESSOR_MANIFEST";
+        return false;
+    }
+    ProviderPoolSuccessorPlan plan;
+    plan.service_fee = manifest.service_fee;
+    plan.maximum_network_fee = manifest.maximum_network_fee;
+    if (!manifest.carrier_return_scripts.empty()) {
+        if (manifest.provider_carrier_inputs.size() != 1 ||
+            !(plan.carrier_output = FindUniqueOutputByScript(transaction, manifest.carrier_return_scripts.front()))) {
+            error = "PAYMASTER_INVALID_PROVIDER_CARRIER_SUCCESSOR";
+            return false;
+        }
+        plan.carrier_input = manifest.provider_carrier_inputs.front();
+    }
+    if (!manifest.dgb_change_scripts.empty() &&
+        !(plan.dgb_change_output = FindUniqueOutputByScript(transaction, manifest.dgb_change_scripts.front()))) {
+        error = "PAYMASTER_INVALID_PROVIDER_DGB_SUCCESSOR";
+        return false;
+    }
+    return RegisterProviderPoolSuccessors(wallet, plan, commit, transaction, policy, entries, changed, error, source_entries);
 }
 
 // -------------------------------------------------------------------------

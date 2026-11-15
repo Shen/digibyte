@@ -964,6 +964,91 @@ void CheckUnreadableClientArtifact(WalletTestingSetup& fixture, const PaymentSes
 
 BOOST_FIXTURE_TEST_SUITE(paymaster_wallet_store_tests, WalletTestingSetup)
 
+BOOST_AUTO_TEST_CASE(provider_successor_plan_keeps_carrier_and_fee_outputs_distinct)
+{
+    using namespace wallet::paymaster_store::internal;
+    LOCK(m_wallet.cs_wallet);
+    CKey owner;
+    owner.MakeNewKey(true);
+    FlatSigningProvider keys;
+    std::string descriptor_error;
+    auto descriptor = Parse("tr(" + EncodeSecret(owner) + ")", keys, descriptor_error, false);
+    BOOST_REQUIRE_MESSAGE(descriptor, descriptor_error);
+    WalletDescriptor wallet_descriptor{std::move(descriptor), 0, 0, 1, 0};
+    m_wallet.SetWalletFlag(WALLET_FLAG_DESCRIPTORS);
+    BOOST_REQUIRE(m_wallet.AddWalletDescriptor(wallet_descriptor, keys, "", false));
+    TaprootBuilder taproot;
+    taproot.Finalize(XOnlyPubKey{owner.GetPubKey()});
+    const CScript owned = GetScriptForDestination(taproot.GetOutput());
+    ProviderPoolEntry source;
+    source.outpoint = COutPoint{uint256::ONE, 1};
+    source.asset = PoolAsset::DD_CARRIER;
+    source.state = PoolEntryState::COMMITTED;
+    source.script_pub_key = owned;
+    source.carrier_value = DDCents{100};
+    source.updated_at = 100;
+    for (const int64_t fee : {0, 1, 99, 100, 200}) {
+        CMutableTransaction transaction;
+        transaction.SetDigiDollarType(DD_TX_TRANSFER);
+        transaction.vin.emplace_back(source.outpoint);
+        transaction.vout.emplace_back(0, owned); // Client return.
+        const int64_t carrier = 100 + (fee < 100 ? fee : 0);
+        transaction.vout.emplace_back(0, owned); // Carrier, same script as fee.
+        CScript metadata = CScript{} << OP_RETURN << std::vector<unsigned char>{'D', 'D'}
+            << CScriptNum(2) << CScriptNum(200) << CScriptNum(carrier);
+        if (fee >= 100) {
+            transaction.vout.emplace_back(0, owned);
+            metadata << CScriptNum(fee);
+        }
+        const uint32_t dgb_index = transaction.vout.size();
+        transaction.vout.emplace_back(COIN / 2, owned);
+        transaction.vout.emplace_back(0, metadata);
+        ProviderCommitRecord commit;
+        commit.commit_key = uint256S("77");
+        commit.final_txid = CTransaction{transaction}.GetHash();
+        commit.committed_at = 100;
+        ProviderPoolSuccessorPlan plan;
+        plan.carrier_input = source.outpoint;
+        plan.carrier_output = 1;
+        plan.dgb_change_output = dgb_index;
+        plan.service_fee = DDCents{fee};
+        plan.maximum_network_fee = DGBSatoshis{COIN / 5};
+        std::vector<ProviderPoolEntry> entries{source};
+        bool changed{false};
+        std::string error;
+        BOOST_REQUIRE_MESSAGE(RegisterProviderPoolSuccessors(m_wallet, plan, commit,
+            CTransaction{transaction}, std::nullopt, entries, changed, error), error);
+        BOOST_REQUIRE(changed);
+        BOOST_REQUIRE_EQUAL(entries.size(), 3U);
+        BOOST_CHECK_EQUAL(entries[1].outpoint.n, 1U);
+        BOOST_CHECK_EQUAL(entries[1].carrier_value.value, carrier);
+        BOOST_CHECK(entries[1].state == PoolEntryState::PENDING_SUCCESSOR);
+        BOOST_CHECK_EQUAL(entries[2].outpoint.n, dgb_index);
+        BOOST_CHECK_EQUAL(entries[2].dgb_value.value, COIN / 2);
+        BOOST_REQUIRE_MESSAGE(RegisterProviderPoolSuccessors(m_wallet, plan, commit,
+            CTransaction{transaction}, std::nullopt, entries, changed, error), error);
+        BOOST_CHECK(!changed);
+        BOOST_CHECK_EQUAL(entries.size(), 3U);
+        // A wrong role/index cannot convert a fee into reserve principal.
+        auto invalid = plan;
+        invalid.carrier_output = dgb_index;
+        const auto before = SerializePaymasterTestObject(entries);
+        BOOST_CHECK(!RegisterProviderPoolSuccessors(m_wallet, invalid, commit,
+            CTransaction{transaction}, std::nullopt, entries, changed, error));
+        BOOST_CHECK(SerializePaymasterTestObject(entries) == before);
+        if (fee == 1) {
+            // A prior repair may compact this later commit's consumed source
+            // before the final database write creates its history row.
+            const std::vector<ProviderPoolEntry> original{source};
+            std::vector<ProviderPoolEntry> compacted;
+            BOOST_REQUIRE_MESSAGE(RegisterProviderPoolSuccessors(m_wallet, plan, commit,
+                CTransaction{transaction}, std::nullopt, compacted, changed, error, &original), error);
+            BOOST_CHECK_EQUAL(compacted.size(), 2U);
+            BOOST_CHECK_EQUAL(compacted.front().carrier_value.value, 101);
+        }
+    }
+}
+
 BOOST_AUTO_TEST_CASE(scheduled_relay_rounds_visit_every_bounded_stream_independently)
 {
     SyncWithValidationInterfaceQueue();
