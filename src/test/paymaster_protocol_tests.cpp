@@ -14,6 +14,7 @@
 #include <streams.h>
 #include <test/util/setup_common.h>
 
+#include <iterator>
 #include <stdexcept>
 
 using namespace DigiDollar::Paymaster;
@@ -387,6 +388,103 @@ BOOST_AUTO_TEST_CASE(quote_binds_exact_fee_policy_prevouts_and_unsigned_transact
                                         XOnlyPubKey{provider_key.GetPubKey()},
                                         DDCents{100}, now, error));
     BOOST_CHECK_EQUAL(error, "PAYMASTER_INVALID_QUOTE_TRANSACTION");
+}
+
+BOOST_AUTO_TEST_CASE(provider_and_client_share_quote_structure_and_signature_firewall)
+{
+    CKey user_key, provider_key;
+    user_key.MakeNewKey(true);
+    provider_key.MakeNewKey(true);
+    constexpr int64_t now{100000};
+    const auto policy = Policy();
+    const auto identity = XOnlyPubKey{provider_key.GetPubKey()};
+    const auto intent = SignedIntent(user_key, GetPaymasterId(identity),
+        uint256S("30"), GetProviderPolicyHash(policy), now);
+    const auto original = SignedQuote(provider_key, intent, policy, now);
+    const OfferTerms offer{intent.offer_id, intent.policy_hash, FundingModel::USER_PAID,
+        SponsorshipScope::PUBLIC, policy.fee_rate_bps, policy.min_payment, policy.max_payment};
+    const auto sign = [&](PaymasterQuote& quote) {
+        quote.identity_signature.resize(64);
+        BOOST_REQUIRE(provider_key.SignSchnorr(GetPaymasterQuoteSignatureHash(quote),
+            quote.identity_signature, nullptr, uint256{}));
+    };
+    const char* errors[]{
+        "PAYMASTER_QUOTE_CHAIN_OR_PROVIDER_MISMATCH",
+        "PAYMASTER_QUOTE_CHAIN_OR_PROVIDER_MISMATCH",
+        "PAYMASTER_QUOTE_BINDING_MISMATCH",
+        "PAYMASTER_QUOTE_BINDING_MISMATCH",
+        "PAYMASTER_QUOTE_BINDING_MISMATCH",
+        "PAYMASTER_INVALID_QUOTE_LIMITS",
+        "PAYMASTER_INVALID_QUOTE_LIMITS",
+        "PAYMASTER_INVALID_QUOTE_LIMITS",
+        "PAYMASTER_INVALID_QUOTE_DGB_INPUT",
+        "PAYMASTER_INVALID_QUOTE_DGB_INPUT",
+        "PAYMASTER_INVALID_QUOTE_FEE_OUTPUT",
+        "PAYMASTER_INVALID_QUOTE_FEE_OUTPUT",
+        "PAYMASTER_INVALID_QUOTE_TRANSACTION",
+        "PAYMASTER_INVALID_QUOTE_TRANSACTION",
+        "PAYMASTER_INVALID_QUOTE_SIGNATURE",
+    };
+    for (size_t attack{0}; attack < std::size(errors); ++attack) {
+        BOOST_TEST_CONTEXT("signed structural mutation " << attack) {
+            auto quote = original;
+            switch (attack) {
+            case 0: quote.genesis_hash = uint256S("ff01"); break;
+            case 1: quote.provider_id = uint256S("ff02"); break;
+            case 2: quote.intent_hash = uint256S("ff03"); break;
+            case 3: quote.offer_id = uint256S("ff04"); break;
+            case 4: quote.policy_hash = uint256S("ff05"); break;
+            case 5: quote.expires_at = now; break;
+            case 6:
+                quote.created_at = now + 61;
+                quote.expires_at = quote.created_at + policy.quote_ttl;
+                quote.retry_until = quote.created_at + DEFAULT_RETRY_SECONDS;
+                break;
+            case 7: quote.retry_until = quote.created_at + DEFAULT_RETRY_SECONDS + 1; break;
+            case 8: quote.reserved_dgb_inputs.push_back(quote.reserved_dgb_inputs.front()); break;
+            case 9: ++quote.reserved_dgb_inputs.front().value.value; break;
+            case 10: quote.provider_fee_script.reset(); break;
+            case 11: quote.provider_fee_script = CScript{} << OP_TRUE; break;
+            case 12: quote.unsigned_txid = uint256S("ff06"); break;
+            case 13: quote.template_commitment.SetNull(); break;
+            case 14: break;
+            }
+            sign(quote);
+            if (attack == 14) quote.identity_signature.front() ^= 1;
+            std::string error;
+            BOOST_CHECK(!ValidatePaymasterQuote(quote, intent, policy, identity, DDCents{100}, now, error));
+            BOOST_CHECK_EQUAL(error, errors[attack]);
+            BOOST_CHECK(!ValidatePaymasterQuoteForClient(quote, intent, offer, identity, DDCents{100}, now, error));
+            BOOST_CHECK_EQUAL(error, errors[attack]);
+        }
+    }
+
+    // Local provider caps and advertised client payment bounds remain separate
+    // responsibilities around the shared firewall.
+    auto capped_policy = policy;
+    capped_policy.maximum_network_fee = DGBSatoshis{original.network_fee.value - 1};
+    const auto capped_intent = SignedIntent(user_key, GetPaymasterId(identity),
+        intent.genesis_hash, GetProviderPolicyHash(capped_policy), now);
+    auto capped_quote = original;
+    capped_quote.policy_hash = capped_intent.policy_hash;
+    capped_quote.intent_hash = GetPaymentIntentHash(capped_intent);
+    sign(capped_quote);
+    auto capped_offer = offer;
+    capped_offer.policy_hash = capped_intent.policy_hash;
+    std::string error;
+    BOOST_CHECK(!ValidatePaymasterQuote(capped_quote, capped_intent, capped_policy,
+        identity, DDCents{100}, now, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_INVALID_QUOTE_LIMITS");
+    BOOST_REQUIRE_MESSAGE(ValidatePaymasterQuoteForClient(capped_quote, capped_intent,
+        capped_offer, identity, DDCents{100}, now, error), error);
+
+    auto narrow_offer = offer;
+    narrow_offer.min_payment.value = intent.recipient_amount.value + 1;
+    BOOST_REQUIRE_MESSAGE(ValidatePaymasterQuote(original, intent, policy,
+        identity, DDCents{100}, now, error), error);
+    BOOST_CHECK(!ValidatePaymasterQuoteForClient(original, intent, narrow_offer,
+        identity, DDCents{100}, now, error));
+    BOOST_CHECK_EQUAL(error, "PAYMASTER_INVALID_QUOTE_LIMITS");
 }
 
 BOOST_AUTO_TEST_CASE(user_paid_service_fee_cap_is_bound_by_provider_and_client)

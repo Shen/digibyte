@@ -55,6 +55,89 @@ bool ValidCarrier(const VerifiedDDCarrier& carrier)
            amount == carrier.value.value && IsP2TR(tx.vout[carrier.outpoint.n].scriptPubKey);
 }
 
+// Both quote trust boundaries run these same ordered phases. Their policy or
+// offer checks remain between the phases, before any signature is accepted.
+bool ValidateQuoteBinding(const PaymasterQuote& quote,
+                          const PaymentIntent& intent,
+                          const XOnlyPubKey& provider_identity_key,
+                          std::string& error)
+{
+    if (quote.version != PaymasterQuote::CURRENT_VERSION || quote.genesis_hash != intent.genesis_hash ||
+        quote.provider_id != intent.provider_id || quote.provider_id != GetPaymasterId(provider_identity_key)) {
+        error = "PAYMASTER_QUOTE_CHAIN_OR_PROVIDER_MISMATCH";
+        return false;
+    }
+    if (quote.quote_id.IsNull() || quote.intent_hash != GetPaymentIntentHash(intent) ||
+        quote.offer_id != intent.offer_id || quote.policy_hash != intent.policy_hash ||
+        quote.funding_model != intent.funding_model || quote.sponsorship_scope != intent.sponsorship_scope ||
+        quote.sponsorship_authorization_hash != intent.sponsorship_authorization_hash) {
+        error = "PAYMASTER_QUOTE_BINDING_MISMATCH";
+        return false;
+    }
+    return true;
+}
+
+bool ValidateQuoteResources(const PaymasterQuote& quote, int64_t quote_ttl,
+                            int64_t now, std::string& error)
+{
+    if ((quote.funding_model != FundingModel::USER_PAID && quote.funding_model != FundingModel::SPONSORED) ||
+        (quote.sponsorship_scope != SponsorshipScope::PUBLIC && quote.sponsorship_scope != SponsorshipScope::RESTRICTED)) {
+        error = "PAYMASTER_INVALID_FUNDING_MODEL_OR_SCOPE";
+        return false;
+    }
+    if (TimeDeltaExceeds(quote.created_at, now, 60) || quote.expires_at <= now ||
+        quote.expires_at <= quote.created_at || TimeDeltaExceeds(quote.expires_at, quote.created_at, quote_ttl) ||
+        quote.retry_until < quote.expires_at ||
+        TimeDeltaExceeds(quote.retry_until, quote.created_at, DEFAULT_RETRY_SECONDS) ||
+        quote.network_fee.value <= 0 || quote.reserved_dgb_inputs.empty() ||
+        quote.reserved_dgb_inputs.size() > MAX_PAYMENT_INTENT_INPUTS) {
+        error = "PAYMASTER_INVALID_QUOTE_LIMITS";
+        return false;
+    }
+    std::set<COutPoint> provider_inputs;
+    for (const VerifiedDGBInput& input : quote.reserved_dgb_inputs) {
+        if (!ValidDGBInput(input) || !provider_inputs.insert(input.outpoint).second) {
+            error = "PAYMASTER_INVALID_QUOTE_DGB_INPUT";
+            return false;
+        }
+    }
+    if (quote.reserved_carrier && (!ValidCarrier(*quote.reserved_carrier) ||
+                                   !provider_inputs.insert(quote.reserved_carrier->outpoint).second)) {
+        error = "PAYMASTER_INVALID_QUOTE_CARRIER";
+        return false;
+    }
+    return true;
+}
+
+bool ValidateQuoteTransactionAndSignature(const PaymasterQuote& quote,
+                                        const XOnlyPubKey& provider_identity_key,
+                                        std::string& error)
+{
+    const bool carrier_fee = quote.service_fee.value > 0 && quote.service_fee.value < 100;
+    const bool normal_fee = quote.service_fee.value >= 100;
+    if (quote.reserved_carrier.has_value() != carrier_fee ||
+        quote.carrier_return_script.has_value() != carrier_fee ||
+        quote.provider_fee_script.has_value() != normal_fee ||
+        (quote.carrier_return_script && !IsP2TR(*quote.carrier_return_script)) ||
+        (quote.provider_fee_script && !IsP2TR(*quote.provider_fee_script)) ||
+        (quote.dgb_change_script && !IsP2TR(*quote.dgb_change_script))) {
+        error = "PAYMASTER_INVALID_QUOTE_FEE_OUTPUT";
+        return false;
+    }
+    if (quote.unsigned_txid.IsNull() || quote.template_commitment.IsNull() ||
+        CTransaction{quote.unsigned_transaction}.GetHash() != quote.unsigned_txid) {
+        error = "PAYMASTER_INVALID_QUOTE_TRANSACTION";
+        return false;
+    }
+    if (quote.identity_signature.size() != 64 ||
+        !provider_identity_key.VerifySchnorr(GetPaymasterQuoteSignatureHash(quote), quote.identity_signature)) {
+        error = "PAYMASTER_INVALID_QUOTE_SIGNATURE";
+        return false;
+    }
+    error.clear();
+    return true;
+}
+
 } // namespace
 
 uint256 GetPaymentIntentCoreHash(const PaymentIntent& intent)
@@ -219,48 +302,16 @@ bool ValidatePaymasterQuote(const PaymasterQuote& quote,
                             int64_t now,
                             std::string& error)
 {
-    if (quote.version != PaymasterQuote::CURRENT_VERSION || quote.genesis_hash != intent.genesis_hash ||
-        quote.provider_id != intent.provider_id || quote.provider_id != GetPaymasterId(provider_identity_key)) {
-        error = "PAYMASTER_QUOTE_CHAIN_OR_PROVIDER_MISMATCH";
-        return false;
-    }
-    if (quote.quote_id.IsNull() || quote.intent_hash != GetPaymentIntentHash(intent) ||
-        quote.offer_id != intent.offer_id || quote.policy_hash != intent.policy_hash ||
-        quote.policy_hash != GetProviderPolicyHash(policy) || quote.funding_model != intent.funding_model ||
-        quote.sponsorship_scope != intent.sponsorship_scope ||
-        quote.sponsorship_authorization_hash != intent.sponsorship_authorization_hash) {
+    if (!ValidateQuoteBinding(quote, intent, provider_identity_key, error)) return false;
+    if (quote.policy_hash != GetProviderPolicyHash(policy)) {
         error = "PAYMASTER_QUOTE_BINDING_MISMATCH";
         return false;
     }
-    if ((quote.funding_model != FundingModel::USER_PAID &&
-         quote.funding_model != FundingModel::SPONSORED) ||
-        (quote.sponsorship_scope != SponsorshipScope::PUBLIC &&
-         quote.sponsorship_scope != SponsorshipScope::RESTRICTED)) {
-        error = "PAYMASTER_INVALID_FUNDING_MODEL_OR_SCOPE";
-        return false;
-    }
-    if (TimeDeltaExceeds(quote.created_at, now, 60) || quote.expires_at <= now ||
-        quote.expires_at <= quote.created_at ||
-        TimeDeltaExceeds(quote.expires_at, quote.created_at, policy.quote_ttl) ||
-        quote.retry_until < quote.expires_at ||
-        TimeDeltaExceeds(quote.retry_until, quote.created_at, DEFAULT_RETRY_SECONDS) ||
-        quote.network_fee.value <= 0 || quote.network_fee.value > policy.maximum_network_fee.value ||
-        quote.reserved_dgb_inputs.empty() || quote.reserved_dgb_inputs.size() > MAX_PAYMENT_INTENT_INPUTS) {
+    if (quote.network_fee.value > policy.maximum_network_fee.value) {
         error = "PAYMASTER_INVALID_QUOTE_LIMITS";
         return false;
     }
-    std::set<COutPoint> provider_inputs;
-    for (const VerifiedDGBInput& input : quote.reserved_dgb_inputs) {
-        if (!ValidDGBInput(input) || !provider_inputs.insert(input.outpoint).second) {
-            error = "PAYMASTER_INVALID_QUOTE_DGB_INPUT";
-            return false;
-        }
-    }
-    if (quote.reserved_carrier && (!ValidCarrier(*quote.reserved_carrier) ||
-                                   !provider_inputs.insert(quote.reserved_carrier->outpoint).second)) {
-        error = "PAYMASTER_INVALID_QUOTE_CARRIER";
-        return false;
-    }
+    if (!ValidateQuoteResources(quote, policy.quote_ttl, now, error)) return false;
     std::string fee_error;
     const auto expected_fee = EvaluateServiceFee(policy, quote.funding_model,
                                                  intent.recipient_amount, fee_error);
@@ -270,30 +321,7 @@ bool ValidatePaymasterQuote(const PaymasterQuote& quote,
         error = expected_fee ? "PAYMASTER_QUOTE_FEE_MISMATCH" : fee_error;
         return false;
     }
-    const bool carrier_fee = quote.service_fee.value > 0 && quote.service_fee.value < 100;
-    const bool normal_fee = quote.service_fee.value >= 100;
-    if (quote.reserved_carrier.has_value() != carrier_fee ||
-        quote.carrier_return_script.has_value() != carrier_fee ||
-        quote.provider_fee_script.has_value() != normal_fee ||
-        (quote.carrier_return_script && !IsP2TR(*quote.carrier_return_script)) ||
-        (quote.provider_fee_script && !IsP2TR(*quote.provider_fee_script)) ||
-        (quote.dgb_change_script && !IsP2TR(*quote.dgb_change_script))) {
-        error = "PAYMASTER_INVALID_QUOTE_FEE_OUTPUT";
-        return false;
-    }
-    if (quote.unsigned_txid.IsNull() || quote.template_commitment.IsNull() ||
-        CTransaction{quote.unsigned_transaction}.GetHash() != quote.unsigned_txid) {
-        error = "PAYMASTER_INVALID_QUOTE_TRANSACTION";
-        return false;
-    }
-    if (quote.identity_signature.size() != 64 ||
-        !provider_identity_key.VerifySchnorr(GetPaymasterQuoteSignatureHash(quote),
-                                             quote.identity_signature)) {
-        error = "PAYMASTER_INVALID_QUOTE_SIGNATURE";
-        return false;
-    }
-    error.clear();
-    return true;
+    return ValidateQuoteTransactionAndSignature(quote, provider_identity_key, error);
 }
 
 bool ValidatePaymasterQuoteForClient(const PaymasterQuote& quote,
@@ -304,46 +332,18 @@ bool ValidatePaymasterQuoteForClient(const PaymasterQuote& quote,
                                      int64_t now,
                                      std::string& error)
 {
-    if (quote.version != PaymasterQuote::CURRENT_VERSION ||
-        quote.genesis_hash != intent.genesis_hash || quote.provider_id != intent.provider_id ||
-        quote.provider_id != GetPaymasterId(provider_identity_key)) {
-        error = "PAYMASTER_QUOTE_CHAIN_OR_PROVIDER_MISMATCH";
-        return false;
-    }
-    if (quote.quote_id.IsNull() || quote.intent_hash != GetPaymentIntentHash(intent) ||
-        quote.offer_id != intent.offer_id || quote.offer_id != offer.offer_id ||
-        quote.policy_hash != intent.policy_hash || quote.policy_hash != offer.policy_hash ||
-        quote.funding_model != intent.funding_model || quote.funding_model != offer.funding_model ||
-        quote.sponsorship_scope != intent.sponsorship_scope ||
-        quote.sponsorship_scope != offer.scope ||
-        quote.sponsorship_authorization_hash != intent.sponsorship_authorization_hash) {
+    if (!ValidateQuoteBinding(quote, intent, provider_identity_key, error)) return false;
+    if (quote.offer_id != offer.offer_id || quote.policy_hash != offer.policy_hash ||
+        quote.funding_model != offer.funding_model || quote.sponsorship_scope != offer.scope) {
         error = "PAYMASTER_QUOTE_BINDING_MISMATCH";
         return false;
     }
     if (intent.recipient_amount.value < offer.min_payment.value ||
-        intent.recipient_amount.value > offer.max_payment.value ||
-        TimeDeltaExceeds(quote.created_at, now, 60) || quote.expires_at <= now ||
-        quote.expires_at <= quote.created_at ||
-        TimeDeltaExceeds(quote.expires_at, quote.created_at, MAX_QUOTE_TTL_SECONDS) ||
-        quote.retry_until < quote.expires_at ||
-        TimeDeltaExceeds(quote.retry_until, quote.created_at, DEFAULT_RETRY_SECONDS) ||
-        quote.network_fee.value <= 0 || quote.reserved_dgb_inputs.empty() ||
-        quote.reserved_dgb_inputs.size() > MAX_PAYMENT_INTENT_INPUTS) {
+        intent.recipient_amount.value > offer.max_payment.value) {
         error = "PAYMASTER_INVALID_QUOTE_LIMITS";
         return false;
     }
-    std::set<COutPoint> provider_inputs;
-    for (const VerifiedDGBInput& input : quote.reserved_dgb_inputs) {
-        if (!ValidDGBInput(input) || !provider_inputs.insert(input.outpoint).second) {
-            error = "PAYMASTER_INVALID_QUOTE_DGB_INPUT";
-            return false;
-        }
-    }
-    if (quote.reserved_carrier && (!ValidCarrier(*quote.reserved_carrier) ||
-                                   !provider_inputs.insert(quote.reserved_carrier->outpoint).second)) {
-        error = "PAYMASTER_INVALID_QUOTE_CARRIER";
-        return false;
-    }
+    if (!ValidateQuoteResources(quote, MAX_QUOTE_TTL_SECONDS, now, error)) return false;
     const uint32_t expected_rate = offer.funding_model == FundingModel::USER_PAID ? offer.fee_rate_bps : 0;
     const auto computed_fee = ComputePaymasterFee(
         intent.recipient_amount, expected_rate,
@@ -359,30 +359,7 @@ bool ValidatePaymasterQuoteForClient(const PaymasterQuote& quote,
         error = binding_error.empty() ? "PAYMASTER_QUOTE_FEE_MISMATCH" : binding_error;
         return false;
     }
-    const bool carrier_fee = quote.service_fee.value > 0 && quote.service_fee.value < 100;
-    const bool normal_fee = quote.service_fee.value >= 100;
-    if (quote.reserved_carrier.has_value() != carrier_fee ||
-        quote.carrier_return_script.has_value() != carrier_fee ||
-        quote.provider_fee_script.has_value() != normal_fee ||
-        (quote.carrier_return_script && !IsP2TR(*quote.carrier_return_script)) ||
-        (quote.provider_fee_script && !IsP2TR(*quote.provider_fee_script)) ||
-        (quote.dgb_change_script && !IsP2TR(*quote.dgb_change_script))) {
-        error = "PAYMASTER_INVALID_QUOTE_FEE_OUTPUT";
-        return false;
-    }
-    if (quote.unsigned_txid.IsNull() || quote.template_commitment.IsNull() ||
-        CTransaction{quote.unsigned_transaction}.GetHash() != quote.unsigned_txid) {
-        error = "PAYMASTER_INVALID_QUOTE_TRANSACTION";
-        return false;
-    }
-    if (quote.identity_signature.size() != 64 ||
-        !provider_identity_key.VerifySchnorr(GetPaymasterQuoteSignatureHash(quote),
-                                             quote.identity_signature)) {
-        error = "PAYMASTER_INVALID_QUOTE_SIGNATURE";
-        return false;
-    }
-    error.clear();
-    return true;
+    return ValidateQuoteTransactionAndSignature(quote, provider_identity_key, error);
 }
 
 bool PreflightProviderQuoteRequest(
