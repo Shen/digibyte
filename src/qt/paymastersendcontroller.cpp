@@ -203,6 +203,16 @@ int SendController::nextPoll(bool state_changed)
     return m_state.pollIntervalMs;
 }
 
+bool SendController::shouldSuggestRecovery(qint64 epoch_seconds) const
+{
+    if (m_state.sessionState == QLatin1String("FAILED") ||
+        m_state.sessionState == QLatin1String("CONFLICTED")) return true;
+    return (m_state.sessionState == QLatin1String("AUTHORIZED") ||
+            m_state.sessionState == QLatin1String("PENDING_PROVIDER")) &&
+        m_state.sessionCreatedAt > 0 && epoch_seconds >= m_state.sessionCreatedAt &&
+        epoch_seconds - m_state.sessionCreatedAt >= MAX_PAYMASTER_ACTIVE_SEND_MS / 1000;
+}
+
 SendController::PollOperation SendController::beginPoll(const PollEvent& event)
 {
     const auto effect = advance(event);

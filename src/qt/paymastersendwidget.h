@@ -108,7 +108,6 @@ protected:
 private:
     friend class PaymasterWidgetTests;
     void updateHistoryWaitState();
-    bool activePaymasterSendExpired() const;
     bool hasMatchingPaymasterOffer() const;
     void updateFeeChoiceLayout();
     void setupFeeSection();
@@ -345,7 +344,6 @@ private:
     PaymasterAsyncRpcExecutorForTesting m_paymasterAsyncRpcExecutorForTesting;
     // Only the request explicitly started in this wallet view may advance on
     // the timer. Restored sessions have no continuation or signing authority.
-    static constexpr int MAX_PAYMASTER_ACTIVE_SEND_MS{120000};
     QFrame* m_offerCheckFrame{nullptr};
     QLabel* m_offerStateIcon{nullptr};
     QTimer* m_offerIconTimer{nullptr};

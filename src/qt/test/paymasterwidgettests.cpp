@@ -17189,13 +17189,13 @@ void PaymasterWidgetTests::paymasterPreparationClockStartsWithFirstReply()
     client->executePaymasterTransfer(QStringLiteral("RD3HXjF4ibdKEAHNwmv4AnwHWKsb2PgXsiMN5mtm5ao3XJmKLATx"), 325, false);
     QVERIFY(pending);
     QVERIFY(!client->m_send.m_state.activeSendStarted.isValid());
-    QVERIFY(!client->activePaymasterSendExpired());
+    QVERIFY(!client->m_send.activeSendExpired());
     auto result = PaymasterAuthorizationResult(false, "", "CREATED", "none");
     result.pushKV("request_id", client->m_send.m_state.requestId.toStdString());
     pending(result, {});
     QVERIFY2(warning.isEmpty(), qPrintable(warning));
     QVERIFY(client->m_send.m_state.activeSendStarted.isValid());
-    QVERIFY(!client->activePaymasterSendExpired());
+    QVERIFY(!client->m_send.activeSendExpired());
     client->m_paymasterPollTimer->stop();
 
     bool callback_received{false};
@@ -17208,7 +17208,7 @@ void PaymasterWidgetTests::paymasterPreparationClockStartsWithFirstReply()
     QCOMPARE(client->m_send.m_state.requestId, request);
     QTRY_VERIFY_WITH_TIMEOUT(callback_received, 5000);
     QCOMPARE(client->m_send.m_state.historyPausedAt, qint64{-1});
-    QVERIFY(!client->activePaymasterSendExpired());
+    QVERIFY(!client->m_send.activeSendExpired());
     client->m_paymasterPollTimer->stop();
 }
 
@@ -17655,6 +17655,26 @@ void PaymasterWidgetTests::paymasterSendControllerClockAndEffects()
     snapshot.unsigned_closed = true;
     QVERIFY(controller.applySnapshot(snapshot));
     QCOMPARE(controller.nextPoll(false), 0);
+
+    snapshot.unsigned_closed = false;
+    snapshot.state = QStringLiteral("PENDING_PROVIDER");
+    snapshot.artifact = QStringLiteral("user_psbt");
+    snapshot.created_at = 1000;
+    snapshot.allowed_actions = QStringList{QStringLiteral("refresh"), QStringLiteral("retry_same")};
+    QVERIFY(controller.applySnapshot(snapshot));
+    QVERIFY(!controller.shouldSuggestRecovery(999));
+    QVERIFY(!controller.shouldSuggestRecovery(1119));
+    QVERIFY(controller.shouldSuggestRecovery(1120));
+    QVERIFY(controller.beginRetry());
+    now += 120000;
+    QCOMPARE(controller.advance({true, false}), Controller::Effect::RETRY);
+    now += 1;
+    QCOMPARE(controller.advance({true, false}), Controller::Effect::TIMED_OUT);
+    controller.beginPoll({true, false});
+    QCOMPARE(controller.advance({true, false}), Controller::Effect::OBSERVE);
+    snapshot.state = QStringLiteral("CONFLICTED");
+    QVERIFY(controller.applySnapshot(snapshot));
+    QVERIFY(controller.shouldSuggestRecovery(999));
 }
 
 void PaymasterWidgetTests::paymasterSendControllerCancellationAndWalletChange()

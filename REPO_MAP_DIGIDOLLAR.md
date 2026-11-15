@@ -1240,6 +1240,9 @@ is in `paymasterproviderview.h` (re-exported by `paymasterwidget.h`).
 coalescing, structured failures and shutdown joins. `paymastersendcontroller.*`
 validates session snapshots and makes failure decisions from structured backend
 facts. Diagnostic text is not authority to discard an ambiguous payment.
+The controller owns the active-send deadline for polling and direct retries,
+and the age threshold for suggesting recovery. After timeout it observes saved
+work without continuing execution.
 
 Provider setup, settings, status, funds, activity and finance UI backed by
 Core/shared setup. Service readiness is separate from maintenance progress.

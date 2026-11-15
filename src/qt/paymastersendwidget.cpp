@@ -1054,11 +1054,6 @@ bool PaymasterSendWidget::historyBlocksPreparation() const
          !m_walletModel->digiDollarHistoryRefreshError().isEmpty());
 }
 
-bool PaymasterSendWidget::activePaymasterSendExpired() const
-{
-    return m_send.activeSendExpired();
-}
-
 void PaymasterSendWidget::updateHistoryWaitState()
 {
     if (!m_historyStatus) return;
@@ -1295,12 +1290,7 @@ void PaymasterSendWidget::updatePaymasterFocusMode()
             m_send.view().attemptState == QStringLiteral("REJECTED")
                 ? DigiDollarSendWidget::tr("Check another offer")
                 : DigiDollarSendWidget::tr("Try another Paymaster"));
-    } else if ((m_send.view().sessionState == QStringLiteral("FAILED") ||
-                m_send.view().sessionState == QStringLiteral("CONFLICTED") ||
-                ((m_send.view().sessionState == QStringLiteral("AUTHORIZED") ||
-                  m_send.view().sessionState == QStringLiteral("PENDING_PROVIDER")) &&
-                 m_send.view().sessionCreatedAt > 0 &&
-                 QDateTime::currentSecsSinceEpoch() - m_send.view().sessionCreatedAt >= MAX_PAYMASTER_ACTIVE_SEND_MS / 1000)) && safe_recovery) {
+    } else if (m_send.shouldSuggestRecovery(QDateTime::currentSecsSinceEpoch()) && safe_recovery) {
         m_paymasterPrimaryAction = PaymasterPrimaryAction::RECOVER;
         m_paymasterPrimaryButton->setText(DigiDollarSendWidget::tr("Prepare return to this wallet…"));
     } else {
@@ -4058,11 +4048,12 @@ void PaymasterSendWidget::continuePaymasterRetry()
     if (!m_walletModel || m_send.view().busy || m_privacy ||
         m_send.view().activeRetryRequest.isEmpty() ||
         m_send.view().activeRetryRequest != m_send.view().requestId) return;
-    if (!m_send.view().activeRetryStarted.isValid() ||
-        m_send.view().activeRetryStarted.hasExpired(MAX_PAYMASTER_ACTIVE_SEND_MS)) {
+    const auto effect = m_send.advance({m_walletModel != nullptr, false});
+    if (effect == PaymasterQt::SendController::Effect::TIMED_OUT) {
         observePaymasterOutcome();
         return;
     }
+    if (effect != PaymasterQt::SendController::Effect::RETRY) return;
     UniValue lookup{UniValue::VOBJ};
     lookup.pushKV("request_id", m_send.view().requestId.toStdString());
     UniValue params{UniValue::VARR};

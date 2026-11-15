@@ -108,6 +108,7 @@ public:
     void observationFailed();
     bool canContinue(bool wallet_available) const;
     bool activeSendExpired() const;
+    bool shouldSuggestRecovery(qint64 epoch_seconds) const;
     void historyWaiting(bool waiting);
     void stop();
     void walletChanged();
