@@ -161,6 +161,9 @@ public:
         DigiDollar::Paymaster::PaymentSession& session) const;
     bool GetSessionByRequestId(const std::string& request_id,
                                DigiDollar::Paymaster::PaymentSession& session) const;
+    /** Verify a compacted client closure against its canonical tombstone. */
+    bool IsPrunedClientSession(const DigiDollar::Paymaster::PaymentSession& session,
+                               std::string& error) const;
     /** Preserve missing/index/read/version failures for RPC status inspection. */
     DatabaseReadStatus GetSessionBySessionIdWithStatus(
         const uint256& session_id,

@@ -271,7 +271,8 @@ bool SendController::observeAbsence(const RpcError& error)
 bool SendController::clearAfterClosure()
 {
     if (!m_state.requestId.isEmpty() && !m_state.observationAvailable && !m_absence_verified) return false;
-    if (!m_state.requestId.isEmpty() && !m_state.unsignedClosed && !m_completion_verified && !m_absence_verified) return false;
+    if (!m_state.requestId.isEmpty() && !m_state.unsignedClosed && !m_completion_verified && !m_absence_verified &&
+        !allows(QStringLiteral("dismiss"))) return false;
     resetSession();
     return true;
 }
@@ -280,6 +281,11 @@ SendController::Completion SendController::completion(const UniValue& result)
 {
     invalidateClosure();
     if (!m_state.observationAvailable) return {CompletionKind::NONE};
+    if (m_state.artifact == QLatin1String("pruned_session") && allows(QStringLiteral("dismiss"))) {
+        stop();
+        m_state.recoveryActive = false;
+        return {CompletionKind::PRUNED_CLOSED};
+    }
     const auto& embedded = result.find_value("session");
     const auto& session = embedded.isObject() ? embedded : result;
     const auto& status = session.find_value("status");
@@ -630,6 +636,7 @@ bool IsKnownAttemptState(const QString& state)
 bool IsKnownPaymasterArtifact(const QString& artifact)
 {
     return artifact == QStringLiteral("none") ||
+        artifact == QStringLiteral("pruned_session") ||
         artifact == QStringLiteral("user_psbt") ||
         artifact == QStringLiteral("final_transaction") ||
         artifact == QStringLiteral("alternative_recovery");
@@ -648,6 +655,7 @@ bool IsKnownPaymasterResultStatus(const QString& status)
 bool IsKnownPaymasterAction(const QString& action)
 {
     return action == QStringLiteral("refresh") ||
+        action == QStringLiteral("dismiss") ||
         action == QStringLiteral("resume") ||
         action == QStringLiteral("retry_same") ||
         action == QStringLiteral("fallback") ||
@@ -885,7 +893,31 @@ bool SendController::decodeSnapshot(const UniValue& result,
         error = QStringLiteral("refresh response omitted allowed actions");
         return false;
     }
+    if (!wrapped && (snapshot.artifact == QStringLiteral("pruned_session") ||
+                     snapshot.allowed_actions.contains(QStringLiteral("dismiss")))) {
+        error = QStringLiteral("pruned closure requires an authoritative session");
+        return false;
+    }
     if (wrapped) {
+        const bool pruned = snapshot.artifact == QStringLiteral("pruned_session");
+        const bool dismiss = snapshot.allowed_actions.contains(QStringLiteral("dismiss"));
+        qint64 attempts_count{-1};
+        const auto& reserved = session.find_value("reserved_user_inputs");
+        if (pruned != dismiss || (pruned &&
+            (!snapshot.reported_final ||
+             (!IsTerminalPaymasterState(snapshot.state) && snapshot.state != QLatin1String("FAILED") &&
+              snapshot.state != QLatin1String("CONFLICTED")) ||
+             snapshot.allowed_actions.size() != 2 || !snapshot.allowed_actions.contains(QStringLiteral("refresh")) ||
+             !attempt.isNull() || !recovery.isNull() || requires_attention.get_bool() ||
+             session.exists("created_at") || session.exists("updated_at") ||
+             !snapshot.pending_phase.isEmpty() || !snapshot.recipient.isEmpty() ||
+             !ReadInt64(session, "provider_attempts", attempts_count) || attempts_count != 0 ||
+             !reserved.isArray() || !reserved.empty() ||
+             session.find_value("payment_confirmed").isTrue() ||
+             !result.find_value("result_status").isNull() || !result.find_value("result_sequence").isNull()))) {
+            error = QStringLiteral("invalid pruned session closure");
+            return false;
+        }
         const bool recovery_artifact =
             snapshot.artifact == QStringLiteral("alternative_recovery");
         if (recovery_artifact != recovery.isObject() ||
@@ -958,7 +990,7 @@ bool SendController::decodeSnapshot(const UniValue& result,
                                            snapshot.state == QStringLiteral("CREATED") &&
                                            snapshot.artifact == QStringLiteral("none") &&
                                            !attempt.isObject();
-        if (snapshot.recipient.isEmpty() && !recipientless_created && !recipientless_closed) {
+        if (snapshot.recipient.isEmpty() && !recipientless_created && !recipientless_closed && !pruned) {
             error = QStringLiteral(
                 "session recipient is unavailable for an actionable artifact");
             return false;

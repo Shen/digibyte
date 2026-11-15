@@ -164,6 +164,17 @@ flow; it is not a `resolvepaymastersession` action string. That RPC accepts
 the current guards. State may change after inspection, so handle rejection of
 an action that was previously allowed.
 
+After detail pruning, a validated client tombstone is returned with
+`artifact: "pruned_session"` and `allowed_actions: ["refresh", "dismiss"]`.
+Unavailable creation/update times are omitted. `dismiss` is a local frontend
+capability to clear the selected closed order and compose a new transfer; it is
+not an RPC mutation. It establishes neither a current payment receipt nor an
+exact recipient/fee amount. Qt accepts this sparse closure only in an
+authoritative wrapped snapshot, without live attempts, recovery, inputs or
+payment-confirmation claims. A failed subsequent observation revokes dismissal
+until another valid read. Retained transaction IDs remain locators, not proof of
+payment success.
+
 New public sessions expose `resume_order`, containing the original canonical
 recipient, amount semantics, fee cap, selection, attempt limit and ordered inputs.
 Use these validated parameters for high-level resumption, then request exact

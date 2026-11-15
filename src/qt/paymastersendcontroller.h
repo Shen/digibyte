@@ -83,7 +83,7 @@ public:
     enum class RecoveryEffect { MISSING_MANIFEST, CHANGED_COMMITMENT, INVALID_EXPIRY, EXPIRED, INVALID_ACCEPTANCE, REVIEW, REJECTED, UNKNOWN_PHASE, INVALID_BROADCAST, POLL };
     struct RecoveryDecision { RecoveryEffect effect; QString phase; QString broadcast_error; bool broadcast{false}; };
     RecoveryDecision recoveryReply(const UniValue& result, const PaymasterRecoveryConfirmationSelection& selection, qint64 now);
-    enum class CompletionKind { NONE, ATTENTION, UNSIGNED_CLOSED, ALREADY_SHOWN, PAYMENT_UNVERIFIED, PAYMENT, RECOVERY_UNVERIFIED, RECOVERY_MISMATCH, RECOVERY };
+    enum class CompletionKind { NONE, ATTENTION, UNSIGNED_CLOSED, ALREADY_SHOWN, PAYMENT_UNVERIFIED, PAYMENT, RECOVERY_UNVERIFIED, RECOVERY_MISMATCH, RECOVERY, PRUNED_CLOSED };
     struct Completion { CompletionKind kind; qint64 recipient_cents{0}; };
     Completion completion(const UniValue& result);
     CompletionKind directCompletion(const UniValue& result);

@@ -630,8 +630,8 @@ UniValue ToJSON(const SessionSnapshot& snapshot)
         result.pushKV("pending_phase", std::string{PendingPhaseName(session.pending_phase)});
     }
     AddSessionPaymentStatus(result, snapshot);
-    result.pushKV("created_at", session.created_at);
-    result.pushKV("updated_at", session.updated_at);
+    if (session.created_at > 0) result.pushKV("created_at", session.created_at);
+    if (session.updated_at > 0) result.pushKV("updated_at", session.updated_at);
     if (!session.final_txid.IsNull()) result.pushKV("txid", session.final_txid.GetHex());
     if (!session.recovery_txid.IsNull()) {
         result.pushKV("recovery_txid", session.recovery_txid.GetHex());

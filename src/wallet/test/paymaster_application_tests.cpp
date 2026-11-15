@@ -337,6 +337,18 @@ BOOST_FIXTURE_TEST_CASE(client_order_replay_uses_persisted_terms_and_existing_ha
     BOOST_CHECK(reopened.GetClientPaymentOrderWithStatus(original.request_id, pruned_order) == DatabaseReadStatus::NOT_FOUND);
     BOOST_REQUIRE(reopened.GetSessionByRequestId(original.request_id, restored_session));
     BOOST_CHECK(restored_session.canonical_request_hash == replay_hash); // Tombstone identity survives detail pruning.
+    BOOST_REQUIRE(reopened.IsPrunedClientSession(restored_session, error));
+    const auto closed = CaptureClientSession(reopened, restored_session, "refresh");
+    BOOST_CHECK_EQUAL(closed.view.artifact, "pruned_session");
+    BOOST_CHECK(closed.view.allowed_actions == std::vector<std::string>({"refresh", "dismiss"}));
+    const auto encoded_closed = ToJSON(closed);
+    BOOST_CHECK(!encoded_closed.find_value("session").exists("created_at"));
+    BOOST_CHECK(!encoded_closed.find_value("session").exists("updated_at"));
+    BOOST_CHECK(!encoded_closed.find_value("session").find_value("payment_confirmed").get_bool());
+    auto invalid_closed = restored_session;
+    invalid_closed.canonical_request_hash = uint256::ONE;
+    BOOST_CHECK(!reopened.IsPrunedClientSession(invalid_closed, error));
+
 
     auto invented = valid_order;
     invented.request_id = "550e8400-e29b-41d4-a716-446655440022";

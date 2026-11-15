@@ -264,6 +264,34 @@ DatabaseReadStatus PaymasterStore::GetSessionByRequestIdWithStatus(
     return DatabaseReadStatus::FOUND;
 }
 
+bool PaymasterStore::IsPrunedClientSession(const PaymentSession& session, std::string& error) const
+{
+    LOCK(m_wallet.cs_wallet);
+    WalletBatch batch{m_wallet.GetDatabase()};
+    PaymentSession live;
+    IdempotencyTombstone tombstone;
+    if (session.provider_side || session.created_at != 0 || session.updated_at != 0 ||
+        session.canonical_request_hash.IsNull() ||
+        !session.attempt_ids.empty() || !session.user_inputs.empty() ||
+        batch.ReadPaymasterSessionWithStatus(session.request_id, live) != DatabaseReadStatus::NOT_FOUND ||
+        batch.ReadPaymasterTombstoneWithStatus(session.request_id, tombstone) != DatabaseReadStatus::FOUND ||
+        tombstone.session_id != session.session_id ||
+        tombstone.canonical_request_hash != session.canonical_request_hash ||
+        tombstone.fee_mode_requested != session.fee_mode_requested ||
+        tombstone.fee_mode_used != session.fee_mode_used ||
+        tombstone.requested_amount != session.requested_amount ||
+        tombstone.subtract_paymaster_fee_from_amount != session.subtract_paymaster_fee_from_amount ||
+        tombstone.send_all_spendable_dd != session.send_all_spendable_dd ||
+        session.pending_phase != PendingPhase::NONE ||
+        tombstone.final_state != session.state ||
+        tombstone.final_txid != (session.state == SessionState::CANCELED_SAFE ? session.recovery_txid : session.final_txid)) {
+        error = "PAYMASTER_PRUNED_SESSION_BINDING_MISMATCH";
+        return false;
+    }
+    error.clear();
+    return true;
+}
+
 bool PaymasterStore::GetSessionBySessionId(const uint256& session_id, PaymentSession& session) const
 {
     return GetSessionBySessionIdWithStatus(session_id, session) == DatabaseReadStatus::FOUND;

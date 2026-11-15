@@ -1195,6 +1195,7 @@ void PaymasterSendWidget::updatePaymasterFocusMode()
     // A closed session permits composing another transfer, independently of
     // whether retained artifacts can still prove its outcome.
     const bool completed = m_send.view().observationAvailable && (m_send.view().unsignedClosed ||
+        m_send.allows(QStringLiteral("dismiss")) ||
         m_send.view().sessionState == QStringLiteral("CONFIRMED") ||
         m_send.view().sessionState == QStringLiteral("CANCELED_SAFE") ||
         m_send.view().confirmationState == QStringLiteral("payment_confirmed") ||
@@ -3497,6 +3498,13 @@ bool PaymasterSendWidget::handleAuthoritativePaymasterCompletion(
     using CompletionKind = PaymasterQt::SendController::CompletionKind;
     const auto completion = m_send.completion(result);
     if (completion.kind == CompletionKind::NONE) return false;
+    if (completion.kind == CompletionKind::PRUNED_CLOSED) {
+        stopPaymasterPolling();
+        m_paymasterStateValue->setText(DigiDollarSendWidget::tr("Request closed; detailed payment history is no longer retained"));
+        m_send.markNoticeShown();
+        applyPaymasterPrivacy();
+        return true;
+    }
     stopPaymasterPolling();
     m_send.stopRecovery();
     const QPointer<PaymasterSendWidget> guard{this};
@@ -3970,7 +3978,8 @@ void PaymasterSendWidget::observePaymasterSession(
                 guard->m_send.view().sessionState == QStringLiteral("FAILED") ||
                 guard->m_send.view().sessionState == QStringLiteral("CONFLICTED");
             guard->setPaymasterBusy(false);
-            if (continuation) continuation(terminal_handled && (!attention_state || guard->m_send.view().unsignedClosed));
+            if (continuation) continuation(terminal_handled && (!attention_state || guard->m_send.view().unsignedClosed ||
+                guard->m_send.allows(QStringLiteral("dismiss"))));
         });
 }
 

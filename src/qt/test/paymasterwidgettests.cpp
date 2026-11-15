@@ -48,6 +48,7 @@
 #include <wallet/paymasterapplication_internal.h>
 #include <wallet/paymasterclient.h>
 #include <wallet/paymasterstore.h>
+#include <wallet/paymasterclientview.h>
 #include <wallet/rpc/paymaster_internal.h>
 #include <wallet/scriptpubkeyman.h>
 #include <wallet/test/util.h>
@@ -17330,6 +17331,50 @@ void PaymasterWidgetTests::paymasterSendControllerClosureFreshness()
 {
     using Controller = PaymasterQt::SendController;
     Controller controller;
+    // Exercise the native encoder consumed by Qt, including sparse timestamps
+    // and absent recipient/payment proof after authoritative detail pruning.
+    for (const auto state : {DigiDollar::Paymaster::SessionState::CONFIRMED,
+                             DigiDollar::Paymaster::SessionState::CANCELED_SAFE,
+                             DigiDollar::Paymaster::SessionState::FAILED}) {
+        wallet::paymaster_app::ClientRecoveryResult closed;
+        closed.action = "refresh";
+        closed.session.session.emplace();
+        auto& persisted = closed.session.session->session;
+        persisted.request_id = "550e8400-e29b-41d4-a716-446655440001";
+        persisted.session_id = uint256S("aa");
+        persisted.canonical_request_hash = uint256S("bb");
+        persisted.state = state;
+        persisted.fee_mode_requested = DigiDollar::Paymaster::FeeMode::PAYMASTER;
+        persisted.fee_mode_used = DigiDollar::Paymaster::FeeMode::PAYMASTER;
+        if (state == DigiDollar::Paymaster::SessionState::CONFIRMED) persisted.final_txid = uint256S("cc");
+        if (state == DigiDollar::Paymaster::SessionState::CANCELED_SAFE) persisted.recovery_txid = uint256S("dd");
+        closed.session.session->observation_requested = true;
+        closed.view.artifact = "pruned_session";
+        closed.view.allowed_actions = {"refresh", "dismiss"};
+        const auto encoded = wallet::paymaster_rpc::internal::ToJSON(closed);
+        QVERIFY(!encoded.find_value("session").exists("created_at"));
+        PaymasterQt::PaymasterSessionSnapshot decoded;
+        QString error;
+        QVERIFY2(Controller::decodeSnapshot(encoded, decoded, error), qPrintable(error));
+        Controller selected;
+        QVERIFY(selected.restoreRequest(QString::fromStdString(persisted.request_id)));
+        QVERIFY(selected.applySnapshot(decoded));
+        QCOMPARE(selected.completion(encoded).kind, Controller::CompletionKind::PRUNED_CLOSED);
+        QVERIFY(!selected.m_completion_verified);
+        selected.observationFailed();
+        QVERIFY(!selected.clearAfterClosure());
+        QVERIFY(selected.applySnapshot(decoded));
+        QCOMPARE(selected.completion(encoded).kind, Controller::CompletionKind::PRUNED_CLOSED);
+        QVERIFY(selected.clearAfterClosure());
+        QVERIFY(selected.view().requestId.isEmpty());
+        for (const auto malformed : {0, 1, 2}) {
+            auto invalid = closed;
+            if (malformed == 0) invalid.view.artifact = "none";
+            if (malformed == 1) invalid.view.allowed_actions.push_back("retry_same");
+            if (malformed == 2) invalid.session.session->session.created_at = 100;
+            QVERIFY(!Controller::decodeSnapshot(wallet::paymaster_rpc::internal::ToJSON(invalid), decoded, error));
+        }
+    }
     PaymasterQt::PaymasterSessionSnapshot snapshot;
     snapshot.request_id = QStringLiteral("completed-request");
     snapshot.session_id = QString(64, '1');

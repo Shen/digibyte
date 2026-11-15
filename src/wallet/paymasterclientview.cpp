@@ -266,6 +266,14 @@ bool LoadClientSessionView(PaymasterStore& store,
         error = "PAYMASTER_CLIENT_SESSION_REQUIRED";
         return false;
     }
+    if (session.created_at == 0) {
+        if (!store.IsPrunedClientSession(session, error)) return false;
+        // This proves order closure, not a current payment receipt. Financial
+        // details and live confirmation evidence were deliberately pruned.
+        view.artifact = "pruned_session";
+        view.allowed_actions = {"refresh", "dismiss"};
+        return true;
+    }
 
     std::vector<ProviderAttempt> attempts;
     attempts.reserve(session.attempt_ids.size());
