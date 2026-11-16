@@ -6420,7 +6420,9 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
         return;
     }
 
-    if (!wallet_change_stage.isEmpty()) {
+    // The lost-safety row exercises the full saved-write/retry assertions below;
+    // only the two explicit wallet-change rows belong to this early-return path.
+    if (wallet_change_stage == QLatin1String("open") || wallet_change_stage == QLatin1String("preview")) {
         auto* panel = static_cast<DigiDollarPaymasterWidget*>(
             tab.findChild<QWidget*>(QStringLiteral("paymasterWidget")));
         QVERIFY(panel);
@@ -6522,7 +6524,7 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
         "maximum_maintenance_fee_per_hour_satoshis", 200000000);
     unconfigured_liquidity_policy.pushKV(
         "maximum_maintenance_fee_per_day_satoshis", 1000000000);
-    UniValue unconfigured_liquidity{UniValue::VOBJ};
+    UniValue unconfigured_liquidity = PaymasterLiquidityStatus("ready", false, true, 0);
     unconfigured_liquidity.pushKV("policy_configured", false);
     unconfigured_liquidity.pushKV(
         "targets_satisfy_provider_policy", true);
@@ -6581,7 +6583,7 @@ void PaymasterWidgetTests::paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep(
         wizard->reject();
     });
     guided_setup->click();
-    QVERIFY(review_cancelled_without_writes);
+    QVERIFY2(review_cancelled_without_writes, qPrintable(provider_status->text()));
     QVERIFY(seven_numbered_pages);
     QVERIFY(current_backup_guidance);
     QVERIFY(no_unused_legacy_budget);

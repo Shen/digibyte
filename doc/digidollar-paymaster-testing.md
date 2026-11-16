@@ -59,6 +59,12 @@ real wallet construction/signing with a mock chain, then repeats the saved
 execution without changing its witness, ledger or transaction count. These are
 simulated crash residues and commit failures, not physical power-loss tests.
 Retain the adjacent checkpoint, finance, ordinary lock and final-execution cases.
+For Qt use the environment filters below to select
+`paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep` and the neighboring
+liquidity approval, typed offer-policy and reserve-preset functions. Positive
+setup fixtures must provide complete liquidity observations; malformed and
+unavailable snapshots still reject writes. The `lost-safety` row must reach its
+saved-write/retry assertions, while `open`/`preview` retain wallet-change closure.
 
 For exact observation and early result failure boundaries, select
 `paymaster_wallet_security_tests/exact_final_observation_rechecks_chain_pools_and_snapshot`,

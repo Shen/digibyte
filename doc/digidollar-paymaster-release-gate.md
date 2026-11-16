@@ -12,18 +12,20 @@ and shared pool-target validation `5087d0bdfc`. Temporary filenames no longer
 reuse a native financial token; exclusive creation preserves abandoned paths.
 Setup, liquidity and pool operations retain their distinct funding/retirement
 contracts through shared target validators. No boundary policy was expanded.
+The operator-approved Qt-test follow-up starts at `4c71feb79c`: complete the
+positive liquidity fixture and route `lost-safety` through its recovery checks.
 
 | Actual local check | Result and scope |
 | --- | --- |
 | Native, final partial link | **53 distinct selected cases / 13,423 assertions, exit 0**, in two nonoverlapping selections. Covers partial/full temporary files and directories, failed accounting commit, exact wallet/SQLite reopen, signed carrier-history replay, stale clones, checkpoint concurrency, common offer filters, gross rounding, recovery/privacy ordering, setup approvals/lost replies, retained-target retirement, manual locks, exact final observation and ordinary DGB reannouncement. Unselected cases were not run. |
 | Negative checkpoint control | Both native pool-accounting recovery and signed carrier-history replay fail with the old checkpoint object and the same current test/caller objects. This is an isolated producer comparison, not a clean historical build. |
-| Qt, partial link | **Three selected functions / 15 data rows, exit 0**, excluding init/cleanup: liquidity approval defaults, typed offer-policy values and reserve presets; Windows/Fusion. The current production objects are linked with retained Qt/test dependencies. |
-| Open Qt setup regression | `paymasterGuidedSetupBoundsSafetyAndRetriesFailedStep` has four failing rows and ten passing rows. The `already-funded` failure also reproduces with the retained baseline Qt executable below; the existing setup fixture/branch correction is not included. These failures remain open and are not counted as passes. |
-| Compilation | Five changed production translation units and five changed native test units freshly compiled with MSVC 19.43/toolset 14.43, C++20. All five production units also pass C++17 `/Zs`. Current source/object fingerprints match; retained dependencies lack complete transitive rebuild provenance. |
+| Qt, final partial link | **Four selected functions / 29 data rows, exit 0**, excluding init/cleanup: all 14 setup rows, liquidity approval defaults, typed offer-policy values and reserve presets; Windows/Fusion. Includes encrypted start, lost safety response, safe review cancellation, and every wallet-change/privacy row. The current production objects are linked with retained Qt dependencies and the freshly compiled test unit. |
+| Qt setup regression control | Before the fixture correction four setup rows failed; `already-funded` also failed with the retained baseline Qt executable below. The complete positive fixture now reaches the wizard, and `lost-safety` reaches its existing saved-write/retry assertions instead of the wallet-change early return. No data rows or assertions were removed; malformed/unavailable observations still reject writes. All 14 setup rows now pass. |
+| Compilation | Five changed production translation units and five changed native test units freshly compiled with MSVC 19.43/toolset 14.43, C++20, plus the corrected Qt test unit in the approved follow-up. All five production units also pass C++17 `/Zs`. All eleven current source/object fingerprints match; retained dependencies lack complete transitive rebuild provenance. |
 | Architecture | Working-tree dependency/cycle checks, six boundary fixtures, change-record JSON and whitespace checks pass. Committed changed-path/shared-Core validation uses the trusted review baseline above. |
 
 SHA256: native `13f782430b71f55991ea49ea1b15f332e5ed4539b0ddfb943914436874218f60`;
-Qt `2278f6a7065cf8b5a6008e9d87629dc7ee1901154f3f98469632d46e20337119`.
+Qt `85abd179b1ed66a660e5455ac1c83e4459a33b8f153e49df712e0b93f6a3b400`.
 The baseline Qt negative control uses
 `cff1e7dd6dc2e16d3f97da27279df89088dfa29e6c198d27bdc6bf1c6551da52`.
 Commands, selections, failed/passing logs, random-context/test seeds and object
